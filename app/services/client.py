@@ -69,17 +69,19 @@ class GeminiClientWrapper(GeminiClient):
                     else:
                         raise ValueError("File must contain 'file_data' key")
 
-        needs_hint = "<" in model_input and "```xml" not in model_input
+        # This is a workaround for Gemini Web's displaying issues with XML blocks.
+        # Add this for tool calling
+        if "<" in model_input and ">" in model_input:
+            hint = XML_WRAP_HINT
+        else:
+            hint = ""
 
         # Add role tag if needed
-        if model_input and tagged:
-            if needs_hint:
-                model_input = add_tag(message.role, model_input + XML_WRAP_HINT)
+        if model_input:
+            if tagged:
+                model_input = add_tag(message.role, model_input + hint)
             else:
-                model_input = add_tag(message.role, model_input)
-        else:
-            if needs_hint:
-                model_input += XML_WRAP_HINT
+                model_input += hint
 
         return model_input, files
 
@@ -94,7 +96,7 @@ class GeminiClientWrapper(GeminiClient):
         # Determine once whether we need to wrap messages with role tags: only required
         # if the history already contains assistant/system messages. When every message
         # so far is from the user, we can skip tagging entirely.
-        need_tag = any(m.role in ("assistant", "system") for m in messages)
+        need_tag = any(m.role != "user" for m in messages)
 
         conversation: list[str] = []
         files: list[Path | str] = []
