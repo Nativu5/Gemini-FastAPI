@@ -71,7 +71,7 @@ class GeminiClientWrapper(GeminiClient):
 
         # This is a workaround for Gemini Web's displaying issues with XML blocks.
         # Add this for tool calling
-        if "<" in model_input and ">" in model_input:
+        if re.search(r"<\s*[^>]+>", model_input):
             hint = XML_WRAP_HINT
         else:
             hint = ""
