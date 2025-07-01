@@ -27,6 +27,18 @@ from .middleware import get_temp_dir, verify_api_key
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 
+CONTINUATION_HINT = "\n(More messages to come, please reply with just 'ok.')"
+
+
+def _text_from_message(message: Message) -> str:
+    """Return text content from a message for token estimation."""
+    if isinstance(message.content, str):
+        return message.content
+    return "\n".join(
+        item.text or "" for item in message.content if getattr(item, "type", "") == "text"
+    )
+
+
 router = APIRouter()
 
 
@@ -110,18 +122,20 @@ async def create_chat_completion(
         if len(text) <= MAX_CHARS_PER_REQUEST:
             # No need to split - a single request is fine.
             return await session.send_message(text, files=files)
+        hint_len = len(CONTINUATION_HINT)
+        chunk_size = MAX_CHARS_PER_REQUEST - hint_len
 
         chunks: list[str] = []
         pos = 0
         total = len(text)
         while pos < total:
-            end = min(pos + MAX_CHARS_PER_REQUEST, total)
+            end = min(pos + chunk_size, total)
             chunk = text[pos:end]
             pos = end
 
             # If this is NOT the last chunk, add the continuation hint.
             if end < total:
-                chunk += "\n(More messages to come, please reply with just 'ok'.)"
+                chunk += CONTINUATION_HINT
             chunks.append(chunk)
 
         # Fire off all but the last chunk, discarding the interim "ok" replies.
@@ -243,7 +257,7 @@ def _create_streaming_response(
     """Create streaming response with `usage` calculation included in the final chunk."""
 
     # Calculate token usage
-    prompt_tokens = sum(estimate_tokens(msg.content) for msg in messages)
+    prompt_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
     completion_tokens = estimate_tokens(model_output)
     total_tokens = prompt_tokens + completion_tokens
 
@@ -299,7 +313,7 @@ def _create_standard_response(
 ) -> dict:
     """Create standard response"""
     # Calculate token usage
-    prompt_tokens = sum(estimate_tokens(msg.content) for msg in messages)
+    prompt_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
     completion_tokens = estimate_tokens(model_output)
     total_tokens = prompt_tokens + completion_tokens
 
