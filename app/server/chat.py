@@ -24,6 +24,9 @@ from ..utils import g_config
 from ..utils.helper import estimate_tokens
 from .middleware import get_temp_dir, verify_api_key
 
+# Maximum characters Gemini Web can accept in a single request (configurable)
+MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
+
 router = APIRouter()
 
 
@@ -65,9 +68,7 @@ async def create_chat_completion(
         )
 
     # Check if conversation is reusable
-    session, client, remaining_messages = _find_reusable_session(
-        db, pool, model, request.messages
-    )
+    session, client, remaining_messages = _find_reusable_session(db, pool, model, request.messages)
 
     if session:
         # Prepare the model input depending on how many turns are missing.
@@ -80,7 +81,7 @@ async def create_chat_completion(
                 remaining_messages, tmp_dir
             )
         logger.debug(
-            f"Reused session {session.metadata} – sending {len(remaining_messages)} new messages."
+            f"Reused session {session.metadata} - sending {len(remaining_messages)} new messages."
         )
     else:
         # Start a new session and concat messages into a single string
@@ -97,9 +98,6 @@ async def create_chat_completion(
             raise
         logger.debug("New session started.")
 
-    # Maximum characters Gemini Web can accept in a single request (configurable)
-    MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
-
     async def _send_with_split(session, text: str, files: list[Path | str] | None = None):
         """Send text to Gemini, automatically splitting into multiple batches if it is
         longer than ``MAX_CHARS_PER_REQUEST``.
@@ -110,7 +108,7 @@ async def create_chat_completion(
         that Gemini can produce the actual answer.
         """
         if len(text) <= MAX_CHARS_PER_REQUEST:
-            # No need to split – a single request is fine.
+            # No need to split - a single request is fine.
             return await session.send_message(text, files=files)
 
         chunks: list[str] = []
@@ -183,6 +181,7 @@ async def create_chat_completion(
         return _create_standard_response(
             model_output, completion_id, timestamp, request.model, request.messages
         )
+
 
 # --- Helper to find reusable session with partial history ---
 def _find_reusable_session(
