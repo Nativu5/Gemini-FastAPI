@@ -7,7 +7,6 @@
 *.egg-info
 .ruff_cache
 __pycache__
-uv.lock
 
 .env
 config.debug.yaml
