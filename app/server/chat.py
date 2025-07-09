@@ -5,6 +5,7 @@ from pathlib import Path
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
+from gemini_webapi.client import ChatSession
 from gemini_webapi.constants import Model
 from loguru import logger
 
@@ -28,15 +29,6 @@ from .middleware import get_temp_dir, verify_api_key
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 
 CONTINUATION_HINT = "\n(More messages to come, please reply with just 'ok.')"
-
-
-def _text_from_message(message: Message) -> str:
-    """Return text content from a message for token estimation."""
-    if isinstance(message.content, str):
-        return message.content
-    return "\n".join(
-        item.text or "" for item in message.content if getattr(item, "type", "") == "text"
-    )
 
 
 router = APIRouter()
@@ -110,45 +102,6 @@ async def create_chat_completion(
             raise
         logger.debug("New session started.")
 
-    async def _send_with_split(session, text: str, files: list[Path | str] | None = None):
-        """Send text to Gemini, automatically splitting into multiple batches if it is
-        longer than ``MAX_CHARS_PER_REQUEST``.
-
-        Every intermediate batch (that is **not** the last one) is suffixed with a hint
-        telling Gemini that more content will come, and it should simply reply with
-        "ok". The final batch carries any file uploads and the real user prompt so
-        that Gemini can produce the actual answer.
-        """
-        if len(text) <= MAX_CHARS_PER_REQUEST:
-            # No need to split - a single request is fine.
-            return await session.send_message(text, files=files)
-        hint_len = len(CONTINUATION_HINT)
-        chunk_size = MAX_CHARS_PER_REQUEST - hint_len
-
-        chunks: list[str] = []
-        pos = 0
-        total = len(text)
-        while pos < total:
-            end = min(pos + chunk_size, total)
-            chunk = text[pos:end]
-            pos = end
-
-            # If this is NOT the last chunk, add the continuation hint.
-            if end < total:
-                chunk += CONTINUATION_HINT
-            chunks.append(chunk)
-
-        # Fire off all but the last chunk, discarding the interim "ok" replies.
-        for chk in chunks[:-1]:
-            try:
-                await session.send_message(chk)
-            except Exception as e:
-                logger.exception(f"Error sending chunk to Gemini: {e}")
-                raise
-
-        # The last chunk carries the files (if any) and we return its response.
-        return await session.send_message(chunks[-1], files=files)
-
     # Generate response
     try:
         assert session and client, "Session and client not available"
@@ -197,13 +150,21 @@ async def create_chat_completion(
         )
 
 
-# --- Helper to find reusable session with partial history ---
+def _text_from_message(message: Message) -> str:
+    """Return text content from a message for token estimation."""
+    if isinstance(message.content, str):
+        return message.content
+    return "\n".join(
+        item.text or "" for item in message.content if getattr(item, "type", "") == "text"
+    )
+
+
 def _find_reusable_session(
     db: LMDBConversationStore,
     pool: GeminiClientPool,
     model: Model,
     messages: list[Message],
-):
+) -> tuple[ChatSession | None, GeminiClientWrapper | None, list[Message]]:
     """Find an existing chat session that matches the *longest* prefix of
     ``messages`` **whose last element is an assistant/system reply**.
 
@@ -245,6 +206,46 @@ def _find_reusable_session(
         search_end -= 1
 
     return None, None, messages
+
+
+async def _send_with_split(session: ChatSession, text: str, files: list[Path | str] | None = None):
+    """Send text to Gemini, automatically splitting into multiple batches if it is
+    longer than ``MAX_CHARS_PER_REQUEST``.
+
+    Every intermediate batch (that is **not** the last one) is suffixed with a hint
+    telling Gemini that more content will come, and it should simply reply with
+    "ok". The final batch carries any file uploads and the real user prompt so
+    that Gemini can produce the actual answer.
+    """
+    if len(text) <= MAX_CHARS_PER_REQUEST:
+        # No need to split - a single request is fine.
+        return await session.send_message(text, files=files)
+    hint_len = len(CONTINUATION_HINT)
+    chunk_size = MAX_CHARS_PER_REQUEST - hint_len
+
+    chunks: list[str] = []
+    pos = 0
+    total = len(text)
+    while pos < total:
+        end = min(pos + chunk_size, total)
+        chunk = text[pos:end]
+        pos = end
+
+        # If this is NOT the last chunk, add the continuation hint.
+        if end < total:
+            chunk += CONTINUATION_HINT
+        chunks.append(chunk)
+
+    # Fire off all but the last chunk, discarding the interim "ok" replies.
+    for chk in chunks[:-1]:
+        try:
+            await session.send_message(chk)
+        except Exception as e:
+            logger.exception(f"Error sending chunk to Gemini: {e}")
+            raise
+
+    # The last chunk carries the files (if any) and we return its response.
+    return await session.send_message(chunks[-1], files=files)
 
 
 def _create_streaming_response(

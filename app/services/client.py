@@ -1,7 +1,12 @@
+import asyncio
 import re
 from pathlib import Path
 
 from gemini_webapi import GeminiClient, ModelOutput
+from gemini_webapi.client import ChatSession
+from gemini_webapi.constants import Model
+from gemini_webapi.exceptions import ModelInvalid
+from gemini_webapi.types import Gem
 
 from ..models import Message
 from ..utils import g_config
@@ -27,6 +32,25 @@ class GeminiClientWrapper(GeminiClient):
         kwargs.setdefault("refresh_interval", g_config.gemini.refresh_interval)
 
         await super().init(**kwargs)
+
+    async def generate_content(
+        self,
+        prompt: str,
+        files: list[str | Path] | None = None,
+        model: Model | str = Model.UNSPECIFIED,
+        gem: Gem | str | None = None,
+        chat: ChatSession | None = None,
+        **kwargs,
+    ):
+        cnt = 2  # Try 2 times before giving up
+        while cnt:
+            cnt -= 1
+            try:
+                return await super().generate_content(prompt, files, model, gem, chat, **kwargs)
+            except ModelInvalid:
+                # This is not always caused by model selection. Instead it can be solved by retrying.
+                # So we catch it and retry as a workaround.
+                await asyncio.sleep(1)
 
     @staticmethod
     async def process_message(
