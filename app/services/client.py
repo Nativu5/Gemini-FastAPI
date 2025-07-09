@@ -43,14 +43,20 @@ class GeminiClientWrapper(GeminiClient):
         **kwargs,
     ):
         cnt = 2  # Try 2 times before giving up
+        last_exception = None
         while cnt:
             cnt -= 1
             try:
                 return await super().generate_content(prompt, files, model, gem, chat, **kwargs)
-            except ModelInvalid:
+            except ModelInvalid as e:
                 # This is not always caused by model selection. Instead it can be solved by retrying.
                 # So we catch it and retry as a workaround.
                 await asyncio.sleep(1)
+                last_exception = e
+
+        # If retrying failed, re-raise ModelInvalid
+        if last_exception:
+            raise last_exception
 
     @staticmethod
     async def process_message(
