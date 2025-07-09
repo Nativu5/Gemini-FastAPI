@@ -6,7 +6,7 @@ WORKDIR /app
 
 # Install dependencies
 COPY pyproject.toml .
-RUN uv sync --no-cache
+RUN uv sync --no-cache --no-dev
 
 COPY app/ app/
 COPY config/ config/
