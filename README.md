@@ -99,6 +99,7 @@ services:
       - "8000:8000"
     volumes:
       # - ./config:/app/config  # Uncomment to use a custom config file
+      - ./certs:/certs
       - ./data:/app/data
       - ./cache:/app/.venv/lib/python3.12/site-packages/gemini_webapi/utils/temp
     environment:
