@@ -2,7 +2,7 @@ import uvicorn
 
 from app.main import create_app
 from app.utils import g_config, setup_logging
-
+import os
 app = create_app()
 
 if __name__ == "__main__":
