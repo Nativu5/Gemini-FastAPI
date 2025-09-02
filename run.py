@@ -10,9 +10,7 @@ app = create_app()
 if __name__ == "__main__":
     # Setup loguru logging
     setup_logging(level=g_config.logging.level)
-
-
-
+    
     key_path = "/certs/privkey.pem"
     cert_path = "/certs/fullchain.pem"
     # 检查证书文件是否存在且配置了路径
