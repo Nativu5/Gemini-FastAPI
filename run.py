@@ -13,9 +13,9 @@ if __name__ == "__main__":
     
     key_path = "/certs/privkey.pem"
     cert_path = "/certs/fullchain.pem"
-    # 检查证书文件是否存在且配置了路径
+    # Check if the certificate files exist
     if os.path.exists(key_path) and os.path.exists(cert_path):
-        # 如果证书存在，则以 HTTPS 模式运行
+        # If the certificates exist, run in HTTPS mode
         logger.info("Starting server in HTTPS mode...")
         uvicorn.run(
             app,
@@ -26,7 +26,7 @@ if __name__ == "__main__":
             ssl_certfile=cert_path,
         )
     else:
-        # 否则，以 HTTP 模式运行
+        # Otherwise, run in HTTP mode
         logger.info("Starting server in HTTP mode (SSL certificates not found or configured)...")
         uvicorn.run(
             app,
