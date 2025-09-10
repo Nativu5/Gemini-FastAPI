@@ -1,22 +1,28 @@
+import os
+
 import uvicorn
+from loguru import logger
 
 from app.main import create_app
 from app.utils import g_config, setup_logging
-import os
-from loguru import logger
 
 app = create_app()
 
 if __name__ == "__main__":
     # Setup loguru logging
     setup_logging(level=g_config.logging.level)
-    
-    key_path = "/certs/privkey.pem"
-    cert_path = "/certs/fullchain.pem"
-    # Check if the certificate files exist
-    if os.path.exists(key_path) and os.path.exists(cert_path):
-        # If the certificates exist, run in HTTPS mode
-        logger.info("Starting server in HTTPS mode...")
+
+    # Check HTTPS configuration
+    if g_config.server.https.enabled:
+        key_path = g_config.server.https.key_file
+        cert_path = g_config.server.https.cert_file
+
+        # Check if the certificate files exist
+        if not os.path.exists(key_path) or not os.path.exists(cert_path):
+            logger.critical(f"HTTPS enabled but SSL certificate files not found: {key_path}, {cert_path}")
+            exit(1)
+
+        logger.info(f"Starting server at https://{g_config.server.host}:{g_config.server.port} ...")
         uvicorn.run(
             app,
             host=g_config.server.host,
@@ -26,8 +32,7 @@ if __name__ == "__main__":
             ssl_certfile=cert_path,
         )
     else:
-        # Otherwise, run in HTTP mode
-        logger.info("Starting server in HTTP mode (SSL certificates not found or configured)...")
+        logger.info(f"Starting server at http://{g_config.server.host}:{g_config.server.port} ...")
         uvicorn.run(
             app,
             host=g_config.server.host,

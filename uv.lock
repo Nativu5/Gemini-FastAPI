@@ -96,7 +96,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.12" },
-    { name = "gemini-webapi", specifier = ">=1.14.4" },
+    { name = "gemini-webapi", specifier = ">=1.15.2" },
     { name = "lmdb", specifier = ">=1.6.2" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "pydantic-settings", extras = ["yaml"], specifier = ">=2.9.1" },
@@ -111,7 +111,7 @@ dev = [{ name = "ruff", specifier = ">=0.11.13" }]
 
 [[package]]
 name = "gemini-webapi"
-version = "1.14.4"
+version = "1.15.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx", extra = ["http2"] },
@@ -119,9 +119,9 @@ dependencies = [
     { name = "orjson" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/83/02/3549c5a442525a5d66e5c3c57766d2a34fae3a0e075944bb9c7981ad5bf0/gemini_webapi-1.14.4.tar.gz", hash = "sha256:1ae9ffb56bc2d5dab6d83c71ca9fb5e0cabf627305ed948fe202546bafb213ac", size = 255123, upload-time = "2025-08-12T00:56:45.351Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1c/9e/8f7652f4bbce79e340e2c5a06cd883632e572132ee252c1c97a25a1a66c0/gemini_webapi-1.15.2.tar.gz", hash = "sha256:a3b95a4e8b2e8620e0c890ea5dca2af9ea64c845c77dae0fddfdbe1f50dad127", size = 257325, upload-time = "2025-09-03T20:27:47.114Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/44/89c88e9b7e7d4bdc5e97dd99752bb59c307b0d989748089c1d2ec19cf9b0/gemini_webapi-1.14.4-py3-none-any.whl", hash = "sha256:f0662c9863cf24d472b5e2c1cc96a5b35d6b0850a009f760f3555ac29b2bf5e1", size = 53343, upload-time = "2025-08-12T00:56:43.952Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/19/31730e3f81cca6373aa35721d4f9fd38e72623b14a29940f70e25bfefaba/gemini_webapi-1.15.2-py3-none-any.whl", hash = "sha256:adec1fa2fa5b03f98bb02151708e93ee3db0d6087cee78704cf8e533026a895f", size = 54412, upload-time = "2025-09-03T20:27:45.582Z" },
 ]
 
 [[package]]

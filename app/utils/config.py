@@ -13,6 +13,14 @@ from pydantic_settings import (
 CONFIG_PATH = "config/config.yaml"
 
 
+class HTTPSConfig(BaseModel):
+    """HTTPS configuration"""
+
+    enabled: bool = Field(default=False, description="Enable HTTPS")
+    key_file: str = Field(default="/certs/privkey.pem", description="SSL private key file path")
+    cert_file: str = Field(default="/certs/fullchain.pem", description="SSL certificate file path")
+
+
 class ServerConfig(BaseModel):
     """Server configuration"""
 
@@ -22,6 +30,7 @@ class ServerConfig(BaseModel):
         default=None,
         description="API key for authentication, if set, will enable API key validation",
     )
+    https: HTTPSConfig = Field(default=HTTPSConfig(), description="HTTPS configuration")
 
 
 class GeminiClientSettings(BaseModel):
