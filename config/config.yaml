@@ -5,9 +5,9 @@ server:
   port: 8000               # Server port
   api_key: null            # API key for authentication (null for no auth)
   https:
-    enabled: true         # Enable HTTPS
-    key_file: "/certs/privkey.pem"      # SSL private key file path
-    cert_file: "/certs/fullchain.pem"   # SSL certificate file path
+    enabled: true          # Enable HTTPS
+    key_file: "certs/privkey.pem"      # SSL private key file path
+    cert_file: "certs/fullchain.pem"   # SSL certificate file path
 
 cors:
   enabled: true            # Enable CORS
