@@ -1,4 +1,5 @@
 import os
+import sys
 
 import uvicorn
 from loguru import logger
@@ -20,7 +21,7 @@ if __name__ == "__main__":
         # Check if the certificate files exist
         if not os.path.exists(key_path) or not os.path.exists(cert_path):
             logger.critical(f"HTTPS enabled but SSL certificate files not found: {key_path}, {cert_path}")
-            exit(1)
+            sys.exit(1)
 
         logger.info(f"Starting server at https://{g_config.server.host}:{g_config.server.port} ...")
         uvicorn.run(
