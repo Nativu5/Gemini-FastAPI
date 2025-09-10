@@ -17,8 +17,8 @@ class HTTPSConfig(BaseModel):
     """HTTPS configuration"""
 
     enabled: bool = Field(default=False, description="Enable HTTPS")
-    key_file: str = Field(default="/certs/privkey.pem", description="SSL private key file path")
-    cert_file: str = Field(default="/certs/fullchain.pem", description="SSL certificate file path")
+    key_file: str = Field(default="certs/privkey.pem", description="SSL private key file path")
+    cert_file: str = Field(default="certs/fullchain.pem", description="SSL certificate file path")
 
 
 class ServerConfig(BaseModel):
