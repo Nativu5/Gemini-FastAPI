@@ -108,46 +108,54 @@ async def create_chat_completion(
         logger.debug(
             f"Client ID: {client.id}, Input length: {len(model_input)}, files count: {len(files)}"
         )
-        response = await _send_with_split(session, model_input, files=files)
+
+        completion_id = f"chatcmpl-{uuid.uuid4()}"
+        timestamp = int(datetime.now(tz=timezone.utc).timestamp())
+
+        if request.stream:
+            # For streaming, get the stream iterator
+            stream_iterator = await _send_with_split(session, model_input, files=files, stream=True)
+            return _create_streaming_response(
+                stream_iterator,
+                completion_id,
+                timestamp,
+                request.model,
+                request.messages,
+                db,
+                session,
+                client,
+            )
+        else:
+            # For non-streaming, get the full response
+            response = await _send_with_split(session, model_input, files=files, stream=False)
+
+            # Format the response from API
+            model_output = GeminiClientWrapper.extract_output(response, include_thoughts=True)
+            stored_output = GeminiClientWrapper.extract_output(response, include_thoughts=False)
+
+            # After formatting, persist the conversation to LMDB
+            try:
+                last_message = Message(role="assistant", content=stored_output)
+                cleaned_history = db.sanitize_assistant_messages(request.messages)
+                conv = ConversationInStore(
+                    model=model.model_name,
+                    client_id=client.id,
+                    metadata=session.metadata,
+                    messages=[*cleaned_history, last_message],
+                )
+                key = db.store(conv)
+                logger.debug(f"Conversation saved to LMDB with key: {key}")
+            except Exception as e:
+                # We can still return the response even if saving fails
+                logger.warning(f"Failed to save conversation to LMDB: {e}")
+
+            return _create_standard_response(
+                model_output, completion_id, timestamp, request.model, request.messages
+            )
+
     except Exception as e:
         logger.exception(f"Error generating content from Gemini API: {e}")
         raise
-
-    # Format the response from API
-    model_output = GeminiClientWrapper.extract_output(response, include_thoughts=True)
-    stored_output = GeminiClientWrapper.extract_output(response, include_thoughts=False)
-
-    # After formatting, persist the conversation to LMDB
-    try:
-        last_message = Message(role="assistant", content=stored_output)
-        cleaned_history = db.sanitize_assistant_messages(request.messages)
-        conv = ConversationInStore(
-            model=model.model_name,
-            client_id=client.id,
-            metadata=session.metadata,
-            messages=[*cleaned_history, last_message],
-        )
-        key = db.store(conv)
-        logger.debug(f"Conversation saved to LMDB with key: {key}")
-    except Exception as e:
-        # We can still return the response even if saving fails
-        logger.warning(f"Failed to save conversation to LMDB: {e}")
-
-    # Return with streaming or standard response
-    completion_id = f"chatcmpl-{uuid.uuid4()}"
-    timestamp = int(datetime.now(tz=timezone.utc).timestamp())
-    if request.stream:
-        return _create_streaming_response(
-            model_output,
-            completion_id,
-            timestamp,
-            request.model,
-            request.messages,
-        )
-    else:
-        return _create_standard_response(
-            model_output, completion_id, timestamp, request.model, request.messages
-        )
 
 
 def _text_from_message(message: Message) -> str:
@@ -208,7 +216,9 @@ def _find_reusable_session(
     return None, None, messages
 
 
-async def _send_with_split(session: ChatSession, text: str, files: list[Path | str] | None = None):
+async def _send_with_split(
+    session: ChatSession, text: str, files: list[Path | str] | None = None, stream: bool = False
+):
     """Send text to Gemini, automatically splitting into multiple batches if it is
     longer than ``MAX_CHARS_PER_REQUEST``.
 
@@ -216,10 +226,23 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
     telling Gemini that more content will come, and it should simply reply with
     "ok". The final batch carries any file uploads and the real user prompt so
     that Gemini can produce the actual answer.
+
+    Args:
+        session: The ChatSession to send messages to
+        text: The text to send
+        files: Optional list of files to attach
+        stream: If True, returns a stream iterator; if False, returns ModelOutput
+
+    Returns:
+        Either a ModelOutput (stream=False) or an async iterator of StreamChunk (stream=True)
     """
     if len(text) <= MAX_CHARS_PER_REQUEST:
         # No need to split - a single request is fine.
-        return await session.send_message(text, files=files)
+        if stream:
+            return await session.send_message_stream(text, files=files)
+        else:
+            return await session.send_message(text, files=files)
+
     hint_len = len(CONTINUATION_HINT)
     chunk_size = MAX_CHARS_PER_REQUEST - hint_len
 
@@ -245,22 +268,34 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
             raise
 
     # The last chunk carries the files (if any) and we return its response.
-    return await session.send_message(chunks[-1], files=files)
+    if stream:
+        return await session.send_message_stream(chunks[-1], files=files)
+    else:
+        return await session.send_message(chunks[-1], files=files)
 
 
 def _create_streaming_response(
-    model_output: str,
+    stream_iterator,
     completion_id: str,
     created_time: int,
     model: str,
     messages: list[Message],
+    db: LMDBConversationStore,
+    session: ChatSession,
+    client: GeminiClientWrapper,
 ) -> StreamingResponse:
-    """Create streaming response with `usage` calculation included in the final chunk."""
-
-    # Calculate token usage
-    prompt_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
-    completion_tokens = estimate_tokens(model_output)
-    total_tokens = prompt_tokens + completion_tokens
+    """Create streaming response with `usage` calculation included in the final chunk.
+    
+    Args:
+        stream_iterator: Async iterator of StreamChunk objects from gemini webapi
+        completion_id: Unique ID for this completion
+        created_time: Timestamp for the completion
+        model: Model name
+        messages: Original messages (for token estimation)
+        db: LMDB store for saving conversation
+        session: ChatSession for metadata
+        client: Client wrapper for ID
+    """
 
     async def generate_stream():
         # Send start event
@@ -273,20 +308,83 @@ def _create_streaming_response(
         }
         yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
-        # Stream output text in chunks for efficiency
-        chunk_size = 32
-        for i in range(0, len(model_output), chunk_size):
-            chunk = model_output[i : i + chunk_size]
-            data = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created_time,
-                "model": model,
-                "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
-            }
-            yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+        # Accumulate the full response for storage and token counting
+        full_text = ""
+        full_thoughts = ""
 
-        # Send end event
+        # Stream chunks from Gemini API
+        try:
+            async for chunk in stream_iterator:
+                # Extract delta text and thoughts from the chunk
+                delta_content = ""
+                
+                if chunk.delta_thoughts:
+                    full_thoughts += chunk.delta_thoughts
+                    # Include thoughts in the stream if present
+                    if not full_text and not delta_content:
+                        # First chunk with thoughts - add the opening tag
+                        delta_content = f"<think>{chunk.delta_thoughts}"
+                    else:
+                        delta_content = chunk.delta_thoughts
+                
+                if chunk.delta_text:
+                    # Format the text before sending
+                    formatted_text = GeminiClientWrapper.format_stream_text(chunk.delta_text)
+                    
+                    # If we had thoughts and now have text, close the think tag
+                    if full_thoughts and not full_text:
+                        delta_content += "</think>\n" + formatted_text
+                    else:
+                        delta_content += formatted_text
+                    full_text += chunk.delta_text  # Store unformatted for token counting
+
+                # Send the delta if we have content
+                if delta_content:
+                    data = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_time,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"content": delta_content}, "finish_reason": None}],
+                    }
+                    yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+
+            # Close thoughts tag if it wasn't closed yet
+            if full_thoughts and not full_text:
+                data = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": "</think>\n"}, "finish_reason": None}],
+                }
+                yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+
+        except Exception as e:
+            logger.exception(f"Error during streaming: {e}")
+            raise
+
+        # Calculate token usage
+        prompt_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
+        completion_tokens = estimate_tokens(full_text)
+        total_tokens = prompt_tokens + completion_tokens
+
+        # Save conversation to LMDB after streaming completes
+        try:
+            last_message = Message(role="assistant", content=full_text)
+            cleaned_history = db.sanitize_assistant_messages(messages)
+            conv = ConversationInStore(
+                model=session.metadata[0] if session.metadata else model,
+                client_id=client.id,
+                metadata=session.metadata,
+                messages=[*cleaned_history, last_message],
+            )
+            key = db.store(conv)
+            logger.debug(f"Conversation saved to LMDB with key: {key}")
+        except Exception as e:
+            logger.warning(f"Failed to save conversation to LMDB: {e}")
+
+        # Send end event with usage
         data = {
             "id": completion_id,
             "object": "chat.completion.chunk",

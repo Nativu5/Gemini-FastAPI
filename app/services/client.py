@@ -188,3 +188,37 @@ class GeminiClientWrapper(GeminiClient):
         # Fix inline code blocks
         pattern = r"`(\[[^\]]+\]\([^\)]+\))`"
         return re.sub(pattern, r"\1", text)
+
+    @staticmethod
+    def format_stream_text(text: str) -> str:
+        """
+        Format streaming text output (apply same text fixes as extract_output).
+        """
+        # Fix some escaped characters
+        text = text.replace("&lt;", "<").replace("\\<", "<").replace("\\_", "_").replace("\\>", ">")
+
+        def simplify_link_target(text_content: str) -> str:
+            match_colon_num = re.match(r"([^:]+:\d+)", text_content)
+            if match_colon_num:
+                return match_colon_num.group(1)
+            return text_content
+
+        def replacer(match: re.Match) -> str:
+            outer_open_paren = match.group(1)
+            display_text = match.group(2)
+
+            new_target_url = simplify_link_target(display_text)
+            new_link_segment = f"[`{display_text}`]({new_target_url})"
+
+            if outer_open_paren:
+                return f"{outer_open_paren}{new_link_segment})"
+            else:
+                return new_link_segment
+
+        # Replace Google search links with simplified markdown links
+        pattern = r"(\()?\[`([^`]+?)`\]\((https://www.google.com/search\?q=)(.*?)(?<!\\)\)\)*(\))?"
+        text = re.sub(pattern, replacer, text)
+
+        # Fix inline code blocks
+        pattern = r"`(\[[^\]]+\]\([^\)]+\))`"
+        return re.sub(pattern, r"\1", text)

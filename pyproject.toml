@@ -9,7 +9,7 @@ dependencies = [
     # Use the fork with streaming support. Install directly from the GitHub repo
     # and keep the import package name as `gemini_webapi` so code imports remain
     # unchanged.
-    "gemini_webapi @ git+https://github.com/hvjg2578/Gemini-API.git@52684cea8f0caac6206ac691b90113fce966fe43",
+    "gemini_webapi @ git+https://github.com/hvjg2578/Gemini-API.git",
     "lmdb>=1.6.2",
     "loguru>=0.7.0",
     "pydantic-settings[yaml]>=2.9.1",

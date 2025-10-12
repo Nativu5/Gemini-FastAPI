@@ -96,7 +96,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.12" },
-    { name = "gemini-webapi", git = "https://github.com/hvjg2578/Gemini-API.git?rev=52684cea8f0caac6206ac691b90113fce966fe43" },
+    { name = "gemini-webapi", git = "https://github.com/hvjg2578/Gemini-API.git" },
     { name = "lmdb", specifier = ">=1.6.2" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "pydantic-settings", extras = ["yaml"], specifier = ">=2.9.1" },
@@ -112,7 +112,7 @@ dev = [{ name = "ruff", specifier = ">=0.11.13" }]
 [[package]]
 name = "gemini-webapi"
 version = "1.15.2.post10"
-source = { git = "https://github.com/hvjg2578/Gemini-API.git?rev=52684cea8f0caac6206ac691b90113fce966fe43#52684cea8f0caac6206ac691b90113fce966fe43" }
+source = { git = "https://github.com/hvjg2578/Gemini-API.git#52684cea8f0caac6206ac691b90113fce966fe43" }
 dependencies = [
     { name = "httpx", extra = ["http2"] },
     { name = "loguru" },
