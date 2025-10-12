@@ -8,6 +8,8 @@
 
 Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by  [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API).
 
+Note: this repository is configured to use a fork of the original client that adds streaming support: https://github.com/hvjg2578/Gemini-API. The fork is installed directly from GitHub so the code continues to import the package as `gemini_webapi`.
+
 **✅ Call Gemini's web-based models via API without an API Key, completely free!**
 
 ## Features

@@ -6,7 +6,10 @@ readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
     "fastapi>=0.115.12",
-    "gemini-webapi>=1.15.2",
+    # Use the fork with streaming support. Install directly from the GitHub repo
+    # and keep the import package name as `gemini_webapi` so code imports remain
+    # unchanged.
+    "gemini_webapi @ git+https://github.com/hvjg2578/Gemini-API.git@52684cea8f0caac6206ac691b90113fce966fe43",
     "lmdb>=1.6.2",
     "loguru>=0.7.0",
     "pydantic-settings[yaml]>=2.9.1",
