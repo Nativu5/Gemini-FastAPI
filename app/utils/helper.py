@@ -6,9 +6,12 @@ import httpx
 from loguru import logger
 
 
+VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
+
+
 def add_tag(role: str, content: str, unclose: bool = False) -> str:
     """Surround content with role tags"""
-    if role not in ["user", "assistant", "system"]:
+    if role not in VALID_TAG_ROLES:
         logger.warning(f"Unknown role: {role}, returning content without tags")
         return content
 
