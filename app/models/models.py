@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -17,8 +19,9 @@ class Message(BaseModel):
     """Message model"""
 
     role: str
-    content: Union[str, List[ContentItem]]
+    content: Union[str, List[ContentItem], None] = None
     name: Optional[str] = None
+    tool_calls: Optional[List["ToolCall"]] = None
 
 
 class Choice(BaseModel):
@@ -27,6 +30,49 @@ class Choice(BaseModel):
     index: int
     message: Message
     finish_reason: str
+
+
+class FunctionCall(BaseModel):
+    """Function call payload"""
+
+    name: str
+    arguments: str
+
+
+class ToolCall(BaseModel):
+    """Tool call item"""
+
+    id: str
+    type: Literal["function"]
+    function: FunctionCall
+
+
+class ToolFunctionDefinition(BaseModel):
+    """Function definition for tool."""
+
+    name: str
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+class Tool(BaseModel):
+    """Tool specification."""
+
+    type: Literal["function"]
+    function: ToolFunctionDefinition
+
+
+class ToolChoiceFunctionDetail(BaseModel):
+    """Detail of a tool choice function."""
+
+    name: str
+
+
+class ToolChoiceFunction(BaseModel):
+    """Tool choice forcing a specific function."""
+
+    type: Literal["function"]
+    function: ToolChoiceFunctionDetail
 
 
 class Usage(BaseModel):
@@ -59,6 +105,11 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: Optional[float] = 0
     frequency_penalty: Optional[float] = 0
     user: Optional[str] = None
+    tools: Optional[List["Tool"]] = None
+    tool_choice: Optional[
+        Union[Literal["none"], Literal["auto"], Literal["required"], "ToolChoiceFunction"]
+    ] = None
+    response_format: Optional[Dict[str, Any]] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -101,3 +152,9 @@ class ConversationInStore(BaseModel):
         ..., description="Metadata for Gemini API to locate the conversation"
     )
     messages: list[Message] = Field(..., description="Message contents in the conversation")
+
+
+# Rebuild models with forward references
+Message.model_rebuild()
+ToolCall.model_rebuild()
+ChatCompletionRequest.model_rebuild()
