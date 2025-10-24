@@ -2,8 +2,10 @@ import base64
 import json
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -48,10 +50,76 @@ TOOL_BLOCK_RE = re.compile(r"```xml\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 TOOL_CALL_RE = re.compile(
     r"<tool_call\s+name=\"([^\"]+)\">(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
 )
+JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 XML_HINT_STRIPPED = XML_WRAP_HINT.strip()
 
 
 router = APIRouter()
+
+
+@dataclass
+class StructuredOutputRequirement:
+    """Represents a structured response request from the client."""
+
+    schema_name: str
+    schema: dict[str, Any]
+    instruction: str
+    raw_format: dict[str, Any]
+
+
+def _build_structured_requirement(
+    response_format: dict[str, Any] | None,
+) -> StructuredOutputRequirement | None:
+    """Translate OpenAI-style response_format into internal instructions."""
+    if not response_format or not isinstance(response_format, dict):
+        return None
+
+    if response_format.get("type") != "json_schema":
+        logger.warning("Unsupported response_format type requested: %s", response_format)
+        return None
+
+    json_schema = response_format.get("json_schema")
+    if not isinstance(json_schema, dict):
+        logger.warning("Invalid json_schema payload in response_format: %s", response_format)
+        return None
+
+    schema = json_schema.get("schema")
+    if not isinstance(schema, dict):
+        logger.warning("Missing `schema` object in response_format payload: %s", response_format)
+        return None
+
+    schema_name = json_schema.get("name") or "response"
+    strict = json_schema.get("strict", True)
+
+    pretty_schema = json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True)
+    instruction_parts = [
+        "You must respond with a single valid JSON document that conforms to the schema shown below.",
+        "Do not include explanations, comments, or any text before or after the JSON.",
+        f'Schema name: "{schema_name}"',
+        "JSON Schema:",
+        pretty_schema,
+    ]
+    if not strict:
+        instruction_parts.insert(
+            1,
+            "The schema allows unspecified fields, but include only what is necessary to satisfy the user's request.",
+        )
+
+    instruction = "\n\n".join(instruction_parts)
+    return StructuredOutputRequirement(
+        schema_name=schema_name,
+        schema=schema,
+        instruction=instruction,
+        raw_format=response_format,
+    )
+
+
+def _strip_code_fence(text: str) -> str:
+    """Remove surrounding ```json fences if present."""
+    match = JSON_FENCE_RE.match(text.strip())
+    if match:
+        return match.group(1).strip()
+    return text.strip()
 
 
 def _build_tool_prompt(
@@ -109,23 +177,31 @@ def _prepare_messages_for_model(
     source_messages: list[Message],
     tools: list[Tool] | None,
     tool_choice: str | ToolChoiceFunction | None,
+    extra_instructions: list[str] | None = None,
 ) -> list[Message]:
     """Return a copy of messages enriched with tool instructions when needed."""
     prepared = [msg.model_copy(deep=True) for msg in source_messages]
 
-    if not tools:
-        return prepared
+    instructions: list[str] = []
+    if tools:
+        tool_prompt = _build_tool_prompt(tools, tool_choice)
+        if tool_prompt:
+            instructions.append(tool_prompt)
 
-    instructions = _build_tool_prompt(tools, tool_choice)
+    if extra_instructions:
+        instructions.extend(instr for instr in extra_instructions if instr)
+
     if not instructions:
         return prepared
+
+    combined_instructions = "\n\n".join(instructions)
 
     if prepared and prepared[0].role == "system" and isinstance(prepared[0].content, str):
         existing = prepared[0].content or ""
         separator = "\n\n" if existing else ""
-        prepared[0].content = f"{existing}{separator}{instructions}"
+        prepared[0].content = f"{existing}{separator}{combined_instructions}"
     else:
-        prepared.insert(0, Message(role="system", content=instructions))
+        prepared.insert(0, Message(role="system", content=combined_instructions))
 
     return prepared
 
@@ -261,12 +337,23 @@ async def create_chat_completion(
             detail="At least one message is required in the conversation.",
         )
 
+    structured_requirement = _build_structured_requirement(request.response_format)
+    if structured_requirement and request.stream:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Streaming is not supported when response_format is specified.",
+        )
+
+    extra_instructions = (
+        [structured_requirement.instruction] if structured_requirement else None
+    )
+
     # Check if conversation is reusable
     session, client, remaining_messages = _find_reusable_session(db, pool, model, request.messages)
 
     if session:
         messages_to_send = _prepare_messages_for_model(
-            remaining_messages, request.tools, request.tool_choice
+            remaining_messages, request.tools, request.tool_choice, extra_instructions
         )
         if not messages_to_send:
             raise HTTPException(
@@ -290,7 +377,7 @@ async def create_chat_completion(
             client = pool.acquire()
             session = client.start_chat(model=model)
             messages_to_send = _prepare_messages_for_model(
-                request.messages, request.tools, request.tool_choice
+                request.messages, request.tools, request.tool_choice, extra_instructions
             )
             model_input, files = await GeminiClientWrapper.process_conversation(
                 messages_to_send, tmp_dir
@@ -320,6 +407,30 @@ async def create_chat_completion(
     visible_output, tool_calls = _extract_tool_calls(raw_output_with_think)
     storage_output = _remove_tool_call_blocks(raw_output_clean).strip()
     tool_calls_payload = [call.model_dump(mode="json") for call in tool_calls]
+
+    if structured_requirement:
+        cleaned_visible = _strip_code_fence(visible_output or "")
+        if not cleaned_visible:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="LLM returned an empty response while JSON schema output was requested.",
+            )
+        try:
+            structured_payload = json.loads(cleaned_visible)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Failed to decode JSON for structured response (schema=%s): %s",
+                structured_requirement.schema_name,
+                cleaned_visible,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="LLM returned invalid JSON for the requested response_format.",
+            ) from exc
+
+        canonical_output = json.dumps(structured_payload, ensure_ascii=False)
+        visible_output = canonical_output
+        storage_output = canonical_output
 
     if tool_calls_payload:
         logger.debug("Detected tool calls: %s", tool_calls_payload)
