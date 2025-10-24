@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 import uuid
@@ -9,18 +10,27 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from gemini_webapi.client import ChatSession
 from gemini_webapi.constants import Model
+from gemini_webapi.types.image import GeneratedImage, Image
 from loguru import logger
 
 from ..models import (
+    ContentItem,
     ChatCompletionRequest,
     ConversationInStore,
     FunctionCall,
     Message,
     ModelData,
     ModelListResponse,
+    ResponseCreateRequest,
+    ResponseCreateResponse,
+    ResponseInputContent,
+    ResponseInputItem,
+    ResponseOutputContent,
+    ResponseOutputMessage,
     Tool,
     ToolCall,
     ToolChoiceFunction,
+    Usage,
 )
 from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from ..services.client import XML_WRAP_HINT
@@ -125,6 +135,41 @@ def _strip_xml_hint(text: str) -> str:
         return text
     cleaned = text.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
     return cleaned.strip()
+
+
+def _response_items_to_messages(items: list[ResponseInputItem]) -> list[Message]:
+    """Convert Responses API input items into internal Message objects."""
+    messages: list[Message] = []
+
+    for item in items:
+        if item.type != "message":
+            continue
+
+        role = item.role
+        if role == "developer":
+            role = "system"
+
+        content = item.content
+        if isinstance(content, list):
+            converted: list[ContentItem] = []
+            for part in content:
+                if part.type == "input_text":
+                    if part.text:
+                        converted.append(ContentItem(type="text", text=part.text))
+                elif part.type == "input_image":
+                    image_url = part.image_url
+                    if not image_url and part.image_base64:
+                        mime_type = part.mime_type or "image/png"
+                        image_url = f"data:{mime_type};base64,{part.image_base64}"
+                    if image_url:
+                        converted.append(
+                            ContentItem(type="image_url", image_url={"url": image_url})
+                        )
+            messages.append(Message(role=role, content=converted or None))
+        else:
+            messages.append(Message(role=role, content=content))
+
+    return messages
 
 
 def _remove_tool_call_blocks(text: str) -> str:
@@ -319,6 +364,149 @@ async def create_chat_completion(
             request.model,
             request.messages,
         )
+
+
+@router.post("/v1/responses")
+async def create_response(
+    request: ResponseCreateRequest,
+    api_key: str = Depends(verify_api_key),
+    tmp_dir: Path = Depends(get_temp_dir),
+):
+    if request.stream:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Streaming responses are not supported for this endpoint.",
+        )
+
+    messages = _response_items_to_messages(request.input)
+    if not messages:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="No message input provided."
+        )
+
+    pool = GeminiClientPool()
+    db = LMDBConversationStore()
+
+    try:
+        model = Model.from_name(request.model)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    session, client, remaining_messages = _find_reusable_session(db, pool, model, messages)
+
+    if session:
+        messages_to_send = remaining_messages
+        if not messages_to_send:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No new messages to send for the existing session.",
+            )
+        if len(messages_to_send) == 1:
+            model_input, files = await GeminiClientWrapper.process_message(
+                messages_to_send[0], tmp_dir, tagged=False
+            )
+        else:
+            model_input, files = await GeminiClientWrapper.process_conversation(
+                messages_to_send, tmp_dir
+            )
+        logger.debug(
+            f"Reused session {session.metadata} - sending {len(messages_to_send)} prepared messages."
+        )
+    else:
+        try:
+            client = pool.acquire()
+            session = client.start_chat(model=model)
+            model_input, files = await GeminiClientWrapper.process_conversation(messages, tmp_dir)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        except Exception as e:
+            logger.exception(f"Error in preparing conversation for responses API: {e}")
+            raise
+        logger.debug("New session started for /v1/responses request.")
+
+    try:
+        assert session and client, "Session and client not available"
+        logger.debug(
+            f"Client ID: {client.id}, Input length: {len(model_input)}, files count: {len(files)}"
+        )
+        model_output = await _send_with_split(session, model_input, files=files)
+    except Exception as e:
+        logger.exception(f"Error generating content from Gemini API for responses: {e}")
+        raise
+
+    text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
+    text_without_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=False)
+
+    storage_output = _remove_tool_call_blocks(text_without_think).strip()
+    visible_text = _remove_tool_call_blocks(text_with_think).strip()
+    assistant_text = LMDBConversationStore.remove_think_tags(visible_text)
+
+    image_contents: list[ResponseOutputContent] = []
+    for image in model_output.images:
+        try:
+            image_base64 = await _image_to_base64(image, tmp_dir)
+        except Exception as exc:
+            logger.warning(f"Failed to download generated image: {exc}")
+            continue
+        mime_type = "image/png" if isinstance(image, GeneratedImage) else "image/jpeg"
+        image_contents.append(
+            ResponseOutputContent(
+                type="output_image",
+                image_base64=image_base64,
+                mime_type=mime_type,
+            )
+        )
+
+    response_contents: list[ResponseOutputContent] = []
+    if assistant_text:
+        response_contents.append(ResponseOutputContent(type="output_text", text=assistant_text))
+    response_contents.extend(image_contents)
+
+    if not response_contents:
+        response_contents.append(ResponseOutputContent(type="output_text", text=""))
+
+    created_time = int(datetime.now(tz=timezone.utc).timestamp())
+    response_id = f"resp_{uuid.uuid4().hex}"
+    message_id = f"msg_{uuid.uuid4().hex}"
+
+    prompt_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
+    completion_tokens = estimate_tokens(assistant_text)
+    usage = Usage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+
+    response_payload = ResponseCreateResponse(
+        id=response_id,
+        created=created_time,
+        model=request.model,
+        output=[
+            ResponseOutputMessage(
+                id=message_id,
+                type="message",
+                role="assistant",
+                content=response_contents,
+            )
+        ],
+        output_text=assistant_text or None,
+        usage=usage,
+    )
+
+    try:
+        last_message = Message(role="assistant", content=storage_output or None)
+        cleaned_history = db.sanitize_assistant_messages(messages)
+        conv = ConversationInStore(
+            model=model.model_name,
+            client_id=client.id,
+            metadata=session.metadata,
+            messages=[*cleaned_history, last_message],
+        )
+        db.store(conv)
+    except Exception as exc:
+        logger.warning(f"Failed to save Responses conversation to LMDB: {exc}")
+
+    return response_payload
 
 
 def _text_from_message(message: Message) -> str:
@@ -545,3 +733,17 @@ def _create_standard_response(
 
     logger.debug(f"Response created with {total_tokens} total tokens")
     return result
+
+
+async def _image_to_base64(image: Image, temp_dir: Path) -> str:
+    """Persist an image provided by gemini_webapi and return base64-encoded bytes."""
+    if isinstance(image, GeneratedImage):
+        saved_path = await image.save(path=str(temp_dir), full_size=True)
+    else:
+        saved_path = await image.save(path=str(temp_dir))
+
+    if not saved_path:
+        raise ValueError("Failed to save generated image")
+
+    data = Path(saved_path).read_bytes()
+    return base64.b64encode(data).decode("utf-8")
