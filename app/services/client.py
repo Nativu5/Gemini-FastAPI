@@ -18,6 +18,9 @@ XML_WRAP_HINT = (
     "```xml\n<tool_call name=\"tool_name\">{\"arg\": \"value\"}</tool_call>\n```\n"
 )
 
+MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=\s*[\\`*_{}\[\]()#+\-.!])")
+CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`]*`)", re.DOTALL)
+
 
 class GeminiClientWrapper(GeminiClient):
     """Gemini client with helper methods."""
@@ -185,7 +188,22 @@ class GeminiClientWrapper(GeminiClient):
 
         # Fix some escaped characters
         text = text.replace("&lt;", "<").replace("\\<", "<").replace("\\_", "_").replace("\\>", ">")
-        text = re.sub(r"\\(?=\s*[\\`*_{}\[\]()#+\-.!])", "", text)
+
+        def _unescape_markdown(text_content: str) -> str:
+            parts: list[str] = []
+            last_index = 0
+            for match in CODE_FENCE_RE.finditer(text_content):
+                non_code = text_content[last_index : match.start()]
+                if non_code:
+                    parts.append(MARKDOWN_ESCAPE_RE.sub("", non_code))
+                parts.append(match.group(0))
+                last_index = match.end()
+            tail = text_content[last_index:]
+            if tail:
+                parts.append(MARKDOWN_ESCAPE_RE.sub("", tail))
+            return "".join(parts)
+
+        text = _unescape_markdown(text)
 
         def simplify_link_target(text_content: str) -> str:
             match_colon_num = re.match(r"([^:]+:\d+)", text_content)
