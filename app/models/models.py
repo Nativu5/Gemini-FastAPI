@@ -219,6 +219,18 @@ class ResponseOutputMessage(BaseModel):
     content: List[ResponseOutputContent]
 
 
+class ResponseImageGenerationCall(BaseModel):
+    """Image generation call record emitted in Responses API."""
+
+    id: str
+    type: Literal["image_generation_call"] = "image_generation_call"
+    status: Literal["completed", "in_progress", "generating", "failed"] = "completed"
+    result: Optional[str] = None
+    output_format: Optional[str] = None
+    size: Optional[str] = None
+    revised_prompt: Optional[str] = None
+
+
 class ResponseCreateResponse(BaseModel):
     """Responses API response payload."""
 
@@ -226,7 +238,7 @@ class ResponseCreateResponse(BaseModel):
     object: Literal["response"] = "response"
     created: int
     model: str
-    output: List[ResponseOutputMessage]
+    output: List[Union[ResponseOutputMessage, ResponseImageGenerationCall]]
     output_text: Optional[str] = None
     usage: Usage
 

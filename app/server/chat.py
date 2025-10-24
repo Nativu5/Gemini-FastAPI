@@ -23,6 +23,7 @@ from ..models import (
     ModelListResponse,
     ResponseCreateRequest,
     ResponseCreateResponse,
+    ResponseImageGenerationCall,
     ResponseInputContent,
     ResponseInputItem,
     ResponseOutputContent,
@@ -442,6 +443,7 @@ async def create_response(
     assistant_text = LMDBConversationStore.remove_think_tags(visible_text)
 
     image_contents: list[ResponseOutputContent] = []
+    image_call_items: list[ResponseImageGenerationCall] = []
     for image in model_output.images:
         try:
             image_base64 = await _image_to_base64(image, tmp_dir)
@@ -454,6 +456,15 @@ async def create_response(
                 type="output_image",
                 image_base64=image_base64,
                 mime_type=mime_type,
+            )
+        )
+        image_call_items.append(
+            ResponseImageGenerationCall(
+                id=f"img_{uuid.uuid4().hex}",
+                status="completed",
+                result=image_base64,
+                output_format="png" if isinstance(image, GeneratedImage) else "jpeg",
+                size=None,
             )
         )
 
@@ -487,7 +498,8 @@ async def create_response(
                 type="message",
                 role="assistant",
                 content=response_contents,
-            )
+            ),
+            *image_call_items,
         ],
         output_text=assistant_text or None,
         usage=usage,
