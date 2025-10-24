@@ -339,9 +339,8 @@ async def create_chat_completion(
 
     structured_requirement = _build_structured_requirement(request.response_format)
     if structured_requirement and request.stream:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Streaming is not supported when response_format is specified.",
+        logger.debug(
+            "Structured response requested with streaming enabled; will stream canonical JSON once ready."
         )
 
     extra_instructions = (
