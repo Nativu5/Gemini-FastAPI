@@ -185,6 +185,7 @@ class GeminiClientWrapper(GeminiClient):
 
         # Fix some escaped characters
         text = text.replace("&lt;", "<").replace("\\<", "<").replace("\\_", "_").replace("\\>", ">")
+        text = re.sub(r"\\(?=\s*[\\`*_{}\[\]()#+\-.!])", "", text)
 
         def simplify_link_target(text_content: str) -> str:
             match_colon_num = re.match(r"([^:]+:\d+)", text_content)
