@@ -22,11 +22,8 @@ from ..models import (
     ToolCall,
     ToolChoiceFunction,
 )
-from ..services import (
-    GeminiClientPool,
-    GeminiClientWrapper,
-    LMDBConversationStore,
-)
+from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
+from ..services.client import XML_WRAP_HINT
 from ..utils import g_config
 from ..utils.helper import estimate_tokens
 from .middleware import get_temp_dir, verify_api_key
@@ -40,6 +37,7 @@ TOOL_BLOCK_RE = re.compile(r"```xml\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 TOOL_CALL_RE = re.compile(
     r"<tool_call\s+name=\"([^\"]+)\">(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
 )
+XML_HINT_STRIPPED = XML_WRAP_HINT.strip()
 
 
 router = APIRouter()
@@ -121,11 +119,20 @@ def _prepare_messages_for_model(
     return prepared
 
 
+def _strip_xml_hint(text: str) -> str:
+    """Remove the XML wrap hint text from a given string."""
+    if not text:
+        return text
+    cleaned = text.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
+    return cleaned.strip()
+
+
 def _remove_tool_call_blocks(text: str) -> str:
     """Strip tool call code blocks from text."""
     if not text:
         return text
-    return TOOL_BLOCK_RE.sub("", text)
+    cleaned = TOOL_BLOCK_RE.sub("", text)
+    return _strip_xml_hint(cleaned)
 
 
 def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
@@ -167,6 +174,7 @@ def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
         return ""
 
     cleaned = TOOL_BLOCK_RE.sub(_replace, text)
+    cleaned = _strip_xml_hint(cleaned)
     return cleaned, tool_calls
 
 
