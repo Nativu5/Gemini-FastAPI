@@ -14,8 +14,9 @@ from ..utils import g_config
 from ..utils.helper import add_tag, save_file_to_tempfile, save_url_to_tempfile
 
 XML_WRAP_HINT = (
-    "\nRemember to wrap any XML-style tool call response inside a fenced block exactly like:\n"
+    "\nYou MUST wrap every tool call response inside a single fenced block exactly like:\n"
     "```xml\n<tool_call name=\"tool_name\">{\"arg\": \"value\"}</tool_call>\n```\n"
+    "No other text may appear before or after the fence; otherwise the call will be ignored.\n"
 )
 
 MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=\s*[\\`*_{}\[\]()#+\-.!])")

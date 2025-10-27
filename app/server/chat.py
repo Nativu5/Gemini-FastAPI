@@ -161,13 +161,19 @@ def _build_tool_prompt(
     # `auto` or None fall back to default instructions.
 
     lines.append(
-        "When you decide to call a tool, respond with NOTHING except the following format wrapped inside a ```xml``` fenced block:"
+        "When you decide to call a tool you MUST respond with nothing except a single fenced block exactly like the template below."
+    )
+    lines.append(
+        "The fenced block MUST use ```xml as the opening fence and ``` as the closing fence. Do not add text before or after it."
     )
     lines.append("```xml")
     lines.append('<tool_call name="tool_name">{"argument": "value"}</tool_call>')
     lines.append("```")
     lines.append(
-        "Use double quotes for JSON keys and values. If multiple tool calls are required, include multiple <tool_call> entries inside the same fenced block. Without a tool call, reply normally without any XML block."
+        "Use double quotes for JSON keys and values. If you omit the fenced block or include any extra text, the system will assume you are NOT calling a tool and your request will fail."
+    )
+    lines.append(
+        "If multiple tool calls are required, include multiple <tool_call> entries inside the same fenced block. Without a tool call, reply normally and do NOT emit any ```xml fence."
     )
 
     return "\n".join(lines)
