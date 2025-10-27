@@ -1,6 +1,7 @@
 import base64
 import json
 import re
+import struct
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -603,7 +604,7 @@ async def create_response(
     image_call_items: list[ResponseImageGenerationCall] = []
     for image in model_output.images:
         try:
-            image_base64 = await _image_to_base64(image, tmp_dir)
+            image_base64, width, height = await _image_to_base64(image, tmp_dir)
         except Exception as exc:
             logger.warning(f"Failed to download generated image: {exc}")
             continue
@@ -613,6 +614,8 @@ async def create_response(
                 type="output_image",
                 image_base64=image_base64,
                 mime_type=mime_type,
+                width=width,
+                height=height,
             )
         )
         image_call_items.append(
@@ -621,7 +624,7 @@ async def create_response(
                 status="completed",
                 result=image_base64,
                 output_format="png" if isinstance(image, GeneratedImage) else "jpeg",
-                size=None,
+                size=f"{width}x{height}" if width and height else None,
             )
         )
 
@@ -922,8 +925,72 @@ def _create_standard_response(
     return result
 
 
-async def _image_to_base64(image: Image, temp_dir: Path) -> str:
-    """Persist an image provided by gemini_webapi and return base64-encoded bytes."""
+def _extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
+    """Return image dimensions (width, height) if PNG or JPEG headers are present."""
+    # PNG: dimensions stored in bytes 16..24 of the IHDR chunk
+    if len(data) >= 24 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        try:
+            width, height = struct.unpack(">II", data[16:24])
+            return int(width), int(height)
+        except struct.error:
+            return None, None
+
+    # JPEG: dimensions stored in SOF segment; iterate through markers to locate it
+    if len(data) >= 4 and data[0:2] == b"\xff\xd8":
+        idx = 2
+        length = len(data)
+        sof_markers = {
+            0xC0,
+            0xC1,
+            0xC2,
+            0xC3,
+            0xC5,
+            0xC6,
+            0xC7,
+            0xC9,
+            0xCA,
+            0xCB,
+            0xCD,
+            0xCE,
+            0xCF,
+        }
+        while idx < length:
+            # Find marker alignment (markers are prefixed with 0xFF bytes)
+            if data[idx] != 0xFF:
+                idx += 1
+                continue
+            while idx < length and data[idx] == 0xFF:
+                idx += 1
+            if idx >= length:
+                break
+            marker = data[idx]
+            idx += 1
+
+            if marker in (0xD8, 0xD9, 0x01) or 0xD0 <= marker <= 0xD7:
+                continue
+
+            if idx + 1 >= length:
+                break
+            segment_length = (data[idx] << 8) + data[idx + 1]
+            idx += 2
+            if segment_length < 2:
+                break
+
+            if marker in sof_markers:
+                if idx + 4 < length:
+                    # Skip precision byte at idx, then read height/width (big-endian)
+                    height = (data[idx + 1] << 8) + data[idx + 2]
+                    width = (data[idx + 3] << 8) + data[idx + 4]
+                    return int(width), int(height)
+                break
+
+            idx += segment_length - 2
+
+    return None, None
+
+
+async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | None, int | None]:
+    """Persist an image provided by gemini_webapi and return base64 plus dimensions."""
     if isinstance(image, GeneratedImage):
         saved_path = await image.save(path=str(temp_dir), full_size=True)
     else:
@@ -933,4 +1000,5 @@ async def _image_to_base64(image: Image, temp_dir: Path) -> str:
         raise ValueError("Failed to save generated image")
 
     data = Path(saved_path).read_bytes()
-    return base64.b64encode(data).decode("utf-8")
+    width, height = _extract_image_dimensions(data)
+    return base64.b64encode(data).decode("utf-8"), width, height
