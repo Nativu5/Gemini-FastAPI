@@ -75,17 +75,17 @@ def _build_structured_requirement(
         return None
 
     if response_format.get("type") != "json_schema":
-        logger.warning("Unsupported response_format type requested: %s", response_format)
+        logger.warning(f"Unsupported response_format type requested: {response_format}")
         return None
 
     json_schema = response_format.get("json_schema")
     if not isinstance(json_schema, dict):
-        logger.warning("Invalid json_schema payload in response_format: %s", response_format)
+        logger.warning(f"Invalid json_schema payload in response_format: {response_format}")
         return None
 
     schema = json_schema.get("schema")
     if not isinstance(schema, dict):
-        logger.warning("Missing `schema` object in response_format payload: %s", response_format)
+        logger.warning(f"Missing `schema` object in response_format payload: {response_format}")
         return None
 
     schema_name = json_schema.get("name") or "response"
@@ -273,7 +273,7 @@ def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
             name = (call_match.group(1) or "").strip()
             raw_args = (call_match.group(2) or "").strip()
             if not name:
-                logger.warning("Encountered tool_call block without a function name: %s", block_content)
+                logger.warning(f"Encountered tool_call block without a function name: {block_content}")
                 continue
 
             arguments = raw_args
@@ -281,9 +281,7 @@ def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
                 parsed_args = json.loads(raw_args)
                 arguments = json.dumps(parsed_args, ensure_ascii=False)
             except json.JSONDecodeError:
-                logger.warning(
-                    "Failed to parse tool call arguments for '%s'. Passing raw string.", name
-                )
+                logger.warning(f"Failed to parse tool call arguments for '{name}'. Passing raw string.")
 
             tool_calls.append(
                 ToolCall(
@@ -418,9 +416,8 @@ async def create_chat_completion(
             structured_payload = json.loads(cleaned_visible)
         except json.JSONDecodeError as exc:
             logger.warning(
-                "Failed to decode JSON for structured response (schema=%s): %s",
-                structured_requirement.schema_name,
-                cleaned_visible,
+                f"Failed to decode JSON for structured response (schema={structured_requirement.schema_name}): "
+                f"{cleaned_visible}"
             )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -432,7 +429,7 @@ async def create_chat_completion(
         storage_output = canonical_output
 
     if tool_calls_payload:
-        logger.debug("Detected tool calls: %s", tool_calls_payload)
+        logger.debug(f"Detected tool calls: {tool_calls_payload}")
 
     # After formatting, persist the conversation to LMDB
     try:
