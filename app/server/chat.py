@@ -15,6 +15,7 @@ from gemini_webapi.constants import Model
 from gemini_webapi.types.image import GeneratedImage, Image
 from loguru import logger
 
+from .middleware import get_temp_dir, verify_api_key
 from ..models import (
     ContentItem,
     ChatCompletionRequest,
@@ -26,7 +27,6 @@ from ..models import (
     ResponseCreateRequest,
     ResponseCreateResponse,
     ResponseImageGenerationCall,
-    ResponseInputContent,
     ResponseInputItem,
     ResponseOutputContent,
     ResponseOutputMessage,
@@ -39,7 +39,6 @@ from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationSt
 from ..services.client import XML_WRAP_HINT
 from ..utils import g_config
 from ..utils.helper import estimate_tokens
-from .middleware import get_temp_dir, verify_api_key
 
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
@@ -52,7 +51,6 @@ TOOL_CALL_RE = re.compile(
 )
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 XML_HINT_STRIPPED = XML_WRAP_HINT.strip()
-
 
 router = APIRouter()
 
@@ -80,12 +78,16 @@ def _build_structured_requirement(
 
     json_schema = response_format.get("json_schema")
     if not isinstance(json_schema, dict):
-        logger.warning(f"Invalid json_schema payload in response_format: {response_format}")
+        logger.warning(
+            f"Invalid json_schema payload in response_format: {response_format}"
+        )
         return None
 
     schema = json_schema.get("schema")
     if not isinstance(schema, dict):
-        logger.warning(f"Missing `schema` object in response_format payload: {response_format}")
+        logger.warning(
+            f"Missing `schema` object in response_format payload: {response_format}"
+        )
         return None
 
     schema_name = json_schema.get("name") or "response"
@@ -202,7 +204,11 @@ def _prepare_messages_for_model(
 
     combined_instructions = "\n\n".join(instructions)
 
-    if prepared and prepared[0].role == "system" and isinstance(prepared[0].content, str):
+    if (
+        prepared
+        and prepared[0].role == "system"
+        and isinstance(prepared[0].content, str)
+    ):
         existing = prepared[0].content or ""
         separator = "\n\n" if existing else ""
         prepared[0].content = f"{existing}{separator}{combined_instructions}"
@@ -279,7 +285,9 @@ def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
             name = (call_match.group(1) or "").strip()
             raw_args = (call_match.group(2) or "").strip()
             if not name:
-                logger.warning(f"Encountered tool_call block without a function name: {block_content}")
+                logger.warning(
+                    f"Encountered tool_call block without a function name: {block_content}"
+                )
                 continue
 
             arguments = raw_args
@@ -287,7 +295,9 @@ def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
                 parsed_args = json.loads(raw_args)
                 arguments = json.dumps(parsed_args, ensure_ascii=False)
             except json.JSONDecodeError:
-                logger.warning(f"Failed to parse tool call arguments for '{name}'. Passing raw string.")
+                logger.warning(
+                    f"Failed to parse tool call arguments for '{name}'. Passing raw string."
+                )
 
             tool_calls.append(
                 ToolCall(
@@ -352,7 +362,9 @@ async def create_chat_completion(
     )
 
     # Check if conversation is reusable
-    session, client, remaining_messages = _find_reusable_session(db, pool, model, request.messages)
+    session, client, remaining_messages = _find_reusable_session(
+        db, pool, model, request.messages
+    )
 
     if session:
         messages_to_send = _prepare_messages_for_model(
@@ -404,8 +416,12 @@ async def create_chat_completion(
         raise
 
     # Format the response from API
-    raw_output_with_think = GeminiClientWrapper.extract_output(response, include_thoughts=True)
-    raw_output_clean = GeminiClientWrapper.extract_output(response, include_thoughts=False)
+    raw_output_with_think = GeminiClientWrapper.extract_output(
+        response, include_thoughts=True
+    )
+    raw_output_clean = GeminiClientWrapper.extract_output(
+        response, include_thoughts=False
+    )
 
     visible_output, tool_calls = _extract_tool_calls(raw_output_with_think)
     storage_output = _remove_tool_call_blocks(raw_output_clean).strip()
@@ -504,9 +520,13 @@ async def create_response(
     try:
         model = Model.from_name(request.model)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
 
-    session, client, remaining_messages = _find_reusable_session(db, pool, model, messages)
+    session, client, remaining_messages = _find_reusable_session(
+        db, pool, model, messages
+    )
 
     if session:
         messages_to_send = remaining_messages
@@ -530,7 +550,9 @@ async def create_response(
         try:
             client = pool.acquire()
             session = client.start_chat(model=model)
-            model_input, files = await GeminiClientWrapper.process_conversation(messages, tmp_dir)
+            model_input, files = await GeminiClientWrapper.process_conversation(
+                messages, tmp_dir
+            )
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
         except Exception as e:
@@ -548,8 +570,12 @@ async def create_response(
         logger.exception(f"Error generating content from Gemini API for responses: {e}")
         raise
 
-    text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
-    text_without_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=False)
+    text_with_think = GeminiClientWrapper.extract_output(
+        model_output, include_thoughts=True
+    )
+    text_without_think = GeminiClientWrapper.extract_output(
+        model_output, include_thoughts=False
+    )
 
     storage_output = _remove_tool_call_blocks(text_without_think).strip()
     visible_text = _remove_tool_call_blocks(text_with_think).strip()
@@ -583,7 +609,9 @@ async def create_response(
 
     response_contents: list[ResponseOutputContent] = []
     if assistant_text:
-        response_contents.append(ResponseOutputContent(type="output_text", text=assistant_text))
+        response_contents.append(
+            ResponseOutputContent(type="output_text", text=assistant_text)
+        )
     response_contents.extend(image_contents)
 
     if not response_contents:
@@ -641,13 +669,17 @@ def _text_from_message(message: Message) -> str:
         base_text = message.content
     elif isinstance(message.content, list):
         base_text = "\n".join(
-            item.text or "" for item in message.content if getattr(item, "type", "") == "text"
+            item.text or ""
+            for item in message.content
+            if getattr(item, "type", "") == "text"
         )
     elif message.content is None:
         base_text = ""
 
     if message.tool_calls:
-        tool_arg_text = "".join(call.function.arguments or "" for call in message.tool_calls)
+        tool_arg_text = "".join(
+            call.function.arguments or "" for call in message.tool_calls
+        )
         base_text = f"{base_text}\n{tool_arg_text}" if base_text else tool_arg_text
 
     return base_text
@@ -666,7 +698,7 @@ def _find_reusable_session(
     ---------
     When a reply was generated by *another* server instance, the local LMDB may
     only contain an older part of the conversation.  However, as long as we can
-    line-up **any** earlier assistant/system response, we can restore the
+    line up **any** earlier assistant/system response, we can restore the
     corresponding Gemini session and replay the *remaining* turns locally
     (including that missing assistant reply and the subsequent user prompts).
 
@@ -702,7 +734,9 @@ def _find_reusable_session(
     return None, None, messages
 
 
-async def _send_with_split(session: ChatSession, text: str, files: list[Path | str] | None = None):
+async def _send_with_split(
+    session: ChatSession, text: str, files: list[Path | str] | None = None
+):
     """Send text to Gemini, automatically splitting into multiple batches if it is
     longer than ``MAX_CHARS_PER_REQUEST``.
 
@@ -768,7 +802,9 @@ def _create_streaming_response(
             "object": "chat.completion.chunk",
             "created": created_time,
             "model": model,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            "choices": [
+                {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+            ],
         }
         yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
@@ -782,7 +818,9 @@ def _create_streaming_response(
                     "object": "chat.completion.chunk",
                     "created": created_time,
                     "model": model,
-                    "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
+                    "choices": [
+                        {"index": 0, "delta": {"content": chunk}, "finish_reason": None}
+                    ],
                 }
                 yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
@@ -792,7 +830,13 @@ def _create_streaming_response(
                 "object": "chat.completion.chunk",
                 "created": created_time,
                 "model": model,
-                "choices": [{"index": 0, "delta": {"tool_calls": tool_calls}, "finish_reason": None}],
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"tool_calls": tool_calls},
+                        "finish_reason": None,
+                    }
+                ],
             }
             yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 

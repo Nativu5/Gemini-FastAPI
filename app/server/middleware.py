@@ -17,7 +17,8 @@ def global_exception_handler(request: Request, exc: Exception):
         )
 
     return ORJSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": {"message": str(exc)}}
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"error": {"message": str(exc)}},
     )
 
 
@@ -36,7 +37,9 @@ def verify_api_key(
         return ""
 
     if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing token")
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing token"
+        )
 
     api_key = credentials.credentials
     if api_key != g_config.server.api_key:

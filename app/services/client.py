@@ -15,7 +15,7 @@ from ..utils.helper import add_tag, save_file_to_tempfile, save_url_to_tempfile
 
 XML_WRAP_HINT = (
     "\nYou MUST wrap every tool call response inside a single fenced block exactly like:\n"
-    "```xml\n<tool_call name=\"tool_name\">{\"arg\": \"value\"}</tool_call>\n```\n"
+    '```xml\n<tool_call name="tool_name">{"arg": "value"}</tool_call>\n```\n'
     "No other text may appear before or after the fence; otherwise the call will be ignored.\n"
 )
 
@@ -55,9 +55,11 @@ class GeminiClientWrapper(GeminiClient):
         while cnt:
             cnt -= 1
             try:
-                return await super().generate_content(prompt, files, model, gem, chat, **kwargs)
+                return await super().generate_content(
+                    prompt, files, model, gem, chat, **kwargs
+                )
             except ModelInvalid as e:
-                # This is not always caused by model selection. Instead it can be solved by retrying.
+                # This is not always caused by model selection. Instead, it can be solved by retrying.
                 # So we catch it and retry as a workaround.
                 await asyncio.sleep(1)
                 last_exception = e
@@ -65,6 +67,7 @@ class GeminiClientWrapper(GeminiClient):
         # If retrying failed, re-raise ModelInvalid
         if last_exception:
             raise last_exception
+        return None
 
     @staticmethod
     async def process_message(
@@ -102,7 +105,9 @@ class GeminiClientWrapper(GeminiClient):
                         raise ValueError("File cannot be empty")
                     if file_data := item.file.get("file_data", None):
                         filename = item.file.get("filename", "")
-                        files.append(await save_file_to_tempfile(file_data, filename, tempdir))
+                        files.append(
+                            await save_file_to_tempfile(file_data, filename, tempdir)
+                        )
                     else:
                         raise ValueError("File must contain 'file_data' key")
         elif message.content is not None:
@@ -118,7 +123,9 @@ class GeminiClientWrapper(GeminiClient):
                 except (json.JSONDecodeError, TypeError):
                     # Leave args_text as is if it is not valid JSON
                     pass
-                tool_blocks.append(f'<tool_call name="{call.function.name}">{args_text}</tool_call>')
+                tool_blocks.append(
+                    f'<tool_call name="{call.function.name}">{args_text}</tool_call>'
+                )
 
             if tool_blocks:
                 tool_section = "```xml\n" + "\n".join(tool_blocks) + "\n```"
@@ -188,7 +195,12 @@ class GeminiClientWrapper(GeminiClient):
             text += str(response)
 
         # Fix some escaped characters
-        text = text.replace("&lt;", "<").replace("\\<", "<").replace("\\_", "_").replace("\\>", ">")
+        text = (
+            text.replace("&lt;", "<")
+            .replace("\\<", "<")
+            .replace("\\_", "_")
+            .replace("\\>", ">")
+        )
 
         def _unescape_markdown(text_content: str) -> str:
             parts: list[str] = []
@@ -224,7 +236,7 @@ class GeminiClientWrapper(GeminiClient):
             else:
                 return new_link_segment
 
-        # Replace Google search links with simplified markdown links
+        # Replace Google search links with simplified Markdown links
         pattern = r"(\()?\[`([^`]+?)`\]\((https://www.google.com/search\?q=)(.*?)(?<!\\)\)\)*(\))?"
         text = re.sub(pattern, replacer, text)
 

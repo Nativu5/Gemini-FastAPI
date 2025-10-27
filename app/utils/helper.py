@@ -5,7 +5,6 @@ from pathlib import Path
 import httpx
 from loguru import logger
 
-
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 
 
@@ -37,6 +36,8 @@ async def save_file_to_tempfile(
 
 
 async def save_url_to_tempfile(url: str, tempdir: Path | None = None):
+    data: bytes | None = None
+    suffix: str | None = None
     if url.startswith("data:image/"):
         # Base64 encoded image
         base64_data = url.split(",")[1]
