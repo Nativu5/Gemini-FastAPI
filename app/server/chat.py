@@ -581,6 +581,24 @@ async def create_response(
     visible_text = _remove_tool_call_blocks(text_with_think).strip()
     assistant_text = LMDBConversationStore.remove_think_tags(visible_text)
 
+    expects_image = (
+        request.tool_choice is not None
+        and request.tool_choice.type == "image_generation"
+    )
+    if expects_image and not model_output.images:
+        summary = assistant_text.strip() if assistant_text else ""
+        if summary:
+            summary = re.sub(r"\s+", " ", summary)
+            if len(summary) > 200:
+                summary = f"{summary[:197]}..."
+        logger.warning(
+            "Image generation was requested via tool_choice but Gemini returned no images."
+        )
+        detail = "LLM returned no images for the requested image_generation tool."
+        if summary:
+            detail = f"{detail} Assistant response: {summary}"
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
+
     image_contents: list[ResponseOutputContent] = []
     image_call_items: list[ResponseImageGenerationCall] = []
     for image in model_output.images:
