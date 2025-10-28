@@ -153,19 +153,10 @@ class GeminiClientWrapper(GeminiClient):
 
         model_input = "\n".join(fragment for fragment in text_fragments if fragment)
 
-        # This is a workaround for Gemini Web's displaying issues with XML blocks.
-        # Add this for tool calling
-        if re.search(r"<\s*[^>]+>", model_input):
-            hint = XML_WRAP_HINT
-        else:
-            hint = ""
-
         # Add role tag if needed
         if model_input:
             if tagged:
-                model_input = add_tag(message.role, model_input + hint)
-            else:
-                model_input += hint
+                model_input = add_tag(message.role, model_input)
 
         return model_input, files
 

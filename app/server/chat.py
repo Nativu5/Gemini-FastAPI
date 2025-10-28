@@ -178,6 +178,34 @@ def _build_tool_prompt(
     return "\n".join(lines)
 
 
+def _append_xml_hint_to_last_user_message(messages: list[Message]) -> None:
+    """Ensure the last user message carries the XML wrap hint."""
+    for msg in reversed(messages):
+        if msg.role != "user" or msg.content is None:
+            continue
+
+        if isinstance(msg.content, str):
+            if XML_HINT_STRIPPED not in msg.content:
+                msg.content = f"{msg.content}{XML_WRAP_HINT}"
+            return
+
+        if isinstance(msg.content, list):
+            for part in reversed(msg.content):
+                if getattr(part, "type", None) != "text":
+                    continue
+                text_value = part.text or ""
+                if XML_HINT_STRIPPED in text_value:
+                    return
+                part.text = f"{text_value}{XML_WRAP_HINT}"
+                return
+
+            messages_text = XML_WRAP_HINT.strip()
+            msg.content.append(ContentItem(type="text", text=messages_text))
+            return
+
+    # No user message to annotate; nothing to do.
+
+
 def _prepare_messages_for_model(
     source_messages: list[Message],
     tools: list[Tool] | None,
@@ -207,6 +235,9 @@ def _prepare_messages_for_model(
         prepared[0].content = f"{existing}{separator}{combined_instructions}"
     else:
         prepared.insert(0, Message(role="system", content=combined_instructions))
+
+    if tools and tool_choice != "none":
+        _append_xml_hint_to_last_user_message(prepared)
 
     return prepared
 
