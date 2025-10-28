@@ -107,9 +107,7 @@ class ChatCompletionRequest(BaseModel):
     user: Optional[str] = None
     tools: Optional[List["Tool"]] = None
     tool_choice: Optional[
-        Union[
-            Literal["none"], Literal["auto"], Literal["required"], "ToolChoiceFunction"
-        ]
+        Union[Literal["none"], Literal["auto"], Literal["required"], "ToolChoiceFunction"]
     ] = None
     response_format: Optional[Dict[str, Any]] = None
 
@@ -153,9 +151,7 @@ class ConversationInStore(BaseModel):
     metadata: list[str | None] = Field(
         ..., description="Metadata for Gemini API to locate the conversation"
     )
-    messages: list[Message] = Field(
-        ..., description="Message contents in the conversation"
-    )
+    messages: list[Message] = Field(..., description="Message contents in the conversation")
 
 
 class ResponseInputContent(BaseModel):

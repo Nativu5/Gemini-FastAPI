@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
+from typing import Any, cast
 
 from gemini_webapi import GeminiClient, ModelOutput
 from gemini_webapi.client import ChatSession
@@ -23,6 +24,13 @@ MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=\s*[\\`*_{}\[\]()#+\-.!])")
 CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`]*`)", re.DOTALL)
 
 
+_UNSET = object()
+
+
+def _resolve(value: Any, fallback: Any):
+    return fallback if value is _UNSET else value
+
+
 class GeminiClientWrapper(GeminiClient):
     """Gemini client with helper methods."""
 
@@ -30,16 +38,32 @@ class GeminiClientWrapper(GeminiClient):
         super().__init__(**kwargs)
         self.id = client_id
 
-    async def init(self, **kwargs):
+    async def init(
+        self,
+        timeout: float = cast(float, _UNSET),
+        auto_close: bool = False,
+        close_delay: float = 300,
+        auto_refresh: bool = cast(bool, _UNSET),
+        refresh_interval: float = cast(float, _UNSET),
+        verbose: bool = cast(bool, _UNSET),
+    ) -> None:
         """
         Inject default configuration values.
         """
-        kwargs.setdefault("timeout", g_config.gemini.timeout)
-        kwargs.setdefault("auto_refresh", g_config.gemini.auto_refresh)
-        kwargs.setdefault("verbose", g_config.gemini.verbose)
-        kwargs.setdefault("refresh_interval", g_config.gemini.refresh_interval)
+        config = g_config.gemini
+        timeout = cast(float, _resolve(timeout, config.timeout))
+        auto_refresh = cast(bool, _resolve(auto_refresh, config.auto_refresh))
+        refresh_interval = cast(float, _resolve(refresh_interval, config.refresh_interval))
+        verbose = cast(bool, _resolve(verbose, config.verbose))
 
-        await super().init(**kwargs)
+        await super().init(
+            timeout=timeout,
+            auto_close=auto_close,
+            close_delay=close_delay,
+            auto_refresh=auto_refresh,
+            refresh_interval=refresh_interval,
+            verbose=verbose,
+        )
 
     async def generate_content(
         self,
@@ -49,15 +73,13 @@ class GeminiClientWrapper(GeminiClient):
         gem: Gem | str | None = None,
         chat: ChatSession | None = None,
         **kwargs,
-    ):
+    ) -> ModelOutput:
         cnt = 2  # Try 2 times before giving up
-        last_exception = None
+        last_exception: ModelInvalid | None = None
         while cnt:
             cnt -= 1
             try:
-                return await super().generate_content(
-                    prompt, files, model, gem, chat, **kwargs
-                )
+                return await super().generate_content(prompt, files, model, gem, chat, **kwargs)
             except ModelInvalid as e:
                 # This is not always caused by model selection. Instead, it can be solved by retrying.
                 # So we catch it and retry as a workaround.
@@ -65,9 +87,9 @@ class GeminiClientWrapper(GeminiClient):
                 last_exception = e
 
         # If retrying failed, re-raise ModelInvalid
-        if last_exception:
+        if last_exception is not None:
             raise last_exception
-        return None
+        raise RuntimeError("generate_content failed without receiving a ModelInvalid error.")
 
     @staticmethod
     async def process_message(
@@ -105,9 +127,7 @@ class GeminiClientWrapper(GeminiClient):
                         raise ValueError("File cannot be empty")
                     if file_data := item.file.get("file_data", None):
                         filename = item.file.get("filename", "")
-                        files.append(
-                            await save_file_to_tempfile(file_data, filename, tempdir)
-                        )
+                        files.append(await save_file_to_tempfile(file_data, filename, tempdir))
                     else:
                         raise ValueError("File must contain 'file_data' key")
         elif message.content is not None:
@@ -195,12 +215,7 @@ class GeminiClientWrapper(GeminiClient):
             text += str(response)
 
         # Fix some escaped characters
-        text = (
-            text.replace("&lt;", "<")
-            .replace("\\<", "<")
-            .replace("\\_", "_")
-            .replace("\\>", ">")
-        )
+        text = text.replace("&lt;", "<").replace("\\<", "<").replace("\\_", "_").replace("\\>", ">")
 
         def _unescape_markdown(text_content: str) -> str:
             parts: list[str] = []

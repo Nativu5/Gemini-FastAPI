@@ -79,16 +79,12 @@ def _build_structured_requirement(
 
     json_schema = response_format.get("json_schema")
     if not isinstance(json_schema, dict):
-        logger.warning(
-            f"Invalid json_schema payload in response_format: {response_format}"
-        )
+        logger.warning(f"Invalid json_schema payload in response_format: {response_format}")
         return None
 
     schema = json_schema.get("schema")
     if not isinstance(schema, dict):
-        logger.warning(
-            f"Missing `schema` object in response_format payload: {response_format}"
-        )
+        logger.warning(f"Missing `schema` object in response_format payload: {response_format}")
         return None
 
     schema_name = json_schema.get("name") or "response"
@@ -205,11 +201,7 @@ def _prepare_messages_for_model(
 
     combined_instructions = "\n\n".join(instructions)
 
-    if (
-        prepared
-        and prepared[0].role == "system"
-        and isinstance(prepared[0].content, str)
-    ):
+    if prepared and prepared[0].role == "system" and isinstance(prepared[0].content, str):
         existing = prepared[0].content or ""
         separator = "\n\n" if existing else ""
         prepared[0].content = f"{existing}{separator}{combined_instructions}"
@@ -358,14 +350,10 @@ async def create_chat_completion(
             "Structured response requested with streaming enabled; will stream canonical JSON once ready."
         )
 
-    extra_instructions = (
-        [structured_requirement.instruction] if structured_requirement else None
-    )
+    extra_instructions = [structured_requirement.instruction] if structured_requirement else None
 
     # Check if conversation is reusable
-    session, client, remaining_messages = _find_reusable_session(
-        db, pool, model, request.messages
-    )
+    session, client, remaining_messages = _find_reusable_session(db, pool, model, request.messages)
 
     if session:
         messages_to_send = _prepare_messages_for_model(
@@ -417,12 +405,8 @@ async def create_chat_completion(
         raise
 
     # Format the response from API
-    raw_output_with_think = GeminiClientWrapper.extract_output(
-        response, include_thoughts=True
-    )
-    raw_output_clean = GeminiClientWrapper.extract_output(
-        response, include_thoughts=False
-    )
+    raw_output_with_think = GeminiClientWrapper.extract_output(response, include_thoughts=True)
+    raw_output_clean = GeminiClientWrapper.extract_output(response, include_thoughts=False)
 
     visible_output, tool_calls = _extract_tool_calls(raw_output_with_think)
     storage_output = _remove_tool_call_blocks(raw_output_clean).strip()
@@ -521,13 +505,9 @@ async def create_response(
     try:
         model = Model.from_name(request.model)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    session, client, remaining_messages = _find_reusable_session(
-        db, pool, model, messages
-    )
+    session, client, remaining_messages = _find_reusable_session(db, pool, model, messages)
 
     if session:
         messages_to_send = remaining_messages
@@ -551,9 +531,7 @@ async def create_response(
         try:
             client = pool.acquire()
             session = client.start_chat(model=model)
-            model_input, files = await GeminiClientWrapper.process_conversation(
-                messages, tmp_dir
-            )
+            model_input, files = await GeminiClientWrapper.process_conversation(messages, tmp_dir)
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
         except Exception as e:
@@ -571,20 +549,15 @@ async def create_response(
         logger.exception(f"Error generating content from Gemini API for responses: {e}")
         raise
 
-    text_with_think = GeminiClientWrapper.extract_output(
-        model_output, include_thoughts=True
-    )
-    text_without_think = GeminiClientWrapper.extract_output(
-        model_output, include_thoughts=False
-    )
+    text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
+    text_without_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=False)
 
     storage_output = _remove_tool_call_blocks(text_without_think).strip()
     visible_text = _remove_tool_call_blocks(text_with_think).strip()
     assistant_text = LMDBConversationStore.remove_think_tags(visible_text)
 
     expects_image = (
-        request.tool_choice is not None
-        and request.tool_choice.type == "image_generation"
+        request.tool_choice is not None and request.tool_choice.type == "image_generation"
     )
     if expects_image and not model_output.images:
         summary = assistant_text.strip() if assistant_text else ""
@@ -630,9 +603,7 @@ async def create_response(
 
     response_contents: list[ResponseOutputContent] = []
     if assistant_text:
-        response_contents.append(
-            ResponseOutputContent(type="output_text", text=assistant_text)
-        )
+        response_contents.append(ResponseOutputContent(type="output_text", text=assistant_text))
     response_contents.extend(image_contents)
 
     if not response_contents:
@@ -690,17 +661,13 @@ def _text_from_message(message: Message) -> str:
         base_text = message.content
     elif isinstance(message.content, list):
         base_text = "\n".join(
-            item.text or ""
-            for item in message.content
-            if getattr(item, "type", "") == "text"
+            item.text or "" for item in message.content if getattr(item, "type", "") == "text"
         )
     elif message.content is None:
         base_text = ""
 
     if message.tool_calls:
-        tool_arg_text = "".join(
-            call.function.arguments or "" for call in message.tool_calls
-        )
+        tool_arg_text = "".join(call.function.arguments or "" for call in message.tool_calls)
         base_text = f"{base_text}\n{tool_arg_text}" if base_text else tool_arg_text
 
     return base_text
@@ -755,9 +722,7 @@ def _find_reusable_session(
     return None, None, messages
 
 
-async def _send_with_split(
-    session: ChatSession, text: str, files: list[Path | str] | None = None
-):
+async def _send_with_split(session: ChatSession, text: str, files: list[Path | str] | None = None):
     """Send text to Gemini, automatically splitting into multiple batches if it is
     longer than ``MAX_CHARS_PER_REQUEST``.
 
@@ -809,9 +774,7 @@ def _create_streaming_response(
 
     # Calculate token usage
     prompt_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
-    tool_args = "".join(
-        call.get("function", {}).get("arguments", "") for call in tool_calls or []
-    )
+    tool_args = "".join(call.get("function", {}).get("arguments", "") for call in tool_calls or [])
     completion_tokens = estimate_tokens(model_output + tool_args)
     total_tokens = prompt_tokens + completion_tokens
     finish_reason = "tool_calls" if tool_calls else "stop"
@@ -823,9 +786,7 @@ def _create_streaming_response(
             "object": "chat.completion.chunk",
             "created": created_time,
             "model": model,
-            "choices": [
-                {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
-            ],
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
         }
         yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
@@ -839,9 +800,7 @@ def _create_streaming_response(
                     "object": "chat.completion.chunk",
                     "created": created_time,
                     "model": model,
-                    "choices": [
-                        {"index": 0, "delta": {"content": chunk}, "finish_reason": None}
-                    ],
+                    "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
                 }
                 yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
@@ -891,9 +850,7 @@ def _create_standard_response(
     """Create standard response"""
     # Calculate token usage
     prompt_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
-    tool_args = "".join(
-        call.get("function", {}).get("arguments", "") for call in tool_calls or []
-    )
+    tool_args = "".join(call.get("function", {}).get("arguments", "") for call in tool_calls or [])
     completion_tokens = estimate_tokens(model_output + tool_args)
     total_tokens = prompt_tokens + completion_tokens
     finish_reason = "tool_calls" if tool_calls else "stop"

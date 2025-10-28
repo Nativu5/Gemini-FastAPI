@@ -37,9 +37,7 @@ def verify_api_key(
         return ""
 
     if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing token"
-        )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing token")
 
     api_key = credentials.credentials
     if api_key != g_config.server.api_key:

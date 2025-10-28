@@ -39,9 +39,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
     HASH_LOOKUP_PREFIX = "hash:"
 
-    def __init__(
-        self, db_path: Optional[str] = None, max_db_size: Optional[int] = None
-    ):
+    def __init__(self, db_path: Optional[str] = None, max_db_size: Optional[int] = None):
         """
         Initialize LMDB store.
 
@@ -141,9 +139,7 @@ class LMDBConversationStore(metaclass=Singleton):
                     storage_key.encode("utf-8"),
                 )
 
-                logger.debug(
-                    f"Stored {len(conv.messages)} messages with key: {storage_key}"
-                )
+                logger.debug(f"Stored {len(conv.messages)} messages with key: {storage_key}")
                 return storage_key
 
         except Exception as e:
@@ -176,9 +172,7 @@ class LMDBConversationStore(metaclass=Singleton):
             logger.error(f"Failed to retrieve messages for key {key}: {e}")
             return None
 
-    def find(
-        self, model: str, messages: List[Message]
-    ) -> Optional[ConversationInStore]:
+    def find(self, model: str, messages: List[Message]) -> Optional[ConversationInStore]:
         """
         Search conversation data by message list.
 
@@ -264,18 +258,14 @@ class LMDBConversationStore(metaclass=Singleton):
 
                 storage_data = orjson.loads(data)  # type: ignore
                 conv = ConversationInStore.model_validate(storage_data)
-                message_hash = _hash_conversation(
-                    conv.client_id, conv.model, conv.messages
-                )
+                message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
 
                 # Delete main data
                 txn.delete(key.encode("utf-8"))
 
                 # Clean up hash mapping if it exists
                 if message_hash and key != message_hash:
-                    txn.delete(
-                        f"{self.HASH_LOOKUP_PREFIX}{message_hash}".encode("utf-8")
-                    )
+                    txn.delete(f"{self.HASH_LOOKUP_PREFIX}{message_hash}".encode("utf-8"))
 
                 logger.debug(f"Deleted messages with key: {key}")
                 return conv
@@ -353,9 +343,7 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         Remove <think>...</think> tags at the start of text and strip whitespace.
         """
-        cleaned_content = re.sub(
-            r"^(\s*<think>.*?</think>\n?)", "", text, flags=re.DOTALL
-        )
+        cleaned_content = re.sub(r"^(\s*<think>.*?</think>\n?)", "", text, flags=re.DOTALL)
         return cleaned_content.strip()
 
     @staticmethod
@@ -367,14 +355,10 @@ class LMDBConversationStore(metaclass=Singleton):
         cleaned_messages = []
         for msg in messages:
             if msg.role == "assistant" and isinstance(msg.content, str):
-                normalized_content = LMDBConversationStore.remove_think_tags(
-                    msg.content
-                )
+                normalized_content = LMDBConversationStore.remove_think_tags(msg.content)
                 # Only create a new object if content actually changed
                 if normalized_content != msg.content:
-                    cleaned_msg = Message(
-                        role=msg.role, content=normalized_content, name=msg.name
-                    )
+                    cleaned_msg = Message(role=msg.role, content=normalized_content, name=msg.name)
                     cleaned_messages.append(cleaned_msg)
                 else:
                     cleaned_messages.append(msg)

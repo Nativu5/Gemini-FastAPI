@@ -17,12 +17,8 @@ class HTTPSConfig(BaseModel):
     """HTTPS configuration"""
 
     enabled: bool = Field(default=False, description="Enable HTTPS")
-    key_file: str = Field(
-        default="certs/privkey.pem", description="SSL private key file path"
-    )
-    cert_file: str = Field(
-        default="certs/fullchain.pem", description="SSL certificate file path"
-    )
+    key_file: str = Field(default="certs/privkey.pem", description="SSL private key file path")
+    cert_file: str = Field(default="certs/fullchain.pem", description="SSL certificate file path")
 
 
 class ServerConfig(BaseModel):
@@ -52,15 +48,11 @@ class GeminiConfig(BaseModel):
         ..., description="List of Gemini client credential pairs"
     )
     timeout: int = Field(default=60, ge=1, description="Init timeout")
-    auto_refresh: bool = Field(
-        True, description="Enable auto-refresh for Gemini cookies"
-    )
+    auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini cookies")
     refresh_interval: int = Field(
         default=540, ge=1, description="Interval in seconds to refresh Gemini cookies"
     )
-    verbose: bool = Field(
-        False, description="Enable verbose logging for Gemini API requests"
-    )
+    verbose: bool = Field(False, description="Enable verbose logging for Gemini API requests")
     max_chars_per_request: int = Field(
         default=1_000_000,
         ge=1,
@@ -75,9 +67,7 @@ class CORSConfig(BaseModel):
     allow_origins: list[str] = Field(
         default=["*"], description="List of allowed origins for CORS requests"
     )
-    allow_credentials: bool = Field(
-        default=True, description="Allow credentials in CORS requests"
-    )
+    allow_credentials: bool = Field(default=True, description="Allow credentials in CORS requests")
     allow_methods: list[str] = Field(
         default=["*"], description="List of allowed HTTP methods for CORS requests"
     )
@@ -125,9 +115,7 @@ class Config(BaseSettings):
     )
 
     # Gemini API configuration
-    gemini: GeminiConfig = Field(
-        ..., description="Gemini API configuration, must be set"
-    )
+    gemini: GeminiConfig = Field(..., description="Gemini API configuration, must be set")
 
     storage: StorageConfig = Field(
         default=StorageConfig(),

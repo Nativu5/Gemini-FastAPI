@@ -30,6 +30,4 @@ async def health_check():
             ok=False, error="LMDB conversation store unavailable", clients=client_status
         )
 
-    return HealthCheckResponse(
-        ok=all(client_status.values()), storage=stat, clients=client_status
-    )
+    return HealthCheckResponse(ok=all(client_status.values()), storage=stat, clients=client_status)
