@@ -37,7 +37,7 @@ from ..models import (
     Usage,
 )
 from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
-from ..services.client import XML_WRAP_HINT
+from ..services.client import CODE_BLOCK_HINT, XML_WRAP_HINT
 from ..utils import g_config
 from ..utils.helper import estimate_tokens
 
@@ -52,6 +52,7 @@ TOOL_CALL_RE = re.compile(
 )
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 XML_HINT_STRIPPED = XML_WRAP_HINT.strip()
+CODE_HINT_STRIPPED = CODE_BLOCK_HINT.strip()
 
 router = APIRouter()
 
@@ -206,6 +207,27 @@ def _append_xml_hint_to_last_user_message(messages: list[Message]) -> None:
     # No user message to annotate; nothing to do.
 
 
+def _conversation_has_code_hint(messages: list[Message]) -> bool:
+    """Return True if any system message already includes the code block hint."""
+    for msg in messages:
+        if msg.role != "system" or msg.content is None:
+            continue
+
+        if isinstance(msg.content, str):
+            if CODE_HINT_STRIPPED in msg.content:
+                return True
+            continue
+
+        if isinstance(msg.content, list):
+            for part in msg.content:
+                if getattr(part, "type", None) != "text":
+                    continue
+                if part.text and CODE_HINT_STRIPPED in part.text:
+                    return True
+
+    return False
+
+
 def _prepare_messages_for_model(
     source_messages: list[Message],
     tools: list[Tool] | None,
@@ -223,6 +245,9 @@ def _prepare_messages_for_model(
 
     if extra_instructions:
         instructions.extend(instr for instr in extra_instructions if instr)
+
+    if not _conversation_has_code_hint(prepared):
+        instructions.append(CODE_BLOCK_HINT)
 
     if not instructions:
         return prepared
@@ -242,11 +267,12 @@ def _prepare_messages_for_model(
     return prepared
 
 
-def _strip_xml_hint(text: str) -> str:
-    """Remove the XML wrap hint text from a given string."""
+def _strip_system_hints(text: str) -> str:
+    """Remove system-level hint text from a given string."""
     if not text:
         return text
     cleaned = text.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
+    cleaned = cleaned.replace(CODE_BLOCK_HINT, "").replace(CODE_HINT_STRIPPED, "")
     return cleaned.strip()
 
 
@@ -290,7 +316,7 @@ def _remove_tool_call_blocks(text: str) -> str:
     if not text:
         return text
     cleaned = TOOL_BLOCK_RE.sub("", text)
-    return _strip_xml_hint(cleaned)
+    return _strip_system_hints(cleaned)
 
 
 def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
@@ -334,7 +360,7 @@ def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
         return ""
 
     cleaned = TOOL_BLOCK_RE.sub(_replace, text)
-    cleaned = _strip_xml_hint(cleaned)
+    cleaned = _strip_system_hints(cleaned)
     return cleaned, tool_calls
 
 
