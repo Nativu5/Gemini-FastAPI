@@ -819,7 +819,7 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
     return await session.send_message(chunks[-1], files=files)
 
 
-def _iter_stream_segments(model_output: str, chunk_size: int = 128):
+def _iter_stream_segments(model_output: str, chunk_size: int = 64):
     """Yield stream segments while keeping <think> markers and words intact."""
     if not model_output:
         return
