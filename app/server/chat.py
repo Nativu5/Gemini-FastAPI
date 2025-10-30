@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -819,6 +819,47 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
     return await session.send_message(chunks[-1], files=files)
 
 
+def _iter_stream_segments(model_output: str, chunk_size: int = 128):
+    """Yield stream segments while keeping <think> markers and words intact."""
+    if not model_output:
+        return
+
+    token_pattern = re.compile(r"\s+|\S+\s*")
+    pending = ""
+
+    def _flush_pending() -> Iterator[str]:
+        nonlocal pending
+        if pending:
+            yield pending
+            pending = ""
+
+    # Split on <think> boundaries so the markers are never fragmented.
+    parts = re.split(r"(</?think>)", model_output)
+    for part in parts:
+        if not part:
+            continue
+        if part in {"<think>", "</think>"}:
+            yield from _flush_pending()
+            yield part
+            continue
+
+        for match in token_pattern.finditer(part):
+            token = match.group(0)
+
+            if len(token) > chunk_size:
+                yield from _flush_pending()
+                for idx in range(0, len(token), chunk_size):
+                    yield token[idx : idx + chunk_size]
+                continue
+
+            if pending and len(pending) + len(token) > chunk_size:
+                yield from _flush_pending()
+
+            pending += token
+
+    yield from _flush_pending()
+
+
 def _create_streaming_response(
     model_output: str,
     tool_calls: list[dict],
@@ -848,18 +889,15 @@ def _create_streaming_response(
         yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
         # Stream output text in chunks for efficiency
-        chunk_size = 32
-        if model_output:
-            for i in range(0, len(model_output), chunk_size):
-                chunk = model_output[i : i + chunk_size]
-                data = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
-                }
-                yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+        for chunk in _iter_stream_segments(model_output):
+            data = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_time,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
+            }
+            yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
         if tool_calls:
             data = {
