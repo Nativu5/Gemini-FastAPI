@@ -51,6 +51,7 @@ TOOL_CALL_RE = re.compile(
     r"<tool_call\s+name=\"([^\"]+)\">(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
 )
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
+CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>")
 XML_HINT_STRIPPED = XML_WRAP_HINT.strip()
 CODE_HINT_STRIPPED = CODE_BLOCK_HINT.strip()
 
@@ -273,6 +274,7 @@ def _strip_system_hints(text: str) -> str:
         return text
     cleaned = text.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
     cleaned = cleaned.replace(CODE_BLOCK_HINT, "").replace(CODE_HINT_STRIPPED, "")
+    cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
     return cleaned.strip()
 
 
