@@ -27,13 +27,15 @@ from ..models import (
     ResponseCreateRequest,
     ResponseCreateResponse,
     ResponseImageGenerationCall,
+    ResponseInputContent,
     ResponseInputItem,
     ResponseOutputContent,
     ResponseOutputMessage,
+    ResponseToolCall,
+    ResponseUsage,
     Tool,
     ToolCall,
     ToolChoiceFunction,
-    Usage,
 )
 from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from ..services.client import CODE_BLOCK_HINT, XML_WRAP_HINT
@@ -246,9 +248,13 @@ def _prepare_messages_for_model(
 
     if extra_instructions:
         instructions.extend(instr for instr in extra_instructions if instr)
+        logger.debug(
+            f"Applied {len(extra_instructions)} extra instructions for tool/structured output."
+        )
 
     if not _conversation_has_code_hint(prepared):
         instructions.append(CODE_BLOCK_HINT)
+        logger.debug("Injected default code block hint for Gemini conversation.")
 
     if not instructions:
         return prepared
@@ -278,12 +284,80 @@ def _strip_system_hints(text: str) -> str:
     return cleaned.strip()
 
 
-def _response_items_to_messages(items: list[ResponseInputItem]) -> list[Message]:
-    """Convert Responses API input items into internal Message objects."""
+def _ensure_data_url(part: ResponseInputContent) -> str | None:
+    image_url = part.image_url
+    if not image_url and part.image_base64:
+        mime_type = part.mime_type or "image/png"
+        image_url = f"data:{mime_type};base64,{part.image_base64}"
+    return image_url
+
+
+def _response_items_to_messages(
+    items: str | list[ResponseInputItem],
+) -> tuple[list[Message], str | list[ResponseInputItem]]:
+    """Convert Responses API input items into internal Message objects and normalized input."""
     messages: list[Message] = []
 
+    if isinstance(items, str):
+        messages.append(Message(role="user", content=items))
+        logger.debug("Normalized Responses input: single string message.")
+        return messages, items
+
+    normalized_input: list[ResponseInputItem] = []
     for item in items:
-        if item.type != "message":
+        role = item.role
+        if role == "developer":
+            role = "system"
+
+        content = item.content
+        normalized_contents: list[ResponseInputContent] = []
+        if isinstance(content, str):
+            normalized_contents.append(ResponseInputContent(type="input_text", text=content))
+            messages.append(Message(role=role, content=content))
+        else:
+            converted: list[ContentItem] = []
+            for part in content:
+                if part.type == "input_text":
+                    text_value = part.text or ""
+                    normalized_contents.append(
+                        ResponseInputContent(type="input_text", text=text_value)
+                    )
+                    if text_value:
+                        converted.append(ContentItem(type="text", text=text_value))
+                elif part.type == "input_image":
+                    image_url = _ensure_data_url(part)
+                    if image_url:
+                        normalized_contents.append(
+                            ResponseInputContent(type="input_image", image_url=image_url)
+                        )
+                        converted.append(
+                            ContentItem(type="image_url", image_url={"url": image_url})
+                        )
+            messages.append(Message(role=role, content=converted or None))
+
+        normalized_input.append(
+            ResponseInputItem(type="message", role=item.role, content=normalized_contents or [])
+        )
+
+    logger.debug(
+        f"Normalized Responses input: {len(normalized_input)} message items (developer roles mapped to system)."
+    )
+    return messages, normalized_input
+
+
+def _instructions_to_messages(
+    instructions: str | list[ResponseInputItem] | None,
+) -> list[Message]:
+    """Normalize instructions payload into Message objects."""
+    if not instructions:
+        return []
+
+    if isinstance(instructions, str):
+        return [Message(role="system", content=instructions)]
+
+    instruction_messages: list[Message] = []
+    for item in instructions:
+        if item.type and item.type != "message":
             continue
 
         role = item.role
@@ -291,26 +365,24 @@ def _response_items_to_messages(items: list[ResponseInputItem]) -> list[Message]
             role = "system"
 
         content = item.content
-        if isinstance(content, list):
+        if isinstance(content, str):
+            instruction_messages.append(Message(role=role, content=content))
+        else:
             converted: list[ContentItem] = []
             for part in content:
                 if part.type == "input_text":
-                    if part.text:
-                        converted.append(ContentItem(type="text", text=part.text))
+                    text_value = part.text or ""
+                    if text_value:
+                        converted.append(ContentItem(type="text", text=text_value))
                 elif part.type == "input_image":
-                    image_url = part.image_url
-                    if not image_url and part.image_base64:
-                        mime_type = part.mime_type or "image/png"
-                        image_url = f"data:{mime_type};base64,{part.image_base64}"
+                    image_url = _ensure_data_url(part)
                     if image_url:
                         converted.append(
                             ContentItem(type="image_url", image_url={"url": image_url})
                         )
-            messages.append(Message(role=role, content=converted or None))
-        else:
-            messages.append(Message(role=role, content=content))
+            instruction_messages.append(Message(role=role, content=converted or None))
 
-    return messages
+    return instruction_messages
 
 
 def _remove_tool_call_blocks(text: str) -> str:
@@ -407,6 +479,10 @@ async def create_chat_completion(
     if structured_requirement and request.stream:
         logger.debug(
             "Structured response requested with streaming enabled; will stream canonical JSON once ready."
+        )
+    if structured_requirement:
+        logger.debug(
+            f"Structured response requested for /v1/chat/completions (schema={structured_requirement.schema_name})."
         )
 
     extra_instructions = [structured_requirement.instruction] if structured_requirement else None
@@ -546,16 +622,30 @@ async def create_response(
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
 ):
-    if request.stream:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Streaming responses are not supported for this endpoint.",
-        )
-
-    messages = _response_items_to_messages(request.input)
+    messages, normalized_input = _response_items_to_messages(request.input)
     if not messages:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="No message input provided."
+        )
+
+    structured_requirement = _build_structured_requirement(request.response_format)
+    if structured_requirement and request.stream:
+        logger.debug(
+            "Structured response requested with streaming enabled; streaming not supported for Responses."
+        )
+
+    preface_messages = _instructions_to_messages(request.instructions)
+    if structured_requirement:
+        preface_messages.insert(
+            0, Message(role="system", content=structured_requirement.instruction)
+        )
+        logger.debug(
+            f"Structured response requested for /v1/responses (schema={structured_requirement.schema_name})."
+        )
+    if preface_messages:
+        messages = [*preface_messages, *messages]
+        logger.debug(
+            f"Injected {len(preface_messages)} instruction messages before sending to Gemini."
         )
 
     pool = GeminiClientPool()
@@ -611,9 +701,35 @@ async def create_response(
     text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
     text_without_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=False)
 
+    visible_text, detected_tool_calls = _extract_tool_calls(text_with_think)
     storage_output = _remove_tool_call_blocks(text_without_think).strip()
-    visible_text = _remove_tool_call_blocks(text_with_think).strip()
-    assistant_text = LMDBConversationStore.remove_think_tags(visible_text)
+    assistant_text = LMDBConversationStore.remove_think_tags(visible_text.strip())
+
+    if structured_requirement:
+        cleaned_visible = _strip_code_fence(assistant_text or "")
+        if not cleaned_visible:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="LLM returned an empty response while JSON schema output was requested.",
+            )
+        try:
+            structured_payload = json.loads(cleaned_visible)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                f"Failed to decode JSON for structured response (schema={structured_requirement.schema_name}): "
+                f"{cleaned_visible}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="LLM returned invalid JSON for the requested response_format.",
+            ) from exc
+
+        canonical_output = json.dumps(structured_payload, ensure_ascii=False)
+        assistant_text = canonical_output
+        storage_output = canonical_output
+        logger.debug(
+            f"Structured response fulfilled for /v1/responses (schema={structured_requirement.schema_name})."
+        )
 
     expects_image = (
         request.tool_choice is not None and request.tool_choice.type == "image_generation"
@@ -660,6 +776,17 @@ async def create_response(
             )
         )
 
+    tool_call_items: list[ResponseToolCall] = []
+    if detected_tool_calls:
+        tool_call_items = [
+            ResponseToolCall(
+                id=call.id,
+                status="completed",
+                function=call.function,
+            )
+            for call in detected_tool_calls
+        ]
+
     response_contents: list[ResponseOutputContent] = []
     if assistant_text:
         response_contents.append(ResponseOutputContent(type="output_text", text=assistant_text))
@@ -672,12 +799,18 @@ async def create_response(
     response_id = f"resp_{uuid.uuid4().hex}"
     message_id = f"msg_{uuid.uuid4().hex}"
 
-    prompt_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
-    completion_tokens = estimate_tokens(assistant_text)
-    usage = Usage(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
+    input_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
+    tool_arg_text = "".join(call.function.arguments or "" for call in detected_tool_calls)
+    completion_basis = assistant_text or ""
+    if tool_arg_text:
+        completion_basis = (
+            f"{completion_basis}\n{tool_arg_text}" if completion_basis else tool_arg_text
+        )
+    output_tokens = estimate_tokens(completion_basis)
+    usage = ResponseUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
     )
 
     response_payload = ResponseCreateResponse(
@@ -691,14 +824,22 @@ async def create_response(
                 role="assistant",
                 content=response_contents,
             ),
+            *tool_call_items,
             *image_call_items,
         ],
         output_text=assistant_text or None,
+        status="completed",
         usage=usage,
+        input=normalized_input or None,
+        metadata=request.metadata or None,
     )
 
     try:
-        last_message = Message(role="assistant", content=storage_output or None)
+        last_message = Message(
+            role="assistant",
+            content=storage_output or None,
+            tool_calls=detected_tool_calls or None,
+        )
         cleaned_history = db.sanitize_assistant_messages(messages)
         conv = ConversationInStore(
             model=model.model_name,
@@ -706,9 +847,16 @@ async def create_response(
             metadata=session.metadata,
             messages=[*cleaned_history, last_message],
         )
-        db.store(conv)
+        key = db.store(conv)
+        logger.debug(f"Conversation saved to LMDB with key: {key}")
     except Exception as exc:
         logger.warning(f"Failed to save Responses conversation to LMDB: {exc}")
+
+    if request.stream:
+        logger.debug(
+            f"Streaming Responses API payload (response_id={response_payload.id}, text_chunks={bool(assistant_text)})."
+        )
+        return _create_responses_streaming_response(response_payload, assistant_text or "")
 
     return response_payload
 
@@ -902,6 +1050,7 @@ def _create_streaming_response(
             yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
         if tool_calls:
+            tool_calls_delta = [{**call, "index": idx} for idx, call in enumerate(tool_calls)]
             data = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -910,7 +1059,7 @@ def _create_streaming_response(
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"tool_calls": tool_calls},
+                        "delta": {"tool_calls": tool_calls_delta},
                         "finish_reason": None,
                     }
                 ],
@@ -931,6 +1080,86 @@ def _create_streaming_response(
             },
         }
         yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate_stream(), media_type="text/event-stream")
+
+
+def _create_responses_streaming_response(
+    response_payload: ResponseCreateResponse,
+    assistant_text: str | None,
+) -> StreamingResponse:
+    """Create streaming response for Responses API using event types defined by OpenAI."""
+
+    response_dict = response_payload.model_dump(mode="json")
+    response_id = response_payload.id
+    created_time = response_payload.created
+    model = response_payload.model
+
+    logger.debug(
+        f"Preparing streaming envelope for /v1/responses (response_id={response_id}, model={model})."
+    )
+
+    base_event = {
+        "id": response_id,
+        "object": "response",
+        "created": created_time,
+        "model": model,
+    }
+
+    created_snapshot: dict[str, Any] = {
+        "id": response_id,
+        "object": "response",
+        "created": created_time,
+        "model": model,
+        "status": "in_progress",
+    }
+    if response_dict.get("metadata") is not None:
+        created_snapshot["metadata"] = response_dict["metadata"]
+    if response_dict.get("input") is not None:
+        created_snapshot["input"] = response_dict["input"]
+
+    async def generate_stream():
+        # Emit creation event
+        data = {
+            **base_event,
+            "type": "response.created",
+            "response": created_snapshot,
+        }
+        yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+
+        # Stream textual content, if any
+        if assistant_text:
+            for chunk in _iter_stream_segments(assistant_text):
+                delta_event = {
+                    **base_event,
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "delta": chunk,
+                }
+                yield f"data: {orjson.dumps(delta_event).decode('utf-8')}\n\n"
+
+            done_event = {
+                **base_event,
+                "type": "response.output_text.done",
+                "output_index": 0,
+            }
+            yield f"data: {orjson.dumps(done_event).decode('utf-8')}\n\n"
+        else:
+            done_event = {
+                **base_event,
+                "type": "response.output_text.done",
+                "output_index": 0,
+            }
+            yield f"data: {orjson.dumps(done_event).decode('utf-8')}\n\n"
+
+        # Emit completed event with full payload
+        completed_event = {
+            **base_event,
+            "type": "response.completed",
+            "response": response_dict,
+        }
+        yield f"data: {orjson.dumps(completed_event).decode('utf-8')}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate_stream(), media_type="text/event-stream")

@@ -97,14 +97,11 @@ class ChatCompletionRequest(BaseModel):
 
     model: str
     messages: List[Message]
+    stream: Optional[bool] = False
+    user: Optional[str] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
-    n: Optional[int] = 1
-    stream: Optional[bool] = False
     max_tokens: Optional[int] = None
-    presence_penalty: Optional[float] = 0
-    frequency_penalty: Optional[float] = 0
-    user: Optional[str] = None
     tools: Optional[List["Tool"]] = None
     tool_choice: Optional[
         Union[Literal["none"], Literal["auto"], Literal["required"], "ToolChoiceFunction"]
@@ -167,7 +164,7 @@ class ResponseInputContent(BaseModel):
 class ResponseInputItem(BaseModel):
     """Single input item for Responses API."""
 
-    type: Literal["message"]
+    type: Optional[Literal["message"]] = "message"
     role: Literal["user", "assistant", "system", "developer"]
     content: Union[str, List[ResponseInputContent]]
 
@@ -190,13 +187,26 @@ class ResponseCreateRequest(BaseModel):
     """Responses API request payload."""
 
     model: str
-    input: List[ResponseInputItem]
+    input: Union[str, List[ResponseInputItem]]
+    instructions: Optional[Union[str, List[ResponseInputItem]]] = None
     temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 1.0
+    max_output_tokens: Optional[int] = None
     stream: Optional[bool] = False
     tool_choice: Optional[ResponseToolChoice] = None
     tools: Optional[List[ResponseImageTool]] = None
     store: Optional[bool] = None
     user: Optional[str] = None
+    response_format: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class ResponseUsage(BaseModel):
+    """Usage statistics for Responses API."""
+
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
 
 
 class ResponseOutputContent(BaseModel):
@@ -231,6 +241,15 @@ class ResponseImageGenerationCall(BaseModel):
     revised_prompt: Optional[str] = None
 
 
+class ResponseToolCall(BaseModel):
+    """Tool call record emitted in Responses API."""
+
+    id: str
+    type: Literal["tool_call"] = "tool_call"
+    status: Literal["in_progress", "completed", "failed", "requires_action"] = "completed"
+    function: FunctionCall
+
+
 class ResponseCreateResponse(BaseModel):
     """Responses API response payload."""
 
@@ -238,9 +257,19 @@ class ResponseCreateResponse(BaseModel):
     object: Literal["response"] = "response"
     created: int
     model: str
-    output: List[Union[ResponseOutputMessage, ResponseImageGenerationCall]]
+    output: List[Union[ResponseOutputMessage, ResponseImageGenerationCall, ResponseToolCall]]
     output_text: Optional[str] = None
-    usage: Usage
+    status: Literal[
+        "in_progress",
+        "completed",
+        "failed",
+        "incomplete",
+        "requires_action",
+    ] = "completed"
+    usage: ResponseUsage
+    metadata: Optional[Dict[str, Any]] = None
+    system_fingerprint: Optional[str] = None
+    input: Optional[Union[str, List[ResponseInputItem]]] = None
 
 
 # Rebuild models with forward references
