@@ -64,7 +64,7 @@ gemini:
 
 ```bash
 # Using uv
-uv run run.py
+uv run python run.py
 
 # Using Python directly
 python run.py
