@@ -1,6 +1,9 @@
 import asyncio
+import html
+import json
 import re
 from pathlib import Path
+from typing import Any, cast
 
 from gemini_webapi import GeminiClient, ModelOutput
 from gemini_webapi.client import ChatSession
@@ -12,7 +15,28 @@ from ..models import Message
 from ..utils import g_config
 from ..utils.helper import add_tag, save_file_to_tempfile, save_url_to_tempfile
 
-XML_WRAP_HINT = "\nFor any xml block, e.g. tool call, always wrap it with: \n`````xml\n...\n`````\n"
+XML_WRAP_HINT = (
+    "\nYou MUST wrap every tool call response inside a single fenced block exactly like:\n"
+    '```xml\n<tool_call name="tool_name">{"arg": "value"}</tool_call>\n```\n'
+    "Do not surround the fence with any other text or whitespace; otherwise the call will be ignored.\n"
+)
+
+CODE_BLOCK_HINT = (
+    "\nWhenever you include code, markup, or shell snippets, wrap each snippet in a Markdown fenced "
+    "block and supply the correct language label (for example, ```python ... ``` or ```html ... ```).\n"
+    "Fence ONLY the actual code/markup; keep all narrative or explanatory text outside the fences.\n"
+)
+
+HTML_ESCAPE_RE = re.compile(r"&(?:lt|gt|amp|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);")
+MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=\s*[-\\`*_{}\[\]()#+.!<>])")
+CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`]*`)", re.DOTALL)
+
+
+_UNSET = object()
+
+
+def _resolve(value: Any, fallback: Any):
+    return fallback if value is _UNSET else value
 
 
 class GeminiClientWrapper(GeminiClient):
@@ -22,16 +46,32 @@ class GeminiClientWrapper(GeminiClient):
         super().__init__(**kwargs)
         self.id = client_id
 
-    async def init(self, **kwargs):
+    async def init(
+        self,
+        timeout: float = cast(float, _UNSET),
+        auto_close: bool = False,
+        close_delay: float = 300,
+        auto_refresh: bool = cast(bool, _UNSET),
+        refresh_interval: float = cast(float, _UNSET),
+        verbose: bool = cast(bool, _UNSET),
+    ) -> None:
         """
         Inject default configuration values.
         """
-        kwargs.setdefault("timeout", g_config.gemini.timeout)
-        kwargs.setdefault("auto_refresh", g_config.gemini.auto_refresh)
-        kwargs.setdefault("verbose", g_config.gemini.verbose)
-        kwargs.setdefault("refresh_interval", g_config.gemini.refresh_interval)
+        config = g_config.gemini
+        timeout = cast(float, _resolve(timeout, config.timeout))
+        auto_refresh = cast(bool, _resolve(auto_refresh, config.auto_refresh))
+        refresh_interval = cast(float, _resolve(refresh_interval, config.refresh_interval))
+        verbose = cast(bool, _resolve(verbose, config.verbose))
 
-        await super().init(**kwargs)
+        await super().init(
+            timeout=timeout,
+            auto_close=auto_close,
+            close_delay=close_delay,
+            auto_refresh=auto_refresh,
+            refresh_interval=refresh_interval,
+            verbose=verbose,
+        )
 
     async def generate_content(
         self,
@@ -41,22 +81,23 @@ class GeminiClientWrapper(GeminiClient):
         gem: Gem | str | None = None,
         chat: ChatSession | None = None,
         **kwargs,
-    ):
+    ) -> ModelOutput:
         cnt = 2  # Try 2 times before giving up
-        last_exception = None
+        last_exception: ModelInvalid | None = None
         while cnt:
             cnt -= 1
             try:
                 return await super().generate_content(prompt, files, model, gem, chat, **kwargs)
             except ModelInvalid as e:
-                # This is not always caused by model selection. Instead it can be solved by retrying.
+                # This is not always caused by model selection. Instead, it can be solved by retrying.
                 # So we catch it and retry as a workaround.
                 await asyncio.sleep(1)
                 last_exception = e
 
         # If retrying failed, re-raise ModelInvalid
-        if last_exception:
+        if last_exception is not None:
             raise last_exception
+        raise RuntimeError("generate_content failed without receiving a ModelInvalid error.")
 
     @staticmethod
     async def process_message(
@@ -65,22 +106,21 @@ class GeminiClientWrapper(GeminiClient):
         """
         Process a single message and return model input.
         """
-        model_input = ""
         files: list[Path | str] = []
+        text_fragments: list[str] = []
+
         if isinstance(message.content, str):
             # Pure text content
-            model_input = message.content
-        else:
+            if message.content:
+                text_fragments.append(message.content)
+        elif isinstance(message.content, list):
             # Mixed content
             # TODO: Use Pydantic to enforce the value checking
             for item in message.content:
                 if item.type == "text":
                     # Append multiple text fragments
                     if item.text:
-                        if model_input:
-                            model_input += "\n" + item.text
-                        else:
-                            model_input = item.text
+                        text_fragments.append(item.text)
 
                 elif item.type == "image_url":
                     if not item.image_url:
@@ -98,20 +138,33 @@ class GeminiClientWrapper(GeminiClient):
                         files.append(await save_file_to_tempfile(file_data, filename, tempdir))
                     else:
                         raise ValueError("File must contain 'file_data' key")
+        elif message.content is not None:
+            raise ValueError("Unsupported message content type.")
 
-        # This is a workaround for Gemini Web's displaying issues with XML blocks.
-        # Add this for tool calling
-        if re.search(r"<\s*[^>]+>", model_input):
-            hint = XML_WRAP_HINT
-        else:
-            hint = ""
+        if message.tool_calls:
+            tool_blocks: list[str] = []
+            for call in message.tool_calls:
+                args_text = call.function.arguments.strip()
+                try:
+                    parsed_args = json.loads(args_text)
+                    args_text = json.dumps(parsed_args, ensure_ascii=False)
+                except (json.JSONDecodeError, TypeError):
+                    # Leave args_text as is if it is not valid JSON
+                    pass
+                tool_blocks.append(
+                    f'<tool_call name="{call.function.name}">{args_text}</tool_call>'
+                )
+
+            if tool_blocks:
+                tool_section = "```xml\n" + "\n".join(tool_blocks) + "\n```"
+                text_fragments.append(tool_section)
+
+        model_input = "\n".join(fragment for fragment in text_fragments if fragment)
 
         # Add role tag if needed
         if model_input:
             if tagged:
-                model_input = add_tag(message.role, model_input + hint)
-            else:
-                model_input += hint
+                model_input = add_tag(message.role, model_input)
 
         return model_input, files
 
@@ -161,7 +214,36 @@ class GeminiClientWrapper(GeminiClient):
             text += str(response)
 
         # Fix some escaped characters
-        text = text.replace("&lt;", "<").replace("\\<", "<").replace("\\_", "_").replace("\\>", ">")
+        def _unescape_html(text_content: str) -> str:
+            parts: list[str] = []
+            last_index = 0
+            for match in CODE_FENCE_RE.finditer(text_content):
+                non_code = text_content[last_index : match.start()]
+                if non_code:
+                    parts.append(HTML_ESCAPE_RE.sub(lambda m: html.unescape(m.group(0)), non_code))
+                parts.append(match.group(0))
+                last_index = match.end()
+            tail = text_content[last_index:]
+            if tail:
+                parts.append(HTML_ESCAPE_RE.sub(lambda m: html.unescape(m.group(0)), tail))
+            return "".join(parts)
+
+        def _unescape_markdown(text_content: str) -> str:
+            parts: list[str] = []
+            last_index = 0
+            for match in CODE_FENCE_RE.finditer(text_content):
+                non_code = text_content[last_index : match.start()]
+                if non_code:
+                    parts.append(MARKDOWN_ESCAPE_RE.sub("", non_code))
+                parts.append(match.group(0))
+                last_index = match.end()
+            tail = text_content[last_index:]
+            if tail:
+                parts.append(MARKDOWN_ESCAPE_RE.sub("", tail))
+            return "".join(parts)
+
+        text = _unescape_html(text)
+        text = _unescape_markdown(text)
 
         def simplify_link_target(text_content: str) -> str:
             match_colon_num = re.match(r"([^:]+:\d+)", text_content)
@@ -181,7 +263,7 @@ class GeminiClientWrapper(GeminiClient):
             else:
                 return new_link_segment
 
-        # Replace Google search links with simplified markdown links
+        # Replace Google search links with simplified Markdown links
         pattern = r"(\()?\[`([^`]+?)`\]\((https://www.google.com/search\?q=)(.*?)(?<!\\)\)\)*(\))?"
         text = re.sub(pattern, replacer, text)
 

@@ -174,7 +174,8 @@ def extract_gemini_clients_env() -> dict[int, dict[str, str]]:
 
 
 def _merge_clients_with_env(
-    base_clients: list[GeminiClientSettings] | None, env_overrides: dict[int, dict[str, str]]
+    base_clients: list[GeminiClientSettings] | None,
+    env_overrides: dict[int, dict[str, str]],
 ):
     """Override base_clients with env_overrides, return the new clients list."""
     if not env_overrides:

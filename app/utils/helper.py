@@ -5,10 +5,12 @@ from pathlib import Path
 import httpx
 from loguru import logger
 
+VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
+
 
 def add_tag(role: str, content: str, unclose: bool = False) -> str:
     """Surround content with role tags"""
-    if role not in ["user", "assistant", "system"]:
+    if role not in VALID_TAG_ROLES:
         logger.warning(f"Unknown role: {role}, returning content without tags")
         return content
 
@@ -34,6 +36,8 @@ async def save_file_to_tempfile(
 
 
 async def save_url_to_tempfile(url: str, tempdir: Path | None = None):
+    data: bytes | None = None
+    suffix: str | None = None
     if url.startswith("data:image/"):
         # Base64 encoded image
         base64_data = url.split(",")[1]

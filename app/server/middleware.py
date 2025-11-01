@@ -17,7 +17,8 @@ def global_exception_handler(request: Request, exc: Exception):
         )
 
     return ORJSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": {"message": str(exc)}}
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"error": {"message": str(exc)}},
     )
 
 
