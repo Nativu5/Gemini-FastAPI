@@ -1,7 +1,7 @@
 import hashlib
 import re
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -39,7 +39,12 @@ class LMDBConversationStore(metaclass=Singleton):
 
     HASH_LOOKUP_PREFIX = "hash:"
 
-    def __init__(self, db_path: Optional[str] = None, max_db_size: Optional[int] = None):
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        max_db_size: Optional[int] = None,
+        retention_days: Optional[int] = None,
+    ):
         """
         Initialize LMDB store.
 
@@ -52,9 +57,12 @@ class LMDBConversationStore(metaclass=Singleton):
             db_path = g_config.storage.path
         if max_db_size is None:
             max_db_size = g_config.storage.max_size
+        if retention_days is None:
+            retention_days = g_config.storage.retention_days
 
         self.db_path: Path = Path(db_path)
         self.max_db_size: int = max_db_size
+        self.retention_days: int = max(0, int(retention_days))
         self._env: lmdb.Environment | None = None
 
         self._ensure_db_path()
@@ -309,6 +317,78 @@ class LMDBConversationStore(metaclass=Singleton):
             logger.error(f"Failed to list keys: {e}")
 
         return keys
+
+    def cleanup_expired(self, retention_days: Optional[int] = None) -> int:
+        """
+        Delete conversations older than the given retention period.
+
+        Args:
+            retention_days: Optional override for retention period in days.
+
+        Returns:
+            Number of conversations removed.
+        """
+        retention_value = (
+            self.retention_days if retention_days is None else max(0, int(retention_days))
+        )
+        if retention_value <= 0:
+            logger.debug("Retention cleanup skipped because retention is disabled.")
+            return 0
+
+        cutoff = datetime.now() - timedelta(days=retention_value)
+        expired_entries: list[tuple[str, ConversationInStore]] = []
+
+        try:
+            with self._get_transaction(write=False) as txn:
+                cursor = txn.cursor()
+
+                for key_bytes, value_bytes in cursor:
+                    key_str = key_bytes.decode("utf-8")
+                    if key_str.startswith(self.HASH_LOOKUP_PREFIX):
+                        continue
+
+                    try:
+                        storage_data = orjson.loads(value_bytes)  # type: ignore[arg-type]
+                        conv = ConversationInStore.model_validate(storage_data)
+                    except Exception as exc:
+                        logger.warning(f"Failed to decode record for key {key_str}: {exc}")
+                        continue
+
+                    timestamp = conv.created_at or conv.updated_at
+                    if not timestamp:
+                        continue
+
+                    if timestamp < cutoff:
+                        expired_entries.append((key_str, conv))
+        except Exception as exc:
+            logger.error(f"Failed to scan LMDB for retention cleanup: {exc}")
+            raise
+
+        if not expired_entries:
+            return 0
+
+        removed = 0
+        try:
+            with self._get_transaction(write=True) as txn:
+                for key_str, conv in expired_entries:
+                    key_bytes = key_str.encode("utf-8")
+                    if not txn.delete(key_bytes):
+                        continue
+
+                    message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
+                    if message_hash and key_str != message_hash:
+                        txn.delete(f"{self.HASH_LOOKUP_PREFIX}{message_hash}".encode("utf-8"))
+                    removed += 1
+        except Exception as exc:
+            logger.error(f"Failed to delete expired conversations: {exc}")
+            raise
+
+        if removed:
+            logger.info(
+                f"LMDB retention cleanup removed {removed} conversation(s) older than {cutoff.isoformat()}."
+            )
+
+        return removed
 
     def stats(self) -> Dict[str, Any]:
         """

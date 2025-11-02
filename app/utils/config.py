@@ -84,9 +84,14 @@ class StorageConfig(BaseModel):
         description="Path to the storage directory where data will be saved",
     )
     max_size: int = Field(
-        default=1024**2 * 128,  # 128 MB
+        default=1024**2 * 256,  # 256 MB
         ge=1,
         description="Maximum size of the storage in bytes",
+    )
+    retention_days: int = Field(
+        default=14,
+        ge=0,
+        description="Number of days to retain conversations before automatic cleanup (0 disables cleanup)",
     )
 
 
