@@ -27,11 +27,13 @@ from ..models import (
     ResponseCreateRequest,
     ResponseCreateResponse,
     ResponseImageGenerationCall,
+    ResponseImageTool,
     ResponseInputContent,
     ResponseInputItem,
     ResponseOutputContent,
     ResponseOutputMessage,
     ResponseToolCall,
+    ResponseToolChoice,
     ResponseUsage,
     Tool,
     ToolCall,
@@ -180,6 +182,41 @@ def _build_tool_prompt(
     )
 
     return "\n".join(lines)
+
+
+def _build_image_generation_instruction(
+    tools: list[ResponseImageTool] | None,
+    tool_choice: ResponseToolChoice | None,
+) -> str | None:
+    """Construct explicit guidance so Gemini emits images when requested."""
+    has_forced_choice = tool_choice is not None and tool_choice.type == "image_generation"
+    primary = tools[0] if tools else None
+
+    if not has_forced_choice and primary is None:
+        return None
+
+    instructions: list[str] = [
+        "Image generation is enabled for this conversation. When the user requests an image you must create it, rather than apologising or declining.",
+        "Return at least one freshly generated image in your reply whenever you fulfil an image request.",
+        "You may include a brief caption describing the generated artwork, but keep it short and avoid saying that image creation is unavailable.",
+    ]
+
+    if primary:
+        if primary.model:
+            instructions.append(
+                f"Where styles differ, favour the `{primary.model}` image model when rendering the scene."
+            )
+        if primary.output_format:
+            instructions.append(
+                f"Encode the image using the `{primary.output_format}` format whenever possible."
+            )
+
+    if has_forced_choice:
+        instructions.append(
+            "The caller explicitly selected the `image_generation` tool, so do not return text-only answers."
+        )
+
+    return "\n\n".join(instructions)
 
 
 def _append_xml_hint_to_last_user_message(messages: list[Message]) -> None:
@@ -622,8 +659,8 @@ async def create_response(
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
 ):
-    messages, normalized_input = _response_items_to_messages(request.input)
-    if not messages:
+    base_messages, normalized_input = _response_items_to_messages(request.input)
+    if not base_messages:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="No message input provided."
         )
@@ -634,19 +671,32 @@ async def create_response(
             "Structured response requested with streaming enabled; streaming not supported for Responses."
         )
 
-    preface_messages = _instructions_to_messages(request.instructions)
+    extra_instructions: list[str] = []
     if structured_requirement:
-        preface_messages.insert(
-            0, Message(role="system", content=structured_requirement.instruction)
-        )
+        extra_instructions.append(structured_requirement.instruction)
         logger.debug(
             f"Structured response requested for /v1/responses (schema={structured_requirement.schema_name})."
         )
+
+    image_instruction = _build_image_generation_instruction(request.tools, request.tool_choice)
+    if image_instruction:
+        extra_instructions.append(image_instruction)
+        logger.debug("Image generation support enabled for /v1/responses request.")
+
+    preface_messages = _instructions_to_messages(request.instructions)
+    conversation_messages = base_messages
     if preface_messages:
-        messages = [*preface_messages, *messages]
+        conversation_messages = [*preface_messages, *base_messages]
         logger.debug(
             f"Injected {len(preface_messages)} instruction messages before sending to Gemini."
         )
+
+    messages = _prepare_messages_for_model(
+        conversation_messages,
+        tools=None,
+        tool_choice=None,
+        extra_instructions=extra_instructions or None,
+    )
 
     pool = GeminiClientPool()
     db = LMDBConversationStore()
