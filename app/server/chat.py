@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from gemini_webapi.client import ChatSession
 from gemini_webapi.constants import Model
+from gemini_webapi.exceptions import APIError
 from gemini_webapi.types.image import GeneratedImage, Image
 from loguru import logger
 
@@ -568,13 +569,24 @@ async def create_chat_completion(
     # Generate response
     try:
         assert session and client, "Session and client not available"
+        client_id = client.id
         logger.debug(
-            f"Client ID: {client.id}, Input length: {len(model_input)}, files count: {len(files)}"
+            f"Client ID: {client_id}, Input length: {len(model_input)}, files count: {len(files)}"
         )
         response = await _send_with_split(session, model_input, files=files)
+    except APIError as exc:
+        client_id = client.id if client else "unknown"
+        logger.warning(f"Gemini API returned invalid response for client {client_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini temporarily returned an invalid response. Please retry.",
+        ) from exc
     except Exception as e:
-        logger.exception(f"Error generating content from Gemini API: {e}")
-        raise
+        logger.exception(f"Unexpected error generating content from Gemini API: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini returned an unexpected error.",
+        ) from e
 
     # Format the response from API
     raw_output_with_think = GeminiClientWrapper.extract_output(response, include_thoughts=True)
@@ -708,7 +720,17 @@ async def create_response(
 
     session, client, remaining_messages = _find_reusable_session(db, pool, model, messages)
 
-    if session:
+    async def _build_payload(
+        payload_messages: list[Message], reuse_session: bool
+    ) -> tuple[str, list[Path | str]]:
+        if reuse_session and len(payload_messages) == 1:
+            return await GeminiClientWrapper.process_message(
+                payload_messages[0], tmp_dir, tagged=False
+            )
+        return await GeminiClientWrapper.process_conversation(payload_messages, tmp_dir)
+
+    reuse_session = session is not None
+    if reuse_session:
         messages_to_send = _prepare_messages_for_model(
             remaining_messages,
             tools=None,
@@ -720,22 +742,17 @@ async def create_response(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No new messages to send for the existing session.",
             )
-        if len(messages_to_send) == 1:
-            model_input, files = await GeminiClientWrapper.process_message(
-                messages_to_send[0], tmp_dir, tagged=False
-            )
-        else:
-            model_input, files = await GeminiClientWrapper.process_conversation(
-                messages_to_send, tmp_dir
-            )
+        payload_messages = messages_to_send
+        model_input, files = await _build_payload(payload_messages, reuse_session=True)
         logger.debug(
-            f"Reused session {session.metadata} - sending {len(messages_to_send)} prepared messages."
+            f"Reused session {session.metadata} - sending {len(payload_messages)} prepared messages."
         )
     else:
         try:
             client = pool.acquire()
             session = client.start_chat(model=model)
-            model_input, files = await GeminiClientWrapper.process_conversation(messages, tmp_dir)
+            payload_messages = messages
+            model_input, files = await _build_payload(payload_messages, reuse_session=False)
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
         except Exception as e:
@@ -745,13 +762,26 @@ async def create_response(
 
     try:
         assert session and client, "Session and client not available"
+        client_id = client.id
         logger.debug(
-            f"Client ID: {client.id}, Input length: {len(model_input)}, files count: {len(files)}"
+            f"Client ID: {client_id}, Input length: {len(model_input)}, files count: {len(files)}"
         )
         model_output = await _send_with_split(session, model_input, files=files)
-    except Exception as e:
-        logger.exception(f"Error generating content from Gemini API for responses: {e}")
+    except APIError as exc:
+        client_id = client.id if client else "unknown"
+        logger.warning(f"Gemini API returned invalid response for client {client_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini temporarily returned an invalid response. Please retry.",
+        ) from exc
+    except HTTPException:
         raise
+    except Exception as e:
+        logger.exception(f"Unexpected error generating content from Gemini API for responses: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini returned an unexpected error.",
+        ) from e
 
     text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
     text_without_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=False)
