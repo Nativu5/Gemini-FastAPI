@@ -709,7 +709,12 @@ async def create_response(
     session, client, remaining_messages = _find_reusable_session(db, pool, model, messages)
 
     if session:
-        messages_to_send = remaining_messages
+        messages_to_send = _prepare_messages_for_model(
+            remaining_messages,
+            tools=None,
+            tool_choice=None,
+            extra_instructions=extra_instructions or None,
+        )
         if not messages_to_send:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
