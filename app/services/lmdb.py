@@ -50,7 +50,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
         Args:
             db_path: Path to LMDB database directory
-            max_db_size: Maximum database size in bytes (default: 128MB)
+            max_db_size: Maximum database size in bytes (default: 256 MB)
         """
 
         if db_path is None:

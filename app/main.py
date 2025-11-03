@@ -45,26 +45,31 @@ async def _run_retention_cleanup(stop_event: asyncio.Event) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cleanup_stop_event = asyncio.Event()
-    cleanup_task: asyncio.Task | None = None
+
+    pool = GeminiClientPool()
     try:
-        pool = GeminiClientPool()
         await pool.init()
-
-        cleanup_task = asyncio.create_task(_run_retention_cleanup(cleanup_stop_event))
-
-        logger.info(f"Gemini clients initialized: {[c.id for c in pool.clients]}.")
-        logger.info("Gemini API Server ready to serve requests.")
-        yield
     except Exception as e:
         logger.exception(f"Failed to initialize Gemini clients: {e}")
         raise
+
+    cleanup_task = asyncio.create_task(_run_retention_cleanup(cleanup_stop_event))
+
+    logger.info(f"Gemini clients initialized: {[c.id for c in pool.clients]}.")
+    logger.info("Gemini API Server ready to serve requests.")
+
+    try:
+        yield
     finally:
         cleanup_stop_event.set()
-        if cleanup_task:
-            try:
-                await cleanup_task
-            except asyncio.CancelledError:
-                logger.debug("LMDB retention cleanup task cancelled during shutdown.")
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            logger.debug("LMDB retention cleanup task cancelled during shutdown.")
+        except Exception:
+            logger.exception(
+                "LMDB retention cleanup task terminated with an unexpected error during shutdown."
+            )
 
 
 def create_app() -> FastAPI:
