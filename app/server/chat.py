@@ -581,6 +581,8 @@ async def create_chat_completion(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Gemini temporarily returned an invalid response. Please retry.",
         ) from exc
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"Unexpected error generating content from Gemini API: {e}")
         raise HTTPException(
@@ -589,8 +591,21 @@ async def create_chat_completion(
         ) from e
 
     # Format the response from API
-    raw_output_with_think = GeminiClientWrapper.extract_output(response, include_thoughts=True)
-    raw_output_clean = GeminiClientWrapper.extract_output(response, include_thoughts=False)
+    try:
+        raw_output_with_think = GeminiClientWrapper.extract_output(response, include_thoughts=True)
+        raw_output_clean = GeminiClientWrapper.extract_output(response, include_thoughts=False)
+    except IndexError as exc:
+        logger.exception("Gemini output parsing failed (IndexError).")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini returned malformed response content.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Gemini output parsing failed unexpectedly.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Gemini output parsing failed unexpectedly.",
+        ) from exc
 
     visible_output, tool_calls = _extract_tool_calls(raw_output_with_think)
     storage_output = _remove_tool_call_blocks(raw_output_clean).strip()
@@ -783,8 +798,23 @@ async def create_response(
             detail="Gemini returned an unexpected error.",
         ) from e
 
-    text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
-    text_without_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=False)
+    try:
+        text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
+        text_without_think = GeminiClientWrapper.extract_output(
+            model_output, include_thoughts=False
+        )
+    except IndexError as exc:
+        logger.exception("Gemini output parsing failed (IndexError).")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini returned malformed response content.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Gemini output parsing failed unexpectedly.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Gemini output parsing failed unexpectedly.",
+        ) from exc
 
     visible_text, detected_tool_calls = _extract_tool_calls(text_with_think)
     storage_output = _remove_tool_call_blocks(text_without_think).strip()
