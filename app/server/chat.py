@@ -207,7 +207,7 @@ def _build_image_generation_instruction(
     if primary:
         if primary.model:
             instructions.append(
-                f"Where styles differ, favour the `{primary.model}` image model when rendering the scene."
+                f"Where styles differ, favor the `{primary.model}` image model when rendering the scene."
             )
         if primary.output_format:
             instructions.append(

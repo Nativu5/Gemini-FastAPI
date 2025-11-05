@@ -54,6 +54,14 @@ async def lifespan(app: FastAPI):
         raise
 
     cleanup_task = asyncio.create_task(_run_retention_cleanup(cleanup_stop_event))
+    # Give the cleanup task a chance to start and surface immediate failures.
+    await asyncio.sleep(0)
+    if cleanup_task.done():
+        try:
+            cleanup_task.result()
+        except Exception:
+            logger.exception("LMDB retention cleanup task failed to start.")
+            raise
 
     logger.info(f"Gemini clients initialized: {[c.id for c in pool.clients]}.")
     logger.info("Gemini API Server ready to serve requests.")
