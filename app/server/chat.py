@@ -197,9 +197,11 @@ def _build_image_generation_instruction(
         return None
 
     instructions: list[str] = [
-        "Image generation is enabled for this conversation. When the user requests an image you must create it, rather than apologising or declining.",
-        "Return at least one freshly generated image in your reply whenever you fulfil an image request.",
-        "You may include a brief caption describing the generated artwork, but keep it short and avoid saying that image creation is unavailable.",
+        "Image generation is enabled. When the user requests an image, you must return an actual generated image, not a text description.",
+        "For new image requests, generate at least one new image matching the description.",
+        "If the user provides an image and asks for edits or variations, return a newly generated image with the requested changes.",
+        "Avoid all text replies unless a short caption is explicitly requested. Do not explain, apologize, or describe image creation steps.",
+        "Never send placeholder text like 'Here is your image' or any other response without an actual image attachment.",
     ]
 
     if primary:
@@ -214,7 +216,7 @@ def _build_image_generation_instruction(
 
     if has_forced_choice:
         instructions.append(
-            "The caller explicitly selected the `image_generation` tool, so do not return text-only answers."
+            "Image generation was explicitly requested. You must return at least one generated image. Any response without an image will be treated as a failure."
         )
 
     return "\n\n".join(instructions)
@@ -849,14 +851,21 @@ async def create_response(
     expects_image = (
         request.tool_choice is not None and request.tool_choice.type == "image_generation"
     )
-    if expects_image and not model_output.images:
+    images = model_output.images or []
+    logger.debug(
+        f"Gemini returned {len(images)} image(s) for /v1/responses "
+        f"(expects_image={expects_image}, instruction_applied={bool(image_instruction)})."
+    )
+    if expects_image and not images:
         summary = assistant_text.strip() if assistant_text else ""
         if summary:
             summary = re.sub(r"\s+", " ", summary)
             if len(summary) > 200:
                 summary = f"{summary[:197]}..."
         logger.warning(
-            "Image generation was requested via tool_choice but Gemini returned no images."
+            "Image generation requested but Gemini produced no images. "
+            f"client_id={client_id}, forced_tool_choice={request.tool_choice is not None}, "
+            f"instruction_applied={bool(image_instruction)}, assistant_preview='{summary}'"
         )
         detail = "LLM returned no images for the requested image_generation tool."
         if summary:
@@ -865,7 +874,7 @@ async def create_response(
 
     image_contents: list[ResponseOutputContent] = []
     image_call_items: list[ResponseImageGenerationCall] = []
-    for image in model_output.images:
+    for image in images:
         try:
             image_base64, width, height = await _image_to_base64(image, tmp_dir)
         except Exception as exc:
