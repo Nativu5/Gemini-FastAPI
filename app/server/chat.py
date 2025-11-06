@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from gemini_webapi.client import ChatSession
 from gemini_webapi.constants import Model
+from gemini_webapi.exceptions import APIError
 from gemini_webapi.types.image import GeneratedImage, Image
 from loguru import logger
 
@@ -27,11 +28,13 @@ from ..models import (
     ResponseCreateRequest,
     ResponseCreateResponse,
     ResponseImageGenerationCall,
+    ResponseImageTool,
     ResponseInputContent,
     ResponseInputItem,
     ResponseOutputContent,
     ResponseOutputMessage,
     ResponseToolCall,
+    ResponseToolChoice,
     ResponseUsage,
     Tool,
     ToolCall,
@@ -180,6 +183,43 @@ def _build_tool_prompt(
     )
 
     return "\n".join(lines)
+
+
+def _build_image_generation_instruction(
+    tools: list[ResponseImageTool] | None,
+    tool_choice: ResponseToolChoice | None,
+) -> str | None:
+    """Construct explicit guidance so Gemini emits images when requested."""
+    has_forced_choice = tool_choice is not None and tool_choice.type == "image_generation"
+    primary = tools[0] if tools else None
+
+    if not has_forced_choice and primary is None:
+        return None
+
+    instructions: list[str] = [
+        "Image generation is enabled. When the user requests an image, you must return an actual generated image, not a text description.",
+        "For new image requests, generate at least one new image matching the description.",
+        "If the user provides an image and asks for edits or variations, return a newly generated image with the requested changes.",
+        "Avoid all text replies unless a short caption is explicitly requested. Do not explain, apologize, or describe image creation steps.",
+        "Never send placeholder text like 'Here is your image' or any other response without an actual image attachment.",
+    ]
+
+    if primary:
+        if primary.model:
+            instructions.append(
+                f"Where styles differ, favor the `{primary.model}` image model when rendering the scene."
+            )
+        if primary.output_format:
+            instructions.append(
+                f"Encode the image using the `{primary.output_format}` format whenever possible."
+            )
+
+    if has_forced_choice:
+        instructions.append(
+            "Image generation was explicitly requested. You must return at least one generated image. Any response without an image will be treated as a failure."
+        )
+
+    return "\n\n".join(instructions)
 
 
 def _append_xml_hint_to_last_user_message(messages: list[Message]) -> None:
@@ -531,17 +571,43 @@ async def create_chat_completion(
     # Generate response
     try:
         assert session and client, "Session and client not available"
+        client_id = client.id
         logger.debug(
-            f"Client ID: {client.id}, Input length: {len(model_input)}, files count: {len(files)}"
+            f"Client ID: {client_id}, Input length: {len(model_input)}, files count: {len(files)}"
         )
         response = await _send_with_split(session, model_input, files=files)
-    except Exception as e:
-        logger.exception(f"Error generating content from Gemini API: {e}")
+    except APIError as exc:
+        client_id = client.id if client else "unknown"
+        logger.warning(f"Gemini API returned invalid response for client {client_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini temporarily returned an invalid response. Please retry.",
+        ) from exc
+    except HTTPException:
         raise
+    except Exception as e:
+        logger.exception(f"Unexpected error generating content from Gemini API: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini returned an unexpected error.",
+        ) from e
 
     # Format the response from API
-    raw_output_with_think = GeminiClientWrapper.extract_output(response, include_thoughts=True)
-    raw_output_clean = GeminiClientWrapper.extract_output(response, include_thoughts=False)
+    try:
+        raw_output_with_think = GeminiClientWrapper.extract_output(response, include_thoughts=True)
+        raw_output_clean = GeminiClientWrapper.extract_output(response, include_thoughts=False)
+    except IndexError as exc:
+        logger.exception("Gemini output parsing failed (IndexError).")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini returned malformed response content.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Gemini output parsing failed unexpectedly.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Gemini output parsing failed unexpectedly.",
+        ) from exc
 
     visible_output, tool_calls = _extract_tool_calls(raw_output_with_think)
     storage_output = _remove_tool_call_blocks(raw_output_clean).strip()
@@ -622,8 +688,8 @@ async def create_response(
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
 ):
-    messages, normalized_input = _response_items_to_messages(request.input)
-    if not messages:
+    base_messages, normalized_input = _response_items_to_messages(request.input)
+    if not base_messages:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="No message input provided."
         )
@@ -634,19 +700,32 @@ async def create_response(
             "Structured response requested with streaming enabled; streaming not supported for Responses."
         )
 
-    preface_messages = _instructions_to_messages(request.instructions)
+    extra_instructions: list[str] = []
     if structured_requirement:
-        preface_messages.insert(
-            0, Message(role="system", content=structured_requirement.instruction)
-        )
+        extra_instructions.append(structured_requirement.instruction)
         logger.debug(
             f"Structured response requested for /v1/responses (schema={structured_requirement.schema_name})."
         )
+
+    image_instruction = _build_image_generation_instruction(request.tools, request.tool_choice)
+    if image_instruction:
+        extra_instructions.append(image_instruction)
+        logger.debug("Image generation support enabled for /v1/responses request.")
+
+    preface_messages = _instructions_to_messages(request.instructions)
+    conversation_messages = base_messages
     if preface_messages:
-        messages = [*preface_messages, *messages]
+        conversation_messages = [*preface_messages, *base_messages]
         logger.debug(
             f"Injected {len(preface_messages)} instruction messages before sending to Gemini."
         )
+
+    messages = _prepare_messages_for_model(
+        conversation_messages,
+        tools=None,
+        tool_choice=None,
+        extra_instructions=extra_instructions or None,
+    )
 
     pool = GeminiClientPool()
     db = LMDBConversationStore()
@@ -658,29 +737,39 @@ async def create_response(
 
     session, client, remaining_messages = _find_reusable_session(db, pool, model, messages)
 
-    if session:
-        messages_to_send = remaining_messages
+    async def _build_payload(
+        payload_messages: list[Message], reuse_session: bool
+    ) -> tuple[str, list[Path | str]]:
+        if reuse_session and len(payload_messages) == 1:
+            return await GeminiClientWrapper.process_message(
+                payload_messages[0], tmp_dir, tagged=False
+            )
+        return await GeminiClientWrapper.process_conversation(payload_messages, tmp_dir)
+
+    reuse_session = session is not None
+    if reuse_session:
+        messages_to_send = _prepare_messages_for_model(
+            remaining_messages,
+            tools=None,
+            tool_choice=None,
+            extra_instructions=extra_instructions or None,
+        )
         if not messages_to_send:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No new messages to send for the existing session.",
             )
-        if len(messages_to_send) == 1:
-            model_input, files = await GeminiClientWrapper.process_message(
-                messages_to_send[0], tmp_dir, tagged=False
-            )
-        else:
-            model_input, files = await GeminiClientWrapper.process_conversation(
-                messages_to_send, tmp_dir
-            )
+        payload_messages = messages_to_send
+        model_input, files = await _build_payload(payload_messages, reuse_session=True)
         logger.debug(
-            f"Reused session {session.metadata} - sending {len(messages_to_send)} prepared messages."
+            f"Reused session {session.metadata} - sending {len(payload_messages)} prepared messages."
         )
     else:
         try:
             client = pool.acquire()
             session = client.start_chat(model=model)
-            model_input, files = await GeminiClientWrapper.process_conversation(messages, tmp_dir)
+            payload_messages = messages
+            model_input, files = await _build_payload(payload_messages, reuse_session=False)
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
         except Exception as e:
@@ -690,16 +779,44 @@ async def create_response(
 
     try:
         assert session and client, "Session and client not available"
+        client_id = client.id
         logger.debug(
-            f"Client ID: {client.id}, Input length: {len(model_input)}, files count: {len(files)}"
+            f"Client ID: {client_id}, Input length: {len(model_input)}, files count: {len(files)}"
         )
         model_output = await _send_with_split(session, model_input, files=files)
-    except Exception as e:
-        logger.exception(f"Error generating content from Gemini API for responses: {e}")
+    except APIError as exc:
+        client_id = client.id if client else "unknown"
+        logger.warning(f"Gemini API returned invalid response for client {client_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini temporarily returned an invalid response. Please retry.",
+        ) from exc
+    except HTTPException:
         raise
+    except Exception as e:
+        logger.exception(f"Unexpected error generating content from Gemini API for responses: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini returned an unexpected error.",
+        ) from e
 
-    text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
-    text_without_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=False)
+    try:
+        text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
+        text_without_think = GeminiClientWrapper.extract_output(
+            model_output, include_thoughts=False
+        )
+    except IndexError as exc:
+        logger.exception("Gemini output parsing failed (IndexError).")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini returned malformed response content.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Gemini output parsing failed unexpectedly.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Gemini output parsing failed unexpectedly.",
+        ) from exc
 
     visible_text, detected_tool_calls = _extract_tool_calls(text_with_think)
     storage_output = _remove_tool_call_blocks(text_without_think).strip()
@@ -734,14 +851,21 @@ async def create_response(
     expects_image = (
         request.tool_choice is not None and request.tool_choice.type == "image_generation"
     )
-    if expects_image and not model_output.images:
+    images = model_output.images or []
+    logger.debug(
+        f"Gemini returned {len(images)} image(s) for /v1/responses "
+        f"(expects_image={expects_image}, instruction_applied={bool(image_instruction)})."
+    )
+    if expects_image and not images:
         summary = assistant_text.strip() if assistant_text else ""
         if summary:
             summary = re.sub(r"\s+", " ", summary)
             if len(summary) > 200:
                 summary = f"{summary[:197]}..."
         logger.warning(
-            "Image generation was requested via tool_choice but Gemini returned no images."
+            "Image generation requested but Gemini produced no images. "
+            f"client_id={client_id}, forced_tool_choice={request.tool_choice is not None}, "
+            f"instruction_applied={bool(image_instruction)}, assistant_preview='{summary}'"
         )
         detail = "LLM returned no images for the requested image_generation tool."
         if summary:
@@ -750,7 +874,7 @@ async def create_response(
 
     image_contents: list[ResponseOutputContent] = []
     image_call_items: list[ResponseImageGenerationCall] = []
-    for image in model_output.images:
+    for image in images:
         try:
             image_base64, width, height = await _image_to_base64(image, tmp_dir)
         except Exception as exc:
