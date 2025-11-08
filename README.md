@@ -6,7 +6,7 @@
 
 [ English | [中文](README.zh.md) ]
 
-Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by  [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API).
+Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API).
 
 **✅ Call Gemini's web-based models via API without an API Key, completely free!**
 
@@ -49,13 +49,20 @@ pip install -e .
 ### Configuration
 
 Edit `config/config.yaml` and provide at least one credential pair:
+
 ```yaml
 gemini:
   clients:
     - id: "client-a"
       secure_1psid: "YOUR_SECURE_1PSID_HERE"
       secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
+      proxy: null # Optional proxy URL (null/empty keeps direct connection)
 ```
+
+> Proxy tips:
+>
+> - Omit the `proxy` key or set it to `null`/empty string to keep the legacy direct connection.
+> - Each client entry can point to a different proxy if needed.
 
 > [!NOTE]
 > For details, refer to the [Configuration](#configuration-1) section below.
@@ -79,13 +86,20 @@ The server will start on `http://localhost:8000` by default.
 ```bash
 docker run -p 8000:8000 \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/cache:/app/.venv/lib/python3.12/site-packages/gemini_webapi/utils/temp \
+  -v $(pwd)/cache:/app/cache \
   -e CONFIG_SERVER__API_KEY="your-api-key-here" \
   -e CONFIG_GEMINI__CLIENTS__0__ID="client-a" \
   -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid" \
   -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts" \
+  -e CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080" \
+  -e GEMINI_COOKIE_PATH="/app/cache" \
   ghcr.io/nativu5/gemini-fastapi
 ```
+
+> [!TIP]
+> Add `CONFIG_GEMINI__CLIENTS__N__PROXY` only if you need a proxy; omit the variable to keep direct connections.
+>
+> `GEMINI_COOKIE_PATH` points to the directory inside the container where refreshed cookies are stored. Bind-mounting it (e.g. `-v $(pwd)/cache:/app/cache`) preserves those cookies across container rebuilds/recreations so you rarely need to re-authenticate.
 
 ### Run with Docker Compose
 
@@ -101,7 +115,7 @@ services:
       # - ./config:/app/config  # Uncomment to use a custom config file
       # - ./certs:/app/certs        # Uncomment to enable HTTPS with your certs
       - ./data:/app/data
-      - ./cache:/app/.venv/lib/python3.12/site-packages/gemini_webapi/utils/temp
+      - ./cache:/app/cache
     environment:
       - CONFIG_SERVER__HOST=0.0.0.0
       - CONFIG_SERVER__PORT=8000
@@ -109,6 +123,8 @@ services:
       - CONFIG_GEMINI__CLIENTS__0__ID=client-a
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID=${SECURE_1PSID}
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS=${SECURE_1PSIDTS}
+      - CONFIG_GEMINI__CLIENTS__0__PROXY=socks5://127.0.0.1:1080 # optional per-client proxy
+      - GEMINI_COOKIE_PATH=/app/cache # must match the cache volume mount above
     restart: on-failure:3 # Avoid retrying too many times
 ```
 
@@ -120,18 +136,18 @@ docker compose up -d
 
 > [!IMPORTANT]
 > Make sure to mount the `/app/data` volume to persist conversation data between container restarts.
-> It's also recommended to mount the `gemini_webapi/utils/temp` directory to save refreshed cookies.
+> Also mount `/app/cache` so refreshed cookies (including rotated 1PSIDTS values) survive container rebuilds/recreates without re-auth.
 
 ## Configuration
 
-The server reads a YAML configuration file located at `config/config.yaml`. 
+The server reads a YAML configuration file located at `config/config.yaml`.
 
 For details on each configuration option, refer to the comments in the [`config/config.yaml`](https://github.com/Nativu5/Gemini-FastAPI/blob/main/config/config.yaml) file.
 
 ### Environment Variable Overrides
 
 > [!TIP]
-> This feature is particularly useful for Docker deployments and production environments where you want to keep sensitive credentials separate from configuration files. 
+> This feature is particularly useful for Docker deployments and production environments where you want to keep sensitive credentials separate from configuration files.
 
 You can override any configuration option using environment variables with the `CONFIG_` prefix. Use double underscores (`__`) to represent nested keys, for example:
 
@@ -143,6 +159,8 @@ export CONFIG_SERVER__API_KEY="your-secure-api-key"
 export CONFIG_GEMINI__CLIENTS__0__ID="client-a"
 export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid"
 export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts"
+# Optional per-client proxy override
+export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
 
 # Override conversation storage size limit
 export CONFIG_STORAGE__MAX_SIZE=268435456  # 256 MB

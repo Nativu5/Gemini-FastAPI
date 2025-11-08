@@ -21,6 +21,7 @@ gemini:
     - id: "example-id-1"   # Arbitrary client ID
       secure_1psid: "YOUR_SECURE_1PSID_HERE"
       secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
+      proxy: null           # Optional proxy URL (null/empty means direct connection)
   timeout: 60              # Init timeout in seconds
   auto_refresh: true       # Auto-refresh session cookies
   refresh_interval: 540    # Refresh interval in seconds

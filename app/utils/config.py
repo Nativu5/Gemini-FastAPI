@@ -3,7 +3,7 @@ import sys
 from typing import Literal, Optional
 
 from loguru import logger
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from pydantic_settings import (
     BaseSettings,
     SettingsConfigDict,
@@ -39,6 +39,15 @@ class GeminiClientSettings(BaseModel):
     id: str = Field(..., description="Unique identifier for the client")
     secure_1psid: str = Field(..., description="Gemini Secure 1PSID")
     secure_1psidts: str = Field(..., description="Gemini Secure 1PSIDTS")
+    proxy: Optional[str] = Field(default=None, description="Proxy URL for this Gemini client")
+
+    @field_validator("proxy", mode="before")
+    @classmethod
+    def _blank_proxy_to_none(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
 
 class GeminiConfig(BaseModel):
