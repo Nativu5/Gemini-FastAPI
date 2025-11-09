@@ -575,7 +575,9 @@ async def create_chat_completion(
     extra_instructions = [structured_requirement.instruction] if structured_requirement else None
 
     # Check if conversation is reusable
-    session, client, remaining_messages = _find_reusable_session(db, pool, model, request.messages)
+    session, client, remaining_messages = await _find_reusable_session(
+        db, pool, model, request.messages
+    )
 
     if session:
         messages_to_send = _prepare_messages_for_model(
@@ -600,7 +602,7 @@ async def create_chat_completion(
     else:
         # Start a new session and concat messages into a single string
         try:
-            client = pool.acquire()
+            client = await pool.acquire()
             session = client.start_chat(model=model)
             messages_to_send = _prepare_messages_for_model(
                 request.messages, request.tools, request.tool_choice, extra_instructions
@@ -610,6 +612,8 @@ async def create_chat_completion(
             )
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
         except Exception as e:
             logger.exception(f"Error in preparing conversation: {e}")
             raise
@@ -782,7 +786,7 @@ async def create_response(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    session, client, remaining_messages = _find_reusable_session(db, pool, model, messages)
+    session, client, remaining_messages = await _find_reusable_session(db, pool, model, messages)
 
     async def _build_payload(
         payload_messages: list[Message], reuse_session: bool
@@ -813,12 +817,14 @@ async def create_response(
         )
     else:
         try:
-            client = pool.acquire()
+            client = await pool.acquire()
             session = client.start_chat(model=model)
             payload_messages = messages
             model_input, files = await _build_payload(payload_messages, reuse_session=False)
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
         except Exception as e:
             logger.exception(f"Error in preparing conversation for responses API: {e}")
             raise
@@ -1051,7 +1057,7 @@ def _text_from_message(message: Message) -> str:
     return base_text
 
 
-def _find_reusable_session(
+async def _find_reusable_session(
     db: LMDBConversationStore,
     pool: GeminiClientPool,
     model: Model,
@@ -1086,7 +1092,7 @@ def _find_reusable_session(
         if search_history[-1].role in {"assistant", "system"}:
             try:
                 if conv := db.find(model.model_name, search_history):
-                    client = pool.acquire(conv.client_id)
+                    client = await pool.acquire(conv.client_id)
                     session = client.start_chat(metadata=conv.metadata, model=model)
                     remain = messages[search_end:]
                     return session, client, remain
