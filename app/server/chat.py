@@ -318,10 +318,57 @@ def _strip_system_hints(text: str) -> str:
     """Remove system-level hint text from a given string."""
     if not text:
         return text
-    cleaned = text.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
+    cleaned = _strip_tagged_blocks(text)
+    cleaned = cleaned.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
     cleaned = cleaned.replace(CODE_BLOCK_HINT, "").replace(CODE_HINT_STRIPPED, "")
     cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
     return cleaned.strip()
+
+
+def _strip_tagged_blocks(text: str) -> str:
+    """Remove <|im_start|>role ... <|im_end|> sections, dropping tool blocks entirely."""
+    if not text:
+        return text
+
+    result: list[str] = []
+    idx = 0
+    length = len(text)
+
+    while idx < length:
+        start = text.find("<|im_start|>", idx)
+        if start == -1:
+            result.append(text[idx:])
+            break
+
+        # append any content before this block
+        result.append(text[idx:start])
+
+        role_start = start + len("<|im_start|>")
+        newline = text.find("\n", role_start)
+        if newline == -1:
+            # malformed block; keep remainder as-is
+            result.append(text[start:])
+            break
+
+        role = text[role_start:newline].strip().lower()
+        end_marker = "<|im_end|>"
+        end = text.find(end_marker, newline + 1)
+        if end == -1:
+            result.append(text[start:])
+            break
+
+        block_end = end + len(end_marker)
+
+        if role == "tool":
+            idx = block_end
+            continue
+
+        # keep the content without role markers
+        content = text[newline + 1 : end]
+        result.append(content)
+        idx = block_end
+
+    return "".join(result)
 
 
 def _ensure_data_url(part: ResponseInputContent) -> str | None:
