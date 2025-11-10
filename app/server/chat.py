@@ -326,16 +326,21 @@ def _strip_system_hints(text: str) -> str:
 
 
 def _strip_tagged_blocks(text: str) -> str:
-    """Remove <|im_start|>role ... <|im_end|> sections, dropping tool blocks entirely."""
+    """Remove <|im_start|>role ... <|im_end|> sections, dropping tool blocks entirely.
+    - tool blocks are removed entirely (if missing end marker, drop to EOF).
+    - other roles: remove markers and role, keep inner content (if missing end marker, keep to EOF).
+    """
     if not text:
         return text
 
     result: list[str] = []
     idx = 0
     length = len(text)
+    start_marker = "<|im_start|>"
+    end_marker = "<|im_end|>"
 
     while idx < length:
-        start = text.find("<|im_start|>", idx)
+        start = text.find(start_marker, idx)
         if start == -1:
             result.append(text[idx:])
             break
@@ -343,23 +348,30 @@ def _strip_tagged_blocks(text: str) -> str:
         # append any content before this block
         result.append(text[idx:start])
 
-        role_start = start + len("<|im_start|>")
+        role_start = start + len(start_marker)
         newline = text.find("\n", role_start)
         if newline == -1:
-            # malformed block; keep remainder as-is
+            # malformed block; keep remainder as-is (safe behavior)
             result.append(text[start:])
             break
 
         role = text[role_start:newline].strip().lower()
-        end_marker = "<|im_end|>"
+
         end = text.find(end_marker, newline + 1)
         if end == -1:
-            result.append(text[start:])
-            break
+            # missing end marker
+            if role == "tool":
+                # drop from start marker to EOF (skip remainder)
+                break
+            else:
+                # keep inner content from after the role newline to EOF
+                result.append(text[newline + 1 :])
+                break
 
         block_end = end + len(end_marker)
 
         if role == "tool":
+            # drop whole block
             idx = block_end
             continue
 
