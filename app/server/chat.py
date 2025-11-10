@@ -318,10 +318,69 @@ def _strip_system_hints(text: str) -> str:
     """Remove system-level hint text from a given string."""
     if not text:
         return text
-    cleaned = text.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
+    cleaned = _strip_tagged_blocks(text)
+    cleaned = cleaned.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
     cleaned = cleaned.replace(CODE_BLOCK_HINT, "").replace(CODE_HINT_STRIPPED, "")
     cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
     return cleaned.strip()
+
+
+def _strip_tagged_blocks(text: str) -> str:
+    """Remove <|im_start|>role ... <|im_end|> sections, dropping tool blocks entirely.
+    - tool blocks are removed entirely (if missing end marker, drop to EOF).
+    - other roles: remove markers and role, keep inner content (if missing end marker, keep to EOF).
+    """
+    if not text:
+        return text
+
+    result: list[str] = []
+    idx = 0
+    length = len(text)
+    start_marker = "<|im_start|>"
+    end_marker = "<|im_end|>"
+
+    while idx < length:
+        start = text.find(start_marker, idx)
+        if start == -1:
+            result.append(text[idx:])
+            break
+
+        # append any content before this block
+        result.append(text[idx:start])
+
+        role_start = start + len(start_marker)
+        newline = text.find("\n", role_start)
+        if newline == -1:
+            # malformed block; keep remainder as-is (safe behavior)
+            result.append(text[start:])
+            break
+
+        role = text[role_start:newline].strip().lower()
+
+        end = text.find(end_marker, newline + 1)
+        if end == -1:
+            # missing end marker
+            if role == "tool":
+                # drop from start marker to EOF (skip remainder)
+                break
+            else:
+                # keep inner content from after the role newline to EOF
+                result.append(text[newline + 1 :])
+                break
+
+        block_end = end + len(end_marker)
+
+        if role == "tool":
+            # drop whole block
+            idx = block_end
+            continue
+
+        # keep the content without role markers
+        content = text[newline + 1 : end]
+        result.append(content)
+        idx = block_end
+
+    return "".join(result)
 
 
 def _ensure_data_url(part: ResponseInputContent) -> str | None:
@@ -528,7 +587,9 @@ async def create_chat_completion(
     extra_instructions = [structured_requirement.instruction] if structured_requirement else None
 
     # Check if conversation is reusable
-    session, client, remaining_messages = _find_reusable_session(db, pool, model, request.messages)
+    session, client, remaining_messages = await _find_reusable_session(
+        db, pool, model, request.messages
+    )
 
     if session:
         messages_to_send = _prepare_messages_for_model(
@@ -553,7 +614,7 @@ async def create_chat_completion(
     else:
         # Start a new session and concat messages into a single string
         try:
-            client = pool.acquire()
+            client = await pool.acquire()
             session = client.start_chat(model=model)
             messages_to_send = _prepare_messages_for_model(
                 request.messages, request.tools, request.tool_choice, extra_instructions
@@ -563,6 +624,8 @@ async def create_chat_completion(
             )
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
         except Exception as e:
             logger.exception(f"Error in preparing conversation: {e}")
             raise
@@ -735,7 +798,7 @@ async def create_response(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    session, client, remaining_messages = _find_reusable_session(db, pool, model, messages)
+    session, client, remaining_messages = await _find_reusable_session(db, pool, model, messages)
 
     async def _build_payload(
         payload_messages: list[Message], reuse_session: bool
@@ -766,12 +829,14 @@ async def create_response(
         )
     else:
         try:
-            client = pool.acquire()
+            client = await pool.acquire()
             session = client.start_chat(model=model)
             payload_messages = messages
             model_input, files = await _build_payload(payload_messages, reuse_session=False)
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
         except Exception as e:
             logger.exception(f"Error in preparing conversation for responses API: {e}")
             raise
@@ -1004,7 +1069,7 @@ def _text_from_message(message: Message) -> str:
     return base_text
 
 
-def _find_reusable_session(
+async def _find_reusable_session(
     db: LMDBConversationStore,
     pool: GeminiClientPool,
     model: Model,
@@ -1039,7 +1104,7 @@ def _find_reusable_session(
         if search_history[-1].role in {"assistant", "system"}:
             try:
                 if conv := db.find(model.model_name, search_history):
-                    client = pool.acquire(conv.client_id)
+                    client = await pool.acquire(conv.client_id)
                     session = client.start_chat(metadata=conv.metadata, model=model)
                     remain = messages[search_end:]
                     return session, client, remain
