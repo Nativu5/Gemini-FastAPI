@@ -243,19 +243,19 @@ class GeminiClientWrapper(GeminiClient):
         return "\n".join(conversation), files
 
     @staticmethod
-    def extract_output(response: ModelOutput, include_thoughts: bool = True) -> str:
+    def extract_output(response: ModelOutput, include_thoughts: bool = True) -> tuple[str, str | None]:
         """
         Extract and format the output text from the Gemini response.
-        """
-        text = ""
 
-        if include_thoughts and response.thoughts:
-            text += f"<think>{response.thoughts}</think>\n"
+        Returns:
+            tuple: (text, reasoning_content) where reasoning_content is None if include_thoughts is False
+        """
+        reasoning = response.thoughts if include_thoughts else None
 
         if response.text:
-            text += response.text
+            text = response.text
         else:
-            text += str(response)
+            text = str(response)
 
         # Fix some escaped characters
         def _unescape_html(text_content: str) -> str:
@@ -313,4 +313,6 @@ class GeminiClientWrapper(GeminiClient):
 
         # Fix inline code blocks
         pattern = r"`(\[[^\]]+\]\([^\)]+\))`"
-        return re.sub(pattern, r"\1", text)
+        text = re.sub(pattern, r"\1", text)
+
+        return text, reasoning

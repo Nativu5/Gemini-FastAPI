@@ -1,9 +1,8 @@
 import hashlib
-import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import lmdb
 import orjson
@@ -22,7 +21,7 @@ def _hash_message(message: Message) -> str:
     return hashlib.sha256(message_bytes).hexdigest()
 
 
-def _hash_conversation(client_id: str, model: str, messages: List[Message]) -> str:
+def _hash_conversation(client_id: str, model: str, messages: list[Message]) -> str:
     """Generate a hash for a list of messages and client id."""
     # Create a combined hash from all individual message hashes
     combined_hash = hashlib.sha256()
@@ -41,9 +40,9 @@ class LMDBConversationStore(metaclass=Singleton):
 
     def __init__(
         self,
-        db_path: Optional[str] = None,
-        max_db_size: Optional[int] = None,
-        retention_days: Optional[int] = None,
+        db_path: str | None = None,
+        max_db_size: int | None = None,
+        retention_days: int | None = None,
     ):
         """
         Initialize LMDB store.
@@ -110,7 +109,7 @@ class LMDBConversationStore(metaclass=Singleton):
     def store(
         self,
         conv: ConversationInStore,
-        custom_key: Optional[str] = None,
+        custom_key: str | None = None,
     ) -> str:
         """
         Store a conversation model in LMDB.
@@ -155,7 +154,7 @@ class LMDBConversationStore(metaclass=Singleton):
             logger.error(f"Failed to store conversation: {e}")
             raise
 
-    def get(self, key: str) -> Optional[ConversationInStore]:
+    def get(self, key: str) -> ConversationInStore | None:
         """
         Retrieve conversation data by key.
 
@@ -181,7 +180,7 @@ class LMDBConversationStore(metaclass=Singleton):
             logger.error(f"Failed to retrieve messages for key {key}: {e}")
             return None
 
-    def find(self, model: str, messages: List[Message]) -> Optional[ConversationInStore]:
+    def find(self, model: str, messages: list[Message]) -> ConversationInStore | None:
         """
         Search conversation data by message list.
 
@@ -210,8 +209,8 @@ class LMDBConversationStore(metaclass=Singleton):
         return None
 
     def _find_by_message_list(
-        self, model: str, messages: List[Message]
-    ) -> Optional[ConversationInStore]:
+        self, model: str, messages: list[Message]
+    ) -> ConversationInStore | None:
         """Internal find implementation based on a message list."""
         for c in g_config.gemini.clients:
             message_hash = _hash_conversation(c.id, model, messages)
@@ -248,7 +247,7 @@ class LMDBConversationStore(metaclass=Singleton):
             logger.error(f"Failed to check existence of key {key}: {e}")
             return False
 
-    def delete(self, key: str) -> Optional[ConversationInStore]:
+    def delete(self, key: str) -> ConversationInStore | None:
         """
         Delete conversation model by key.
 
@@ -283,7 +282,7 @@ class LMDBConversationStore(metaclass=Singleton):
             logger.error(f"Failed to delete key {key}: {e}")
             return None
 
-    def keys(self, prefix: str = "", limit: Optional[int] = None) -> List[str]:
+    def keys(self, prefix: str = "", limit: int | None = None) -> list[str]:
         """
         List all keys in the store, optionally filtered by prefix.
 
@@ -319,7 +318,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
         return keys
 
-    def cleanup_expired(self, retention_days: Optional[int] = None) -> int:
+    def cleanup_expired(self, retention_days: int | None = None) -> int:
         """
         Delete conversations older than the given retention period.
 
@@ -391,7 +390,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
         return removed
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         """
         Get database statistics.
 
@@ -420,30 +419,11 @@ class LMDBConversationStore(metaclass=Singleton):
         self.close()
 
     @staticmethod
-    def remove_think_tags(text: str) -> str:
-        """
-        Remove <think>...</think> tags at the start of text and strip whitespace.
-        """
-        cleaned_content = re.sub(r"^(\s*<think>.*?</think>\n?)", "", text, flags=re.DOTALL)
-        return cleaned_content.strip()
-
-    @staticmethod
     def sanitize_assistant_messages(messages: list[Message]) -> list[Message]:
         """
-        Create a new list of messages with assistant content cleaned of <think> tags.
-        This is useful for store the chat history.
+        Create a new list of messages, ensuring reasoning_content is not duplicated in content.
+        This is useful for storing chat history cleanly.
         """
-        cleaned_messages = []
-        for msg in messages:
-            if msg.role == "assistant" and isinstance(msg.content, str):
-                normalized_content = LMDBConversationStore.remove_think_tags(msg.content)
-                # Only create a new object if content actually changed
-                if normalized_content != msg.content:
-                    cleaned_msg = Message(role=msg.role, content=normalized_content, name=msg.name)
-                    cleaned_messages.append(cleaned_msg)
-                else:
-                    cleaned_messages.append(msg)
-            else:
-                cleaned_messages.append(msg)
-
-        return cleaned_messages
+        # Since reasoning_content is now stored separately, we don't need to strip tags from content
+        # Just return a clean copy of the messages
+        return [msg.model_copy(deep=True) for msg in messages]

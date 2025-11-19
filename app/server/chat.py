@@ -594,8 +594,8 @@ async def create_chat_completion(
 
     # Format the response from API
     try:
-        raw_output_with_think = GeminiClientWrapper.extract_output(response, include_thoughts=True)
-        raw_output_clean = GeminiClientWrapper.extract_output(response, include_thoughts=False)
+        raw_output_text, reasoning_content = GeminiClientWrapper.extract_output(response, include_thoughts=True)
+        raw_output_clean, _ = GeminiClientWrapper.extract_output(response, include_thoughts=False)
     except IndexError as exc:
         logger.exception("Gemini output parsing failed (IndexError).")
         raise HTTPException(
@@ -609,7 +609,7 @@ async def create_chat_completion(
             detail="Gemini output parsing failed unexpectedly.",
         ) from exc
 
-    visible_output, tool_calls = _extract_tool_calls(raw_output_with_think)
+    visible_output, tool_calls = _extract_tool_calls(raw_output_text)
     storage_output = _remove_tool_call_blocks(raw_output_clean).strip()
     tool_calls_payload = [call.model_dump(mode="json") for call in tool_calls]
 
@@ -645,6 +645,7 @@ async def create_chat_completion(
             role="assistant",
             content=storage_output or None,
             tool_calls=tool_calls or None,
+            reasoning_content=reasoning_content,
         )
         cleaned_history = db.sanitize_assistant_messages(request.messages)
         conv = ConversationInStore(
@@ -665,6 +666,7 @@ async def create_chat_completion(
     if request.stream:
         return _create_streaming_response(
             visible_output,
+            reasoning_content,
             tool_calls_payload,
             completion_id,
             timestamp,
@@ -674,6 +676,7 @@ async def create_chat_completion(
     else:
         return _create_standard_response(
             visible_output,
+            reasoning_content,
             tool_calls_payload,
             completion_id,
             timestamp,
@@ -801,8 +804,8 @@ async def create_response(
         ) from e
 
     try:
-        text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
-        text_without_think = GeminiClientWrapper.extract_output(
+        text_with_think, reasoning_content = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)
+        text_without_think, _ = GeminiClientWrapper.extract_output(
             model_output, include_thoughts=False
         )
     except IndexError as exc:
@@ -820,7 +823,7 @@ async def create_response(
 
     visible_text, detected_tool_calls = _extract_tool_calls(text_with_think)
     storage_output = _remove_tool_call_blocks(text_without_think).strip()
-    assistant_text = LMDBConversationStore.remove_think_tags(visible_text.strip())
+    assistant_text = visible_text.strip()
 
     if structured_requirement:
         cleaned_visible = _strip_code_fence(assistant_text or "")
@@ -963,6 +966,7 @@ async def create_response(
             role="assistant",
             content=storage_output or None,
             tool_calls=detected_tool_calls or None,
+            reasoning_content=reasoning_content if reasoning_content else None,
         )
         cleaned_history = db.sanitize_assistant_messages(messages)
         conv = ConversationInStore(
@@ -1136,6 +1140,7 @@ def _iter_stream_segments(model_output: str, chunk_size: int = 64):
 
 def _create_streaming_response(
     model_output: str,
+    reasoning_content: str | None,
     tool_calls: list[dict],
     completion_id: str,
     created_time: int,
@@ -1291,6 +1296,7 @@ def _create_responses_streaming_response(
 
 def _create_standard_response(
     model_output: str,
+    reasoning_content: str | None,
     tool_calls: list[dict],
     completion_id: str,
     created_time: int,
@@ -1306,6 +1312,8 @@ def _create_standard_response(
     finish_reason = "tool_calls" if tool_calls else "stop"
 
     message_payload: dict = {"role": "assistant", "content": model_output or None}
+    if reasoning_content:
+        message_payload["reasoning_content"] = reasoning_content
     if tool_calls:
         message_payload["tool_calls"] = tool_calls
 
