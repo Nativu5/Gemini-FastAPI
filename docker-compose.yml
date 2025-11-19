@@ -1,0 +1,18 @@
+services:
+  gemini-fastapi:
+    build: .
+    container_name: gemini-fastapi
+    ports:
+      - "4546:4546"
+    volumes:
+      # [核心] 挂载配置文件目录到容器内的 /app/config
+      - ./config:/app/config
+      
+      # 持久化对话数据
+      - ./data:/app/data
+      
+      # 缓存 Cookie 刷新信息
+      - ./cache:/app/.venv/lib/python3.12/site-packages/gemini_webapi/utils/temp
+    
+    # 注意：因为配置都写在 config.yaml 里了，这里就不需要再写 CONFIG_GEMINI... 等环境变量了
+    restart: on-failure:3
