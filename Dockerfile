@@ -4,8 +4,6 @@ LABEL org.opencontainers.image.description="Web-based Gemini models wrapped into
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-
 # Install dependencies
 COPY pyproject.toml uv.lock ./
 RUN uv sync --no-cache --no-dev
