@@ -1167,6 +1167,18 @@ def _create_streaming_response(
         }
         yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
+        # Stream reasoning_content first if present
+        if reasoning_content:
+            for chunk in _iter_stream_segments(reasoning_content):
+                data = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"reasoning_content": chunk}, "finish_reason": None}],
+                }
+                yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+
         # Stream output text in chunks for efficiency
         for chunk in _iter_stream_segments(model_output):
             data = {
