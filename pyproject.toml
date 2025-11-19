@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
     "fastapi>=0.115.12",
-    "gemini-webapi>=1.16.0",
+    "gemini-webapi @ git+https://github.com/faithleysath/Gemini-API.git@add-gemini-3.0-pro-model",
     "lmdb>=1.6.2",
     "loguru>=0.7.0",
     "pydantic-settings[yaml]>=2.9.1",
