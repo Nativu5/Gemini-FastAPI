@@ -16,7 +16,7 @@ Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by [Hanao
 - **🔍 Google Search Included**: Get up-to-date answers using web-based Gemini's search capabilities.
 - **💾 Conversation Persistence**: LMDB-based storage supporting multi-turn conversations.
 - **🖼️ Multi-modal Support**: Support for handling text, images, and file uploads.
-- **🔧 Flexible Configuration**: YAML-based configuration with environment variable overrides.
+- **⚖️ Multi-account Load Balancing**: Distribute requests across multiple accounts with per-account proxy settings.
 
 ## Quick Start
 
@@ -59,11 +59,6 @@ gemini:
       proxy: null # Optional proxy URL (null/empty keeps direct connection)
 ```
 
-> Proxy tips:
->
-> - Omit the `proxy` key or set it to `null`/empty string to keep the legacy direct connection.
-> - Each client entry can point to a different proxy if needed.
-
 > [!NOTE]
 > For details, refer to the [Configuration](#configuration-1) section below.
 
@@ -91,7 +86,6 @@ docker run -p 8000:8000 \
   -e CONFIG_GEMINI__CLIENTS__0__ID="client-a" \
   -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid" \
   -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts" \
-  -e CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080" \
   -e GEMINI_COOKIE_PATH="/app/cache" \
   ghcr.io/nativu5/gemini-fastapi
 ```
@@ -112,7 +106,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # - ./config:/app/config  # Uncomment to use a custom config file
+      # - ./config:/app/config      # Uncomment to use a custom config file
       # - ./certs:/app/certs        # Uncomment to enable HTTPS with your certs
       - ./data:/app/data
       - ./cache:/app/cache
@@ -123,9 +117,8 @@ services:
       - CONFIG_GEMINI__CLIENTS__0__ID=client-a
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID=${SECURE_1PSID}
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS=${SECURE_1PSIDTS}
-      - CONFIG_GEMINI__CLIENTS__0__PROXY=socks5://127.0.0.1:1080 # optional per-client proxy
       - GEMINI_COOKIE_PATH=/app/cache # must match the cache volume mount above
-    restart: on-failure:3 # Avoid retrying too many times
+    restart: on-failure:3             # Avoid retrying too many times
 ```
 
 Then run:
@@ -155,11 +148,12 @@ You can override any configuration option using environment variables with the `
 # Override server settings
 export CONFIG_SERVER__API_KEY="your-secure-api-key"
 
-# Override Gemini credentials (first client)
+# Override Gemini credentials for client 0
 export CONFIG_GEMINI__CLIENTS__0__ID="client-a"
 export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid"
 export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts"
-# Optional per-client proxy override
+
+# Override optional proxy settings for client 0
 export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
 
 # Override conversation storage size limit
@@ -188,6 +182,10 @@ To use Gemini-FastAPI, you need to extract your Gemini session cookies:
 
 > [!TIP]
 > For detailed instructions, refer to the [HanaokaYuzu/Gemini-API authentication guide](https://github.com/HanaokaYuzu/Gemini-API?tab=readme-ov-file#authentication).
+
+### Proxy Settings
+
+Each client entry can be configured with a different proxy to work around rate limits. Omit the `proxy` field or set it to `null` or an empty string to keep a direct connection.
 
 ## Acknowledgments
 
