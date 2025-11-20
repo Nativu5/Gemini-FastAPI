@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = "==3.12.*"
 
 [[package]]
@@ -96,7 +96,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.12" },
-    { name = "gemini-webapi", specifier = ">=1.16.0" },
+    { name = "gemini-webapi", specifier = ">=1.17.0" },
     { name = "lmdb", specifier = ">=1.6.2" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "pydantic-settings", extras = ["yaml"], specifier = ">=2.9.1" },
@@ -111,7 +111,7 @@ dev = [{ name = "ruff", specifier = ">=0.11.13" }]
 
 [[package]]
 name = "gemini-webapi"
-version = "1.16.0"
+version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx", extra = ["http2"] },
@@ -119,9 +119,9 @@ dependencies = [
     { name = "orjson" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3a/68/5de9a33efc22a3157bb0952f38a5f64b2764cea517b680def70f51c087d4/gemini_webapi-1.16.0.tar.gz", hash = "sha256:82ca88af7de4885131a8641c4ece03e9f06dd6feb05cd034c13f7b9d26f02d27", size = 257569, upload-time = "2025-10-15T22:20:41.664Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2d/1e/2a9be8d8488a54c0e23cf6f54a7793dcab2c003575953050e967333e1f25/gemini_webapi-1.17.0.tar.gz", hash = "sha256:895d1897f1d2f15655803e332dbe7d8e00487f6c98257ff70727b2bf24e4ff67", size = 258666, upload-time = "2025-11-20T04:46:47.185Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d3/46/f6c16de1bdf86d396829e7ca0313145e79d0d8e4056c44cb7ae8ef204510/gemini_webapi-1.16.0-py3-none-any.whl", hash = "sha256:a03e6bfc61a6837aedd9249eb82b7e8b54b82cdc8c7621249a41ed61609f4aa1", size = 54734, upload-time = "2025-10-15T22:20:40.232Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/db/89cdcd781970130fff1cf00e0796bd8ee27a5e8dfc6828dfff9874ea3c35/gemini_webapi-1.17.0-py3-none-any.whl", hash = "sha256:b2c0dc28b40a90133128ca55eb685b8a234b7f9ff7d5dd9541655573be7cf792", size = 56111, upload-time = "2025-11-20T04:46:45.993Z" },
 ]
 
 [[package]]
