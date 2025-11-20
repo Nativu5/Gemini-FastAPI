@@ -17,7 +17,7 @@
 - 🔍 **内置 Google 搜索**：API 已内置 Gemini 网页端的搜索能力，模型响应更加准确。
 - 💾 **会话持久化**：基于 LMDB 存储，支持多轮对话历史记录。
 - 🖼️ **多模态支持**：可处理文本、图片及文件上传。
-- 🔧 **灵活配置**：基于 YAML 配置文件，支持通过环境变量动态覆盖配置项。
+- ⚖️ **多账户负载均衡**：支持多账户分发请求，可为每个账户单独配置代理。
 
 ## 快速开始
 
@@ -56,6 +56,7 @@ gemini:
     - id: "client-a"
       secure_1psid: "YOUR_SECURE_1PSID_HERE"
       secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
+      proxy: null # Optional proxy URL (null/empty keeps direct connection)
 ```
 
 > [!NOTE]
@@ -80,13 +81,19 @@ python run.py
 ```bash
 docker run -p 8000:8000 \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/cache:/app/.venv/lib/python3.12/site-packages/gemini_webapi/utils/temp \
+  -v $(pwd)/cache:/app/cache \
   -e CONFIG_SERVER__API_KEY="your-api-key-here" \
   -e CONFIG_GEMINI__CLIENTS__0__ID="client-a" \
   -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid" \
   -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts" \
+  -e GEMINI_COOKIE_PATH="/app/cache" \
   ghcr.io/nativu5/gemini-fastapi
 ```
+
+> [!TIP]
+> 需要代理时可添加 `CONFIG_GEMINI__CLIENTS__0__PROXY`；省略该变量将保持直连。
+>
+> `GEMINI_COOKIE_PATH` 指定容器内保存刷新后 Cookie 的目录。将其挂载（例如 `-v $(pwd)/cache:/app/cache`）可以在容器重建或重启后保留这些 Cookie，避免频繁重新认证。
 
 ### 使用 Docker Compose
 
@@ -100,8 +107,9 @@ services:
       - "8000:8000"
     volumes:
       # - ./config:/app/config  # Uncomment to use a custom config file
+      # - ./certs:/app/certs    # Uncomment to enable HTTPS with your certs
       - ./data:/app/data
-      - ./cache:/app/.venv/lib/python3.12/site-packages/gemini_webapi/utils/temp
+      - ./cache:/app/cache
     environment:
       - CONFIG_SERVER__HOST=0.0.0.0
       - CONFIG_SERVER__PORT=8000
@@ -109,7 +117,8 @@ services:
       - CONFIG_GEMINI__CLIENTS__0__ID=client-a
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID=${SECURE_1PSID}
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS=${SECURE_1PSIDTS}
-    restart: on-failure:3 # 避免过多重试
+      - GEMINI_COOKIE_PATH=/app/cache # must match the cache volume mount above
+    restart: on-failure:3             # Avoid retrying too many times
 ```
 
 然后运行：
@@ -120,7 +129,7 @@ docker compose up -d
 
 > [!IMPORTANT]
 > 请务必挂载 `/app/data` 卷以保证对话数据在容器重启后持久化。
-> 建议同时挂载 `gemini_webapi/utils/temp` 目录以保存刷新后的 Cookie。
+> 同时挂载 `/app/cache`（或与 `GEMINI_COOKIE_PATH` 对应的目录）以保存刷新后的 Cookie，这样在容器重建/重启后无需频繁重新认证。
 
 ## 配置说明
 
@@ -139,10 +148,13 @@ docker compose up -d
 # 覆盖服务器设置
 export CONFIG_SERVER__API_KEY="your-secure-api-key"
 
-# 覆盖 Gemini Cookie
+# 覆盖 Client 0 的用户凭据
 export CONFIG_GEMINI__CLIENTS__0__ID="client-a"
 export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid"
 export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts"
+
+# 覆盖 Client 0 的代理设置
+export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
 
 # 覆盖对话存储大小限制
 export CONFIG_STORAGE__MAX_SIZE=268435456  # 256 MB
@@ -169,6 +181,10 @@ export CONFIG_STORAGE__MAX_SIZE=268435456  # 256 MB
 
 > [!TIP]
 > 详细操作请参考 [HanaokaYuzu/Gemini-API 认证指南](https://github.com/HanaokaYuzu/Gemini-API?tab=readme-ov-file#authentication)。
+
+### 代理设置
+
+每个客户端条目可以配置不同的代理，从而规避速率限制。省略 `proxy` 字段或将其设置为 `null` 或空字符串以保持直连。
 
 ## 鸣谢
 

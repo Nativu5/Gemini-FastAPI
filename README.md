@@ -6,7 +6,7 @@
 
 [ English | [中文](README.zh.md) ]
 
-Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by  [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API).
+Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API).
 
 **✅ Call Gemini's web-based models via API without an API Key, completely free!**
 
@@ -16,7 +16,7 @@ Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by  [Hana
 - **🔍 Google Search Included**: Get up-to-date answers using web-based Gemini's search capabilities.
 - **💾 Conversation Persistence**: LMDB-based storage supporting multi-turn conversations.
 - **🖼️ Multi-modal Support**: Support for handling text, images, and file uploads.
-- **🔧 Flexible Configuration**: YAML-based configuration with environment variable overrides.
+- **⚖️ Multi-account Load Balancing**: Distribute requests across multiple accounts with per-account proxy settings.
 
 ## Quick Start
 
@@ -49,12 +49,14 @@ pip install -e .
 ### Configuration
 
 Edit `config/config.yaml` and provide at least one credential pair:
+
 ```yaml
 gemini:
   clients:
     - id: "client-a"
       secure_1psid: "YOUR_SECURE_1PSID_HERE"
       secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
+      proxy: null # Optional proxy URL (null/empty keeps direct connection)
 ```
 
 > [!NOTE]
@@ -79,13 +81,19 @@ The server will start on `http://localhost:8000` by default.
 ```bash
 docker run -p 8000:8000 \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/cache:/app/.venv/lib/python3.12/site-packages/gemini_webapi/utils/temp \
+  -v $(pwd)/cache:/app/cache \
   -e CONFIG_SERVER__API_KEY="your-api-key-here" \
   -e CONFIG_GEMINI__CLIENTS__0__ID="client-a" \
   -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid" \
   -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts" \
+  -e GEMINI_COOKIE_PATH="/app/cache" \
   ghcr.io/nativu5/gemini-fastapi
 ```
+
+> [!TIP]
+> Add `CONFIG_GEMINI__CLIENTS__N__PROXY` only if you need a proxy; omit the variable to keep direct connections.
+>
+> `GEMINI_COOKIE_PATH` points to the directory inside the container where refreshed cookies are stored. Bind-mounting it (e.g. `-v $(pwd)/cache:/app/cache`) preserves those cookies across container rebuilds/recreations so you rarely need to re-authenticate.
 
 ### Run with Docker Compose
 
@@ -98,10 +106,10 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # - ./config:/app/config  # Uncomment to use a custom config file
+      # - ./config:/app/config      # Uncomment to use a custom config file
       # - ./certs:/app/certs        # Uncomment to enable HTTPS with your certs
       - ./data:/app/data
-      - ./cache:/app/.venv/lib/python3.12/site-packages/gemini_webapi/utils/temp
+      - ./cache:/app/cache
     environment:
       - CONFIG_SERVER__HOST=0.0.0.0
       - CONFIG_SERVER__PORT=8000
@@ -109,7 +117,8 @@ services:
       - CONFIG_GEMINI__CLIENTS__0__ID=client-a
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID=${SECURE_1PSID}
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS=${SECURE_1PSIDTS}
-    restart: on-failure:3 # Avoid retrying too many times
+      - GEMINI_COOKIE_PATH=/app/cache # must match the cache volume mount above
+    restart: on-failure:3             # Avoid retrying too many times
 ```
 
 Then run:
@@ -120,18 +129,18 @@ docker compose up -d
 
 > [!IMPORTANT]
 > Make sure to mount the `/app/data` volume to persist conversation data between container restarts.
-> It's also recommended to mount the `gemini_webapi/utils/temp` directory to save refreshed cookies.
+> Also mount `/app/cache` so refreshed cookies (including rotated 1PSIDTS values) survive container rebuilds/recreates without re-auth.
 
 ## Configuration
 
-The server reads a YAML configuration file located at `config/config.yaml`. 
+The server reads a YAML configuration file located at `config/config.yaml`.
 
 For details on each configuration option, refer to the comments in the [`config/config.yaml`](https://github.com/Nativu5/Gemini-FastAPI/blob/main/config/config.yaml) file.
 
 ### Environment Variable Overrides
 
 > [!TIP]
-> This feature is particularly useful for Docker deployments and production environments where you want to keep sensitive credentials separate from configuration files. 
+> This feature is particularly useful for Docker deployments and production environments where you want to keep sensitive credentials separate from configuration files.
 
 You can override any configuration option using environment variables with the `CONFIG_` prefix. Use double underscores (`__`) to represent nested keys, for example:
 
@@ -139,10 +148,13 @@ You can override any configuration option using environment variables with the `
 # Override server settings
 export CONFIG_SERVER__API_KEY="your-secure-api-key"
 
-# Override Gemini credentials (first client)
+# Override Gemini credentials for client 0
 export CONFIG_GEMINI__CLIENTS__0__ID="client-a"
 export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid"
 export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts"
+
+# Override optional proxy settings for client 0
+export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
 
 # Override conversation storage size limit
 export CONFIG_STORAGE__MAX_SIZE=268435456  # 256 MB
@@ -170,6 +182,10 @@ To use Gemini-FastAPI, you need to extract your Gemini session cookies:
 
 > [!TIP]
 > For detailed instructions, refer to the [HanaokaYuzu/Gemini-API authentication guide](https://github.com/HanaokaYuzu/Gemini-API?tab=readme-ov-file#authentication).
+
+### Proxy Settings
+
+Each client entry can be configured with a different proxy to work around rate limits. Omit the `proxy` field or set it to `null` or an empty string to keep a direct connection.
 
 ## Acknowledgments
 

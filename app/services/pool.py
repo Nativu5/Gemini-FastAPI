@@ -1,5 +1,8 @@
+import asyncio
 from collections import deque
 from typing import Dict, List, Optional
+
+from loguru import logger
 
 from ..utils import g_config
 from ..utils.singleton import Singleton
@@ -13,6 +16,7 @@ class GeminiClientPool(metaclass=Singleton):
         self._clients: List[GeminiClientWrapper] = []
         self._id_map: Dict[str, GeminiClientWrapper] = {}
         self._round_robin: deque[GeminiClientWrapper] = deque()
+        self._restart_locks: Dict[str, asyncio.Lock] = {}
 
         if len(g_config.gemini.clients) == 0:
             raise ValueError("No Gemini clients configured")
@@ -22,10 +26,12 @@ class GeminiClientPool(metaclass=Singleton):
                 client_id=c.id,
                 secure_1psid=c.secure_1psid,
                 secure_1psidts=c.secure_1psidts,
+                proxy=c.proxy,
             )
             self._clients.append(client)
             self._id_map[c.id] = client
             self._round_robin.append(client)
+            self._restart_locks[c.id] = asyncio.Lock()  # Pre-initialize
 
     async def init(self) -> None:
         """Initialize all clients in the pool."""
@@ -38,17 +44,54 @@ class GeminiClientPool(metaclass=Singleton):
                     refresh_interval=g_config.gemini.refresh_interval,
                 )
 
-    def acquire(self, client_id: Optional[str] = None) -> GeminiClientWrapper:
-        """Return a client by id or using round-robin."""
+    async def acquire(self, client_id: Optional[str] = None) -> GeminiClientWrapper:
+        """Return a healthy client by id or using round-robin."""
+        if not self._round_robin:
+            raise RuntimeError("No Gemini clients configured")
+
         if client_id:
             client = self._id_map.get(client_id)
             if not client:
                 raise ValueError(f"Client id {client_id} not found")
-            return client
+            if await self._ensure_client_ready(client):
+                return client
+            raise RuntimeError(
+                f"Gemini client {client_id} is not running and could not be restarted"
+            )
 
-        client = self._round_robin[0]
-        self._round_robin.rotate(-1)
-        return client
+        for _ in range(len(self._round_robin)):
+            client = self._round_robin[0]
+            self._round_robin.rotate(-1)
+            if await self._ensure_client_ready(client):
+                return client
+
+        raise RuntimeError("No Gemini clients are currently available")
+
+    async def _ensure_client_ready(self, client: GeminiClientWrapper) -> bool:
+        """Make sure the client is running, attempting a restart if needed."""
+        if client.running:
+            return True
+
+        lock = self._restart_locks.get(client.id)
+        if lock is None:
+            return False  # Should not happen
+
+        async with lock:
+            if client.running:
+                return True
+
+            try:
+                await client.init(
+                    timeout=g_config.gemini.timeout,
+                    auto_refresh=g_config.gemini.auto_refresh,
+                    verbose=g_config.gemini.verbose,
+                    refresh_interval=g_config.gemini.refresh_interval,
+                )
+                logger.info(f"Restarted Gemini client {client.id} after it stopped.")
+                return True
+            except Exception as exc:
+                logger.warning(f"Failed to restart Gemini client {client.id}: {exc}")
+                return False
 
     @property
     def clients(self) -> List[GeminiClientWrapper]:
