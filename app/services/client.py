@@ -8,11 +8,8 @@ from typing import Any, cast
 from gemini_webapi import GeminiClient, ModelOutput
 from gemini_webapi.client import ChatSession
 from gemini_webapi.constants import Model
-from gemini_webapi.exceptions import AuthError, ModelInvalid
+from gemini_webapi.exceptions import ModelInvalid
 from gemini_webapi.types import Gem
-from gemini_webapi.utils import rotate_tasks
-from gemini_webapi.utils.rotate_1psidts import rotate_1psidts
-from loguru import logger
 
 from ..models import Message
 from ..utils import g_config
@@ -75,47 +72,6 @@ class GeminiClientWrapper(GeminiClient):
             refresh_interval=refresh_interval,
             verbose=verbose,
         )
-
-    async def start_auto_refresh(self) -> None:
-        """
-        Refresh the __Secure-1PSIDTS cookie periodically and keep the HTTP client in sync.
-        """
-        while True:
-            new_1psidts: str | None = None
-            try:
-                new_1psidts = await rotate_1psidts(self.cookies, self.proxy)
-            except AuthError:
-                if task := rotate_tasks.get(self.cookies.get("__Secure-1PSID", "")):
-                    task.cancel()
-                logger.warning(
-                    "Failed to refresh Gemini cookies (AuthError). Auto refresh task canceled."
-                )
-                return
-            except Exception as exc:
-                logger.warning(f"Unexpected error while refreshing Gemini cookies: {exc}")
-
-            if new_1psidts:
-                self.cookies["__Secure-1PSIDTS"] = new_1psidts
-                self._sync_httpx_cookie("__Secure-1PSIDTS", new_1psidts)
-                logger.debug("Gemini cookies refreshed. New __Secure-1PSIDTS applied.")
-            await asyncio.sleep(self.refresh_interval)
-
-    def _sync_httpx_cookie(self, name: str, value: str) -> None:
-        """
-        Ensure the underlying httpx client uses the refreshed cookie value.
-        """
-        if not self.client:
-            return
-
-        jar = self.client.cookies.jar
-        matched = False
-        for cookie in jar:
-            if cookie.name == name:
-                cookie.value = value
-                matched = True
-        if not matched:
-            # Fall back to setting the cookie with default scope if we did not find an existing entry.
-            self.client.cookies.set(name, value)
 
     async def generate_content(
         self,
