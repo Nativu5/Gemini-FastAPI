@@ -25,17 +25,17 @@ CODE_BLOCK_HINT = (
 
 HTML_ESCAPE_RE = re.compile(r"&(?:lt|gt|amp|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);")
 
-MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=\s*[-\\`*_{}\[\]()#+.!<>])")
+MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=[-\\`*_{}\[\]()#+.!<>])")
 
-CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`]*`)", re.DOTALL)
+CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`\n]+?`)", re.DOTALL)
 
 FILE_PATH_PATTERN = re.compile(
-    r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|Gemfile|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
+    r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
     re.IGNORECASE,
 )
 
 GOOGLE_SEARCH_LINK_PATTERN = re.compile(
-    r"(?:`\s*)?`?\[`?(.+?)`?`?]\((https://www\.google\.com/search\?q=)(.*?)(?<!\\)\)(?:\s*`?)?"
+    r"`?\[`?(.+?)`?`?]\((https://www\.google\.com/search\?q=)([^)]*)\)`?"
 )
 
 
