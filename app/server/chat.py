@@ -48,9 +48,7 @@ from .middleware import get_temp_dir, verify_api_key
 
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
-
 CONTINUATION_HINT = "\n(More messages to come, please reply with just 'ok.')"
-
 TOOL_BLOCK_RE = re.compile(r"```xml\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 TOOL_CALL_RE = re.compile(
     r"<tool_call\s+name=\"([^\"]+)\">(.*?)</tool_call>", re.DOTALL | re.IGNORECASE

@@ -16,29 +16,21 @@ XML_WRAP_HINT = (
     '```xml\n<tool_call name="tool_name">{"arg": "value"}</tool_call>\n```\n'
     "Do not surround the fence with any other text or whitespace; otherwise the call will be ignored.\n"
 )
-
 CODE_BLOCK_HINT = (
     "\nWhenever you include code, markup, or shell snippets, wrap each snippet in a Markdown fenced "
     "block and supply the correct language label (for example, ```python ... ``` or ```html ... ```).\n"
     "Fence ONLY the actual code/markup; keep all narrative or explanatory text outside the fences.\n"
 )
-
 HTML_ESCAPE_RE = re.compile(r"&(?:lt|gt|amp|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);")
-
 MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=[-\\`*_{}\[\]()#+.!<>])")
-
 CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`\n]+?`)", re.DOTALL)
-
 FILE_PATH_PATTERN = re.compile(
     r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
     re.IGNORECASE,
 )
-
 GOOGLE_SEARCH_LINK_PATTERN = re.compile(
     r"`?\[`?(.+?)`?`?]\((https://www\.google\.com/search\?q=)([^)]*)\)`?"
 )
-
-
 _UNSET = object()
 
 
