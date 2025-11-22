@@ -1,4 +1,3 @@
-import asyncio
 import html
 import json
 import re
@@ -6,10 +5,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from gemini_webapi import GeminiClient, ModelOutput
-from gemini_webapi.client import ChatSession
-from gemini_webapi.constants import Model
-from gemini_webapi.exceptions import ModelInvalid
-from gemini_webapi.types import Gem
+from loguru import logger
 
 from ..models import Message
 from ..utils import g_config
@@ -64,40 +60,18 @@ class GeminiClientWrapper(GeminiClient):
         refresh_interval = cast(float, _resolve(refresh_interval, config.refresh_interval))
         verbose = cast(bool, _resolve(verbose, config.verbose))
 
-        await super().init(
-            timeout=timeout,
-            auto_close=auto_close,
-            close_delay=close_delay,
-            auto_refresh=auto_refresh,
-            refresh_interval=refresh_interval,
-            verbose=verbose,
-        )
-
-    async def generate_content(
-        self,
-        prompt: str,
-        files: list[str | Path] | None = None,
-        model: Model | str = Model.UNSPECIFIED,
-        gem: Gem | str | None = None,
-        chat: ChatSession | None = None,
-        **kwargs,
-    ) -> ModelOutput:
-        cnt = 2  # Try 2 times before giving up
-        last_exception: ModelInvalid | None = None
-        while cnt:
-            cnt -= 1
-            try:
-                return await super().generate_content(prompt, files, model, gem, chat, **kwargs)
-            except ModelInvalid as e:
-                # This is not always caused by model selection. Instead, it can be solved by retrying.
-                # So we catch it and retry as a workaround.
-                await asyncio.sleep(1)
-                last_exception = e
-
-        # If retrying failed, re-raise ModelInvalid
-        if last_exception is not None:
-            raise last_exception
-        raise RuntimeError("generate_content failed without receiving a ModelInvalid error.")
+        try:
+            await super().init(
+                timeout=timeout,
+                auto_close=auto_close,
+                close_delay=close_delay,
+                auto_refresh=auto_refresh,
+                refresh_interval=refresh_interval,
+                verbose=verbose,
+            )
+        except Exception:
+            logger.exception(f"Failed to initialize GeminiClient {self.id}")
+            raise
 
     @staticmethod
     async def process_message(

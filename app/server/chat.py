@@ -1129,7 +1129,11 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
     """
     if len(text) <= MAX_CHARS_PER_REQUEST:
         # No need to split - a single request is fine.
-        return await session.send_message(text, files=files)
+        try:
+            return await session.send_message(text, files=files)
+        except Exception as e:
+            logger.exception(f"Error sending message to Gemini: {e}")
+            raise
     hint_len = len(CONTINUATION_HINT)
     chunk_size = MAX_CHARS_PER_REQUEST - hint_len
 
@@ -1155,7 +1159,11 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
             raise
 
     # The last chunk carries the files (if any) and we return its response.
-    return await session.send_message(chunks[-1], files=files)
+    try:
+        return await session.send_message(chunks[-1], files=files)
+    except Exception as e:
+        logger.exception(f"Error sending final chunk to Gemini: {e}")
+        raise
 
 
 def _iter_stream_segments(model_output: str, chunk_size: int = 64):
