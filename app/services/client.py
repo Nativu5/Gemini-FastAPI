@@ -24,8 +24,19 @@ CODE_BLOCK_HINT = (
 )
 
 HTML_ESCAPE_RE = re.compile(r"&(?:lt|gt|amp|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);")
+
 MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=\s*[-\\`*_{}\[\]()#+.!<>])")
+
 CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`]*`)", re.DOTALL)
+
+FILE_PATH_PATTERN = re.compile(
+    r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|Gemfile|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
+    re.IGNORECASE,
+)
+
+GOOGLE_SEARCH_LINK_PATTERN = re.compile(
+    r"(?:`\s*)?`?\[`?([^`\]]+)`?`?]\((https://www\.google\.com/search\?q=)(.*?)(?<!\\)\)(?:\s*`?)?"
+)
 
 
 _UNSET = object()
@@ -219,28 +230,25 @@ class GeminiClientWrapper(GeminiClient):
         text = _unescape_html(text)
         text = _unescape_markdown(text)
 
-        def simplify_link_target(text_content: str) -> str:
-            match_colon_num = re.match(r"([^:]+:\d+)", text_content)
-            if match_colon_num:
-                return match_colon_num.group(1)
-            return text_content
+        def extract_file_path_from_display_text(text_content: str) -> str | None:
+            match = re.match(FILE_PATH_PATTERN, text_content)
+            if match:
+                return match.group(1)
+            return None
 
         def replacer(match: re.Match) -> str:
-            outer_open_paren = match.group(1)
-            display_text = match.group(2)
+            display_text = str(match.group(1)).strip()
+            google_search_prefix = match.group(2)
+            query_part = match.group(3)
 
-            new_target_url = simplify_link_target(display_text)
-            new_link_segment = f"[`{display_text}`]({new_target_url})"
+            file_path = extract_file_path_from_display_text(display_text)
 
-            if outer_open_paren:
-                return f"{outer_open_paren}{new_link_segment})"
+            if file_path:
+                # If it's a file path, transform it into a self-referencing Markdown link
+                return f"[`{file_path}`]({file_path})"
             else:
-                return new_link_segment
+                # Otherwise, reconstruct the original Google search link with the display_text
+                original_google_search_url = f"{google_search_prefix}{query_part}"
+                return f"[`{display_text}`]({original_google_search_url})"
 
-        # Replace Google search links with simplified Markdown links
-        pattern = r"(\()?\[`([^`]+?)`\]\((https://www.google.com/search\?q=)(.*?)(?<!\\)\)\)*(\))?"
-        text = re.sub(pattern, replacer, text)
-
-        # Fix inline code blocks
-        pattern = r"`(\[[^\]]+\]\([^\)]+\))`"
-        return re.sub(pattern, r"\1", text)
+        return re.sub(GOOGLE_SEARCH_LINK_PATTERN, replacer, text)
