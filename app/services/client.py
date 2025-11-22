@@ -35,7 +35,7 @@ FILE_PATH_PATTERN = re.compile(
 )
 
 GOOGLE_SEARCH_LINK_PATTERN = re.compile(
-    r"(?:`\s*)?`?\[`?([^`\]]+)`?`?]\((https://www\.google\.com/search\?q=)(.*?)(?<!\\)\)(?:\s*`?)?"
+    r"(?:`\s*)?`?\[`?(.+?)`?`?]\((https://www\.google\.com/search\?q=)(.*?)(?<!\\)\)(?:\s*`?)?"
 )
 
 
