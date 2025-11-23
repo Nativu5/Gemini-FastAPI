@@ -23,11 +23,15 @@ jobs:
         id: update
         run: |
           # Update the package using uv, which handles pyproject.toml and uv.lock
-          uv add gemini-webapi
+          uv add --upgrade gemini-webapi
           
           # Extract the new version number for the PR title
-          # Assumes line format: "gemini-webapi>=1.17.1"
+          # Extract the new version number for the PR title using uv pip show
           VERSION=$(grep 'gemini-webapi>=' pyproject.toml | sed -E 's/.*gemini-webapi>=([0-9.]+).*/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not extract gemini-webapi version from pyproject.toml" >&2
+            exit 1
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Create Pull Request
