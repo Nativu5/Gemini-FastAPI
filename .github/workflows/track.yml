@@ -49,9 +49,6 @@ jobs:
           else
             echo "No updates available for gemini-webapi (version $OLD_VERSION unchanged)"
             echo "updated=false" >> $GITHUB_OUTPUT
-            # Reset any changes to other dependencies (only uv.lock and pyproject.toml)
-            git checkout -- uv.lock pyproject.toml
-            exit 0
           fi
 
       - name: Create Pull Request
