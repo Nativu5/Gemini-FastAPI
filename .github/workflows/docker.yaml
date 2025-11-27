@@ -7,7 +7,7 @@ on:
     tags:
       - 'v*'
     paths-ignore:
-      - '**.md'
+      - '**/*.md'
       - '.github/workflows/**'
 
 env:
