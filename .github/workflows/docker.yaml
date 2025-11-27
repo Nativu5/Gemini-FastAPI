@@ -6,6 +6,9 @@ on:
       - main
     tags:
       - 'v*'
+    paths-ignore:
+      - '**.md'
+      - '.github/workflows/**'
 
 env:
   REGISTRY: ghcr.io
