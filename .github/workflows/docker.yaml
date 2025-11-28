@@ -6,6 +6,10 @@ on:
       - main
     tags:
       - 'v*'
+    paths-ignore:
+      - '**/*.md'
+      - '.github/workflows/ruff.yaml'
+      - '.github/workflows/track.yml'
 
 env:
   REGISTRY: ghcr.io
