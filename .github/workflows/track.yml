@@ -22,6 +22,9 @@ jobs:
       - name: Update gemini-webapi
         id: update
         run: |
+          # Install dependencies first to enable uv pip show
+          uv sync
+          
           # Get current version of gemini-webapi before upgrade
           OLD_VERSION=$(uv pip show gemini-webapi 2>/dev/null | grep ^Version: | awk '{print $2}')
           if [ -z "$OLD_VERSION" ]; then
