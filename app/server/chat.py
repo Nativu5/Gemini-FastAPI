@@ -1524,4 +1524,4 @@ async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | Non
 
     data = Path(saved_path).read_bytes()
     width, height = _extract_image_dimensions(data)
-    return base64.b64encode(data).decode("utf-8"), width, height
+    return base64.b64encode(data).decode("ascii"), width, height
