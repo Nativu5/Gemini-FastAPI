@@ -795,7 +795,28 @@ async def create_response(
             f"Structured response requested for /v1/responses (schema={structured_requirement.schema_name})."
         )
 
-    image_instruction = _build_image_generation_instruction(request.tools, request.tool_choice)
+    # Separate standard tools from image generation tools
+    standard_tools: list[Tool] = []
+    image_tools: list[ResponseImageTool] = []
+
+    if request.tools:
+        for t in request.tools:
+            if isinstance(t, Tool):
+                standard_tools.append(t)
+            elif isinstance(t, ResponseImageTool):
+                image_tools.append(t)
+            # Handle dicts if Pydantic didn't convert them fully (fallback)
+            elif isinstance(t, dict):
+                t_type = t.get("type")
+                if t_type == "function":
+                    standard_tools.append(Tool.model_validate(t))
+                elif t_type == "image_generation":
+                    image_tools.append(ResponseImageTool.model_validate(t))
+
+    image_instruction = _build_image_generation_instruction(
+        image_tools,
+        request.tool_choice if isinstance(request.tool_choice, ResponseToolChoice) else None,
+    )
     if image_instruction:
         extra_instructions.append(image_instruction)
         logger.debug("Image generation support enabled for /v1/responses request.")
@@ -808,10 +829,19 @@ async def create_response(
             f"Injected {len(preface_messages)} instruction messages before sending to Gemini."
         )
 
+    # Pass standard tools to the prompt builder
+    # Determine tool_choice for standard tools (ignore image_generation choice here as it is handled via instruction)
+    model_tool_choice = None
+    if isinstance(request.tool_choice, str):
+        model_tool_choice = request.tool_choice
+    elif isinstance(request.tool_choice, ToolChoiceFunction):
+        model_tool_choice = request.tool_choice
+    # If tool_choice is ResponseToolChoice (image_generation), we don't pass it as a function tool choice.
+
     messages = _prepare_messages_for_model(
         conversation_messages,
-        tools=None,
-        tool_choice=None,
+        tools=standard_tools or None,
+        tool_choice=model_tool_choice,
         extra_instructions=extra_instructions or None,
     )
 

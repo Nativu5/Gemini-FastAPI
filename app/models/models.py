@@ -174,7 +174,8 @@ class ResponseInputItem(BaseModel):
 class ResponseToolChoice(BaseModel):
     """Tool choice enforcing a specific tool in Responses API."""
 
-    type: Literal["image_generation"]
+    type: Literal["function", "image_generation"]
+    function: Optional[ToolChoiceFunctionDetail] = None
 
 
 class ResponseImageTool(BaseModel):
@@ -195,8 +196,8 @@ class ResponseCreateRequest(BaseModel):
     top_p: Optional[float] = 1.0
     max_output_tokens: Optional[int] = None
     stream: Optional[bool] = False
-    tool_choice: Optional[ResponseToolChoice] = None
-    tools: Optional[List[ResponseImageTool]] = None
+    tool_choice: Optional[Union[str, ResponseToolChoice]] = None
+    tools: Optional[List[Union[Tool, ResponseImageTool]]] = None
     store: Optional[bool] = None
     user: Optional[str] = None
     response_format: Optional[Dict[str, Any]] = None
