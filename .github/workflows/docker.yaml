@@ -5,11 +5,11 @@ on:
     branches:
       - main
     tags:
-      - 'v*'
+      - "v*"
     paths-ignore:
-      - '**/*.md'
-      - '.github/workflows/ruff.yaml'
-      - '.github/workflows/track.yml'
+      - "**/*.md"
+      - ".github/workflows/ruff.yaml"
+      - ".github/workflows/track.yml"
 
 env:
   REGISTRY: ghcr.io

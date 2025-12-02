@@ -113,8 +113,10 @@ class GeminiClientWrapper(GeminiClient):
                     if file_data := item.file.get("file_data", None):
                         filename = item.file.get("filename", "")
                         files.append(await save_file_to_tempfile(file_data, filename, tempdir))
+                    elif url := item.file.get("url", None):
+                        files.append(await save_url_to_tempfile(url, tempdir))
                     else:
-                        raise ValueError("File must contain 'file_data' key")
+                        raise ValueError("File must contain 'file_data' or 'url' key")
         elif message.content is not None:
             raise ValueError("Unsupported message content type.")
 
