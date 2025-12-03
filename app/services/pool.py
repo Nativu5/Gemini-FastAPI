@@ -37,7 +37,7 @@ class GeminiClientPool(metaclass=Singleton):
         """Initialize all clients in the pool."""
         success_count = 0
         for client in self._clients:
-            if not client.running:
+            if not client._running:
                 try:
                     await client.init(
                         timeout=g_config.gemini.timeout,
@@ -48,7 +48,7 @@ class GeminiClientPool(metaclass=Singleton):
                 except Exception:
                     logger.exception(f"Failed to initialize client {client.id}")
 
-            if client.running:
+            if client._running:
                 success_count += 1
 
         if success_count == 0:
@@ -79,7 +79,7 @@ class GeminiClientPool(metaclass=Singleton):
 
     async def _ensure_client_ready(self, client: GeminiClientWrapper) -> bool:
         """Make sure the client is running, attempting a restart if needed."""
-        if client.running:
+        if client._running:
             return True
 
         lock = self._restart_locks.get(client.id)
@@ -87,7 +87,7 @@ class GeminiClientPool(metaclass=Singleton):
             return False  # Should not happen
 
         async with lock:
-            if client.running:
+            if client._running:
                 return True
 
             try:
@@ -110,4 +110,4 @@ class GeminiClientPool(metaclass=Singleton):
 
     def status(self) -> Dict[str, bool]:
         """Return running status for each client."""
-        return {client.id: client.running for client in self._clients}
+        return {client.id: client._running for client in self._clients}
