@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ContentItem(BaseModel):
@@ -127,7 +127,6 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: List[Choice]
     usage: Usage
-    system_fingerprint: Optional[str] = None
     service_tier: Optional[str] = None
 
 
@@ -172,6 +171,15 @@ class ResponseInputContent(BaseModel):
     file_url: Optional[str] = None
     file_data: Optional[str] = None
     filename: Optional[str] = None
+    annotations: List[Dict[str, Any]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_output_text(cls, data: Any) -> Any:
+        """Allow output_text (from previous turns) to be treated as input_text."""
+        if isinstance(data, dict) and data.get("type") == "output_text":
+            data["type"] = "input_text"
+        return data
 
 
 class ResponseInputItem(BaseModel):
@@ -266,7 +274,7 @@ class ResponseCreateResponse(BaseModel):
 
     id: str
     object: Literal["response"] = "response"
-    created: int
+    created_at: int
     model: str
     output: List[Union[ResponseOutputMessage, ResponseImageGenerationCall, ResponseToolCall]]
     status: Literal[
@@ -274,9 +282,11 @@ class ResponseCreateResponse(BaseModel):
         "completed",
         "failed",
         "incomplete",
+        "cancelled",
         "requires_action",
     ] = "completed"
     usage: ResponseUsage
+    error: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, Any]] = None
     system_fingerprint: Optional[str] = None
     input: Optional[Union[str, List[ResponseInputItem]]] = None

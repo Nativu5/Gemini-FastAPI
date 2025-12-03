@@ -1049,7 +1049,7 @@ async def create_response(
 
     response_payload = ResponseCreateResponse(
         id=response_id,
-        created=created_time,
+        created_at=created_time,
         model=request.model,
         output=[
             ResponseOutputMessage(
@@ -1334,7 +1334,7 @@ def _create_responses_streaming_response(
 
     response_dict = response_payload.model_dump(mode="json")
     response_id = response_payload.id
-    created_time = response_payload.created
+    created_time = response_payload.created_at
     model = response_payload.model
 
     logger.debug(
@@ -1344,14 +1344,14 @@ def _create_responses_streaming_response(
     base_event = {
         "id": response_id,
         "object": "response",
-        "created": created_time,
+        "created_at": created_time,
         "model": model,
     }
 
     created_snapshot: dict[str, Any] = {
         "id": response_id,
         "object": "response",
-        "created": created_time,
+        "created_at": created_time,
         "model": model,
         "status": "in_progress",
     }
