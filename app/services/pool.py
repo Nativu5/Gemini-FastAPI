@@ -35,14 +35,24 @@ class GeminiClientPool(metaclass=Singleton):
 
     async def init(self) -> None:
         """Initialize all clients in the pool."""
+        success_count = 0
         for client in self._clients:
-            if not client.running:
-                await client.init(
-                    timeout=g_config.gemini.timeout,
-                    auto_refresh=g_config.gemini.auto_refresh,
-                    verbose=g_config.gemini.verbose,
-                    refresh_interval=g_config.gemini.refresh_interval,
-                )
+            if not client._running:
+                try:
+                    await client.init(
+                        timeout=g_config.gemini.timeout,
+                        auto_refresh=g_config.gemini.auto_refresh,
+                        verbose=g_config.gemini.verbose,
+                        refresh_interval=g_config.gemini.refresh_interval,
+                    )
+                except Exception:
+                    logger.exception(f"Failed to initialize client {client.id}")
+
+            if client._running:
+                success_count += 1
+
+        if success_count == 0:
+            raise RuntimeError("Failed to initialize any Gemini clients")
 
     async def acquire(self, client_id: Optional[str] = None) -> GeminiClientWrapper:
         """Return a healthy client by id or using round-robin."""
@@ -69,7 +79,7 @@ class GeminiClientPool(metaclass=Singleton):
 
     async def _ensure_client_ready(self, client: GeminiClientWrapper) -> bool:
         """Make sure the client is running, attempting a restart if needed."""
-        if client.running:
+        if client._running:
             return True
 
         lock = self._restart_locks.get(client.id)
@@ -77,7 +87,7 @@ class GeminiClientPool(metaclass=Singleton):
             return False  # Should not happen
 
         async with lock:
-            if client.running:
+            if client._running:
                 return True
 
             try:
@@ -89,8 +99,8 @@ class GeminiClientPool(metaclass=Singleton):
                 )
                 logger.info(f"Restarted Gemini client {client.id} after it stopped.")
                 return True
-            except Exception as exc:
-                logger.warning(f"Failed to restart Gemini client {client.id}: {exc}")
+            except Exception:
+                logger.exception(f"Failed to restart Gemini client {client.id}")
                 return False
 
     @property
@@ -100,4 +110,4 @@ class GeminiClientPool(metaclass=Singleton):
 
     def status(self) -> Dict[str, bool]:
         """Return running status for each client."""
-        return {client.id: client.running for client in self._clients}
+        return {client.id: client._running for client in self._clients}

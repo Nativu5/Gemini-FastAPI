@@ -48,9 +48,7 @@ from .middleware import get_temp_dir, verify_api_key
 
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
-
 CONTINUATION_HINT = "\n(More messages to come, please reply with just 'ok.')"
-
 TOOL_BLOCK_RE = re.compile(r"```xml\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 TOOL_CALL_RE = re.compile(
     r"<tool_call\s+name=\"([^\"]+)\">(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
@@ -383,14 +381,6 @@ def _strip_tagged_blocks(text: str) -> str:
     return "".join(result)
 
 
-def _ensure_data_url(part: ResponseInputContent) -> str | None:
-    image_url = part.image_url
-    if not image_url and part.image_base64:
-        mime_type = part.mime_type or "image/png"
-        image_url = f"data:{mime_type};base64,{part.image_base64}"
-    return image_url
-
-
 def _response_items_to_messages(
     items: str | list[ResponseInputItem],
 ) -> tuple[list[Message], str | list[ResponseInputItem]]:
@@ -424,14 +414,34 @@ def _response_items_to_messages(
                     if text_value:
                         converted.append(ContentItem(type="text", text=text_value))
                 elif part.type == "input_image":
-                    image_url = _ensure_data_url(part)
+                    image_url = part.image_url
                     if image_url:
                         normalized_contents.append(
-                            ResponseInputContent(type="input_image", image_url=image_url)
+                            ResponseInputContent(
+                                type="input_image",
+                                image_url=image_url,
+                                detail=part.detail if part.detail else "auto",
+                            )
                         )
                         converted.append(
-                            ContentItem(type="image_url", image_url={"url": image_url})
+                            ContentItem(
+                                type="image_url",
+                                image_url={
+                                    "url": image_url,
+                                    "detail": part.detail if part.detail else "auto",
+                                },
+                            )
                         )
+                elif part.type == "input_file":
+                    if part.file_url or part.file_data:
+                        normalized_contents.append(part)
+                        file_info = {}
+                        if part.file_data:
+                            file_info["file_data"] = part.file_data
+                            file_info["filename"] = part.filename
+                        if part.file_url:
+                            file_info["url"] = part.file_url
+                        converted.append(ContentItem(type="file", file=file_info))
             messages.append(Message(role=role, content=converted or None))
 
         normalized_input.append(
@@ -474,11 +484,26 @@ def _instructions_to_messages(
                     if text_value:
                         converted.append(ContentItem(type="text", text=text_value))
                 elif part.type == "input_image":
-                    image_url = _ensure_data_url(part)
+                    image_url = part.image_url
                     if image_url:
                         converted.append(
-                            ContentItem(type="image_url", image_url={"url": image_url})
+                            ContentItem(
+                                type="image_url",
+                                image_url={
+                                    "url": image_url,
+                                    "detail": part.detail if part.detail else "auto",
+                                },
+                            )
                         )
+                elif part.type == "input_file":
+                    file_info = {}
+                    if part.file_data:
+                        file_info["file_data"] = part.file_data
+                        file_info["filename"] = part.filename
+                    if part.file_url:
+                        file_info["url"] = part.file_url
+                    if file_info:
+                        converted.append(ContentItem(type="file", file=file_info))
             instruction_messages.append(Message(role=role, content=converted or None))
 
     return instruction_messages
@@ -770,7 +795,28 @@ async def create_response(
             f"Structured response requested for /v1/responses (schema={structured_requirement.schema_name})."
         )
 
-    image_instruction = _build_image_generation_instruction(request.tools, request.tool_choice)
+    # Separate standard tools from image generation tools
+    standard_tools: list[Tool] = []
+    image_tools: list[ResponseImageTool] = []
+
+    if request.tools:
+        for t in request.tools:
+            if isinstance(t, Tool):
+                standard_tools.append(t)
+            elif isinstance(t, ResponseImageTool):
+                image_tools.append(t)
+            # Handle dicts if Pydantic didn't convert them fully (fallback)
+            elif isinstance(t, dict):
+                t_type = t.get("type")
+                if t_type == "function":
+                    standard_tools.append(Tool.model_validate(t))
+                elif t_type == "image_generation":
+                    image_tools.append(ResponseImageTool.model_validate(t))
+
+    image_instruction = _build_image_generation_instruction(
+        image_tools,
+        request.tool_choice if isinstance(request.tool_choice, ResponseToolChoice) else None,
+    )
     if image_instruction:
         extra_instructions.append(image_instruction)
         logger.debug("Image generation support enabled for /v1/responses request.")
@@ -783,10 +829,19 @@ async def create_response(
             f"Injected {len(preface_messages)} instruction messages before sending to Gemini."
         )
 
+    # Pass standard tools to the prompt builder
+    # Determine tool_choice for standard tools (ignore image_generation choice here as it is handled via instruction)
+    model_tool_choice = None
+    if isinstance(request.tool_choice, str):
+        model_tool_choice = request.tool_choice
+    elif isinstance(request.tool_choice, ToolChoiceFunction):
+        model_tool_choice = request.tool_choice
+    # If tool_choice is ResponseToolChoice (image_generation), we don't pass it as a function tool choice.
+
     messages = _prepare_messages_for_model(
         conversation_messages,
-        tools=None,
-        tool_choice=None,
+        tools=standard_tools or None,
+        tool_choice=model_tool_choice,
         extra_instructions=extra_instructions or None,
     )
 
@@ -801,13 +856,13 @@ async def create_response(
     session, client, remaining_messages = await _find_reusable_session(db, pool, model, messages)
 
     async def _build_payload(
-        payload_messages: list[Message], reuse_session: bool
+        _payload_messages: list[Message], _reuse_session: bool
     ) -> tuple[str, list[Path | str]]:
-        if reuse_session and len(payload_messages) == 1:
+        if _reuse_session and len(_payload_messages) == 1:
             return await GeminiClientWrapper.process_message(
-                payload_messages[0], tmp_dir, tagged=False
+                _payload_messages[0], tmp_dir, tagged=False
             )
-        return await GeminiClientWrapper.process_conversation(payload_messages, tmp_dir)
+        return await GeminiClientWrapper.process_conversation(_payload_messages, tmp_dir)
 
     reuse_session = session is not None
     if reuse_session:
@@ -823,7 +878,7 @@ async def create_response(
                 detail="No new messages to send for the existing session.",
             )
         payload_messages = messages_to_send
-        model_input, files = await _build_payload(payload_messages, reuse_session=True)
+        model_input, files = await _build_payload(payload_messages, _reuse_session=True)
         logger.debug(
             f"Reused session {session.metadata} - sending {len(payload_messages)} prepared messages."
         )
@@ -832,7 +887,7 @@ async def create_response(
             client = await pool.acquire()
             session = client.start_chat(model=model)
             payload_messages = messages
-            model_input, files = await _build_payload(payload_messages, reuse_session=False)
+            model_input, files = await _build_payload(payload_messages, _reuse_session=False)
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
         except RuntimeError as e:
@@ -937,7 +992,6 @@ async def create_response(
             detail = f"{detail} Assistant response: {summary}"
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
 
-    image_contents: list[ResponseOutputContent] = []
     image_call_items: list[ResponseImageGenerationCall] = []
     for image in images:
         try:
@@ -945,16 +999,6 @@ async def create_response(
         except Exception as exc:
             logger.warning(f"Failed to download generated image: {exc}")
             continue
-        mime_type = "image/png" if isinstance(image, GeneratedImage) else "image/jpeg"
-        image_contents.append(
-            ResponseOutputContent(
-                type="output_image",
-                image_base64=image_base64,
-                mime_type=mime_type,
-                width=width,
-                height=height,
-            )
-        )
         image_call_items.append(
             ResponseImageGenerationCall(
                 id=f"img_{uuid.uuid4().hex}",
@@ -979,7 +1023,6 @@ async def create_response(
     response_contents: list[ResponseOutputContent] = []
     if assistant_text:
         response_contents.append(ResponseOutputContent(type="output_text", text=assistant_text))
-    response_contents.extend(image_contents)
 
     if not response_contents:
         response_contents.append(ResponseOutputContent(type="output_text", text=""))
@@ -1129,7 +1172,11 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
     """
     if len(text) <= MAX_CHARS_PER_REQUEST:
         # No need to split - a single request is fine.
-        return await session.send_message(text, files=files)
+        try:
+            return await session.send_message(text, files=files)
+        except Exception as e:
+            logger.exception(f"Error sending message to Gemini: {e}")
+            raise
     hint_len = len(CONTINUATION_HINT)
     chunk_size = MAX_CHARS_PER_REQUEST - hint_len
 
@@ -1155,7 +1202,11 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
             raise
 
     # The last chunk carries the files (if any) and we return its response.
-    return await session.send_message(chunks[-1], files=files)
+    try:
+        return await session.send_message(chunks[-1], files=files)
+    except Exception as e:
+        logger.exception(f"Error sending final chunk to Gemini: {e}")
+        raise
 
 
 def _iter_stream_segments(model_output: str, chunk_size: int = 64):
@@ -1473,4 +1524,4 @@ async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | Non
 
     data = Path(saved_path).read_bytes()
     width, height = _extract_image_dimensions(data)
-    return base64.b64encode(data).decode("utf-8"), width, height
+    return base64.b64encode(data).decode("ascii"), width, height

@@ -154,11 +154,13 @@ class ConversationInStore(BaseModel):
 class ResponseInputContent(BaseModel):
     """Content item for Responses API input."""
 
-    type: Literal["input_text", "input_image"]
+    type: Literal["input_text", "input_image", "input_file"]
     text: Optional[str] = None
     image_url: Optional[str] = None
-    image_base64: Optional[str] = None
-    mime_type: Optional[str] = None
+    detail: Optional[Literal["auto", "low", "high"]] = None
+    file_url: Optional[str] = None
+    file_data: Optional[str] = None
+    filename: Optional[str] = None
 
 
 class ResponseInputItem(BaseModel):
@@ -172,7 +174,8 @@ class ResponseInputItem(BaseModel):
 class ResponseToolChoice(BaseModel):
     """Tool choice enforcing a specific tool in Responses API."""
 
-    type: Literal["image_generation"]
+    type: Literal["function", "image_generation"]
+    function: Optional[ToolChoiceFunctionDetail] = None
 
 
 class ResponseImageTool(BaseModel):
@@ -193,8 +196,8 @@ class ResponseCreateRequest(BaseModel):
     top_p: Optional[float] = 1.0
     max_output_tokens: Optional[int] = None
     stream: Optional[bool] = False
-    tool_choice: Optional[ResponseToolChoice] = None
-    tools: Optional[List[ResponseImageTool]] = None
+    tool_choice: Optional[Union[str, ResponseToolChoice]] = None
+    tools: Optional[List[Union[Tool, ResponseImageTool]]] = None
     store: Optional[bool] = None
     user: Optional[str] = None
     response_format: Optional[Dict[str, Any]] = None
@@ -212,12 +215,8 @@ class ResponseUsage(BaseModel):
 class ResponseOutputContent(BaseModel):
     """Content item for Responses API output."""
 
-    type: Literal["output_text", "output_image"]
+    type: Literal["output_text"]
     text: Optional[str] = None
-    image_base64: Optional[str] = None
-    mime_type: Optional[str] = None
-    width: Optional[int] = None
-    height: Optional[int] = None
 
 
 class ResponseOutputMessage(BaseModel):

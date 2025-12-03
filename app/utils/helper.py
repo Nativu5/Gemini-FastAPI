@@ -1,4 +1,5 @@
 import base64
+import mimetypes
 import tempfile
 from pathlib import Path
 
@@ -40,9 +41,16 @@ async def save_url_to_tempfile(url: str, tempdir: Path | None = None):
     suffix: str | None = None
     if url.startswith("data:image/"):
         # Base64 encoded image
+        metadata_part = url.split(",")[0]
+        mime_type = metadata_part.split(":")[1].split(";")[0]
+
         base64_data = url.split(",")[1]
         data = base64.b64decode(base64_data)
-        suffix = ".png"
+
+        # Guess extension from mime type, default to the subtype if not found
+        suffix = mimetypes.guess_extension(mime_type)
+        if not suffix:
+            suffix = f".{mime_type.split('/')[1]}"
     else:
         # http files
         async with httpx.AsyncClient() as client:

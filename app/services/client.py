@@ -1,4 +1,3 @@
-import asyncio
 import html
 import json
 import re
@@ -6,12 +5,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from gemini_webapi import GeminiClient, ModelOutput
-from gemini_webapi.client import ChatSession
-from gemini_webapi.constants import Model
-from gemini_webapi.exceptions import AuthError, ModelInvalid
-from gemini_webapi.types import Gem
-from gemini_webapi.utils import rotate_tasks
-from gemini_webapi.utils.rotate_1psidts import rotate_1psidts
 from loguru import logger
 
 from ..models import Message
@@ -23,18 +16,21 @@ XML_WRAP_HINT = (
     '```xml\n<tool_call name="tool_name">{"arg": "value"}</tool_call>\n```\n'
     "Do not surround the fence with any other text or whitespace; otherwise the call will be ignored.\n"
 )
-
 CODE_BLOCK_HINT = (
     "\nWhenever you include code, markup, or shell snippets, wrap each snippet in a Markdown fenced "
     "block and supply the correct language label (for example, ```python ... ``` or ```html ... ```).\n"
     "Fence ONLY the actual code/markup; keep all narrative or explanatory text outside the fences.\n"
 )
-
 HTML_ESCAPE_RE = re.compile(r"&(?:lt|gt|amp|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);")
-MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=\s*[-\\`*_{}\[\]()#+.!<>])")
-CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`]*`)", re.DOTALL)
-
-
+MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=[-\\`*_{}\[\]()#+.!<>])")
+CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`\n]+?`)", re.DOTALL)
+FILE_PATH_PATTERN = re.compile(
+    r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
+    re.IGNORECASE,
+)
+GOOGLE_SEARCH_LINK_PATTERN = re.compile(
+    r"`?\[`?(.+?)`?`?]\((https://www\.google\.com/search\?q=)([^)]*)\)`?"
+)
 _UNSET = object()
 
 
@@ -67,81 +63,18 @@ class GeminiClientWrapper(GeminiClient):
         refresh_interval = cast(float, _resolve(refresh_interval, config.refresh_interval))
         verbose = cast(bool, _resolve(verbose, config.verbose))
 
-        await super().init(
-            timeout=timeout,
-            auto_close=auto_close,
-            close_delay=close_delay,
-            auto_refresh=auto_refresh,
-            refresh_interval=refresh_interval,
-            verbose=verbose,
-        )
-
-    async def start_auto_refresh(self) -> None:
-        """
-        Refresh the __Secure-1PSIDTS cookie periodically and keep the HTTP client in sync.
-        """
-        while True:
-            new_1psidts: str | None = None
-            try:
-                new_1psidts = await rotate_1psidts(self.cookies, self.proxy)
-            except AuthError:
-                if task := rotate_tasks.get(self.cookies.get("__Secure-1PSID", "")):
-                    task.cancel()
-                logger.warning(
-                    "Failed to refresh Gemini cookies (AuthError). Auto refresh task canceled."
-                )
-                return
-            except Exception as exc:
-                logger.warning(f"Unexpected error while refreshing Gemini cookies: {exc}")
-
-            if new_1psidts:
-                self.cookies["__Secure-1PSIDTS"] = new_1psidts
-                self._sync_httpx_cookie("__Secure-1PSIDTS", new_1psidts)
-                logger.debug("Gemini cookies refreshed. New __Secure-1PSIDTS applied.")
-            await asyncio.sleep(self.refresh_interval)
-
-    def _sync_httpx_cookie(self, name: str, value: str) -> None:
-        """
-        Ensure the underlying httpx client uses the refreshed cookie value.
-        """
-        if not self.client:
-            return
-
-        jar = self.client.cookies.jar
-        matched = False
-        for cookie in jar:
-            if cookie.name == name:
-                cookie.value = value
-                matched = True
-        if not matched:
-            # Fall back to setting the cookie with default scope if we did not find an existing entry.
-            self.client.cookies.set(name, value)
-
-    async def generate_content(
-        self,
-        prompt: str,
-        files: list[str | Path] | None = None,
-        model: Model | str = Model.UNSPECIFIED,
-        gem: Gem | str | None = None,
-        chat: ChatSession | None = None,
-        **kwargs,
-    ) -> ModelOutput:
-        cnt = 2  # Try 2 times before giving up
-        last_exception: ModelInvalid | None = None
-        while cnt:
-            cnt -= 1
-            try:
-                return await super().generate_content(prompt, files, model, gem, chat, **kwargs)
-            except ModelInvalid as e:
-                # This is not always caused by model selection. Instead, it can be solved by retrying.
-                # So we catch it and retry as a workaround.
-                await asyncio.sleep(1)
-                last_exception = e
-
-        # If retrying failed, re-raise ModelInvalid
-        if last_exception is not None:
-            raise last_exception
-        raise RuntimeError("generate_content failed without receiving a ModelInvalid error.")
+        try:
+            await super().init(
+                timeout=timeout,
+                auto_close=auto_close,
+                close_delay=close_delay,
+                auto_refresh=auto_refresh,
+                refresh_interval=refresh_interval,
+                verbose=verbose,
+            )
+        except Exception:
+            logger.exception(f"Failed to initialize GeminiClient {self.id}")
+            raise
 
     @staticmethod
     async def process_message(
@@ -180,8 +113,10 @@ class GeminiClientWrapper(GeminiClient):
                     if file_data := item.file.get("file_data", None):
                         filename = item.file.get("filename", "")
                         files.append(await save_file_to_tempfile(file_data, filename, tempdir))
+                    elif url := item.file.get("url", None):
+                        files.append(await save_url_to_tempfile(url, tempdir))
                     else:
-                        raise ValueError("File must contain 'file_data' key")
+                        raise ValueError("File must contain 'file_data' or 'url' key")
         elif message.content is not None:
             raise ValueError("Unsupported message content type.")
 
@@ -289,28 +224,25 @@ class GeminiClientWrapper(GeminiClient):
         text = _unescape_html(text)
         text = _unescape_markdown(text)
 
-        def simplify_link_target(text_content: str) -> str:
-            match_colon_num = re.match(r"([^:]+:\d+)", text_content)
-            if match_colon_num:
-                return match_colon_num.group(1)
-            return text_content
+        def extract_file_path_from_display_text(text_content: str) -> str | None:
+            match = re.match(FILE_PATH_PATTERN, text_content)
+            if match:
+                return match.group(1)
+            return None
 
         def replacer(match: re.Match) -> str:
-            outer_open_paren = match.group(1)
-            display_text = match.group(2)
+            display_text = str(match.group(1)).strip()
+            google_search_prefix = match.group(2)
+            query_part = match.group(3)
 
-            new_target_url = simplify_link_target(display_text)
-            new_link_segment = f"[`{display_text}`]({new_target_url})"
+            file_path = extract_file_path_from_display_text(display_text)
 
-            if outer_open_paren:
-                return f"{outer_open_paren}{new_link_segment})"
+            if file_path:
+                # If it's a file path, transform it into a self-referencing Markdown link
+                return f"[`{file_path}`]({file_path})"
             else:
-                return new_link_segment
+                # Otherwise, reconstruct the original Google search link with the display_text
+                original_google_search_url = f"{google_search_prefix}{query_part}"
+                return f"[`{display_text}`]({original_google_search_url})"
 
-        # Replace Google search links with simplified Markdown links
-        pattern = r"(\()?\[`([^`]+?)`\]\((https://www.google.com/search\?q=)(.*?)(?<!\\)\)\)*(\))?"
-        text = re.sub(pattern, replacer, text)
-
-        # Fix inline code blocks
-        pattern = r"`(\[[^\]]+\]\([^\)]+\))`"
-        return re.sub(pattern, r"\1", text)
+        return re.sub(GOOGLE_SEARCH_LINK_PATTERN, replacer, text)
