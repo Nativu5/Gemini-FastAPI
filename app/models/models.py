@@ -12,7 +12,9 @@ class ContentItem(BaseModel):
     type: Literal["text", "image_url", "file", "input_audio"]
     text: Optional[str] = None
     image_url: Optional[Dict[str, str]] = None
+    input_audio: Optional[Dict[str, Any]] = None
     file: Optional[Dict[str, str]] = None
+    annotations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class Message(BaseModel):
@@ -22,6 +24,10 @@ class Message(BaseModel):
     content: Union[str, List[ContentItem], None] = None
     name: Optional[str] = None
     tool_calls: Optional[List["ToolCall"]] = None
+    refusal: Optional[str] = None
+    reasoning_content: Optional[str] = None
+    audio: Optional[Dict[str, Any]] = None
+    annotations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class Choice(BaseModel):
@@ -30,6 +36,7 @@ class Choice(BaseModel):
     index: int
     message: Message
     finish_reason: str
+    logprobs: Optional[Dict[str, Any]] = None
 
 
 class FunctionCall(BaseModel):
@@ -81,6 +88,8 @@ class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: Optional[Dict[str, int]] = None
+    completion_tokens_details: Optional[Dict[str, int]] = None
 
 
 class ModelData(BaseModel):
@@ -118,6 +127,8 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: List[Choice]
     usage: Usage
+    system_fingerprint: Optional[str] = None
+    service_tier: Optional[str] = None
 
 
 class ModelListResponse(BaseModel):
@@ -217,6 +228,7 @@ class ResponseOutputContent(BaseModel):
 
     type: Literal["output_text"]
     text: Optional[str] = None
+    annotations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ResponseOutputMessage(BaseModel):
@@ -257,7 +269,6 @@ class ResponseCreateResponse(BaseModel):
     created: int
     model: str
     output: List[Union[ResponseOutputMessage, ResponseImageGenerationCall, ResponseToolCall]]
-    output_text: Optional[str] = None
     status: Literal[
         "in_progress",
         "completed",

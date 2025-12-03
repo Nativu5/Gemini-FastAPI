@@ -1022,10 +1022,12 @@ async def create_response(
 
     response_contents: list[ResponseOutputContent] = []
     if assistant_text:
-        response_contents.append(ResponseOutputContent(type="output_text", text=assistant_text))
+        response_contents.append(
+            ResponseOutputContent(type="output_text", text=assistant_text, annotations=[])
+        )
 
     if not response_contents:
-        response_contents.append(ResponseOutputContent(type="output_text", text=""))
+        response_contents.append(ResponseOutputContent(type="output_text", text="", annotations=[]))
 
     created_time = int(datetime.now(tz=timezone.utc).timestamp())
     response_id = f"resp_{uuid.uuid4().hex}"
@@ -1059,7 +1061,6 @@ async def create_response(
             *tool_call_items,
             *image_call_items,
         ],
-        output_text=assistant_text or None,
         status="completed",
         usage=usage,
         input=normalized_input or None,
