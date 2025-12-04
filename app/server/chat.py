@@ -44,7 +44,7 @@ from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationSt
 from ..services.client import CODE_BLOCK_HINT, XML_WRAP_HINT
 from ..utils import g_config
 from ..utils.helper import estimate_tokens
-from .middleware import get_image_store_dir, get_temp_dir, verify_api_key
+from .middleware import get_image_store_dir, get_image_token, get_temp_dir, verify_api_key
 
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
@@ -1006,7 +1006,7 @@ async def create_response(
         img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
 
         # Use static URL for compatibility
-        image_url = f"{request.base_url}images/{filename}"
+        image_url = f"{request.base_url}images/{filename}?token={get_image_token(filename)}"
 
         image_call_items.append(
             ResponseImageGenerationCall(
