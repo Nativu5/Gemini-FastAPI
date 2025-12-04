@@ -996,7 +996,7 @@ async def create_response(
     image_call_items: list[ResponseImageGenerationCall] = []
     for image in images:
         try:
-            image_base64, width, height, filename = await _image_to_base64(image, tmp_dir)
+            image_base64, width, height, filename = await _image_to_base64(image, image_store)
         except Exception as exc:
             logger.warning(f"Failed to download generated image: {exc}")
             continue
