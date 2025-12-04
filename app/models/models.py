@@ -127,7 +127,6 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: List[Choice]
     usage: Usage
-    service_tier: Optional[str] = None
 
 
 class ModelListResponse(BaseModel):
@@ -234,8 +233,9 @@ class ResponseUsage(BaseModel):
 class ResponseOutputContent(BaseModel):
     """Content item for Responses API output."""
 
-    type: Literal["output_text"]
+    type: Literal["output_text", "output_image"]
     text: Optional[str] = None
+    image_url: Optional[str] = None
     annotations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -285,10 +285,11 @@ class ResponseCreateResponse(BaseModel):
         "cancelled",
         "requires_action",
     ] = "completed"
+    tool_choice: Optional[Union[str, ResponseToolChoice]] = None
+    tools: Optional[List[Union[Tool, ResponseImageTool]]] = None
     usage: ResponseUsage
     error: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, Any]] = None
-    system_fingerprint: Optional[str] = None
     input: Optional[Union[str, List[ResponseInputItem]]] = None
 
 

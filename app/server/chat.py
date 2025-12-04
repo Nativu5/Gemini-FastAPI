@@ -992,6 +992,7 @@ async def create_response(
             detail = f"{detail} Assistant response: {summary}"
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
 
+    response_contents: list[ResponseOutputContent] = []
     image_call_items: list[ResponseImageGenerationCall] = []
     for image in images:
         try:
@@ -999,13 +1000,23 @@ async def create_response(
         except Exception as exc:
             logger.warning(f"Failed to download generated image: {exc}")
             continue
+
+        img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
         image_call_items.append(
             ResponseImageGenerationCall(
                 id=f"img_{uuid.uuid4().hex}",
                 status="completed",
                 result=image_base64,
-                output_format="png" if isinstance(image, GeneratedImage) else "jpeg",
+                output_format=img_format,
                 size=f"{width}x{height}" if width and height else None,
+            )
+        )
+        # Add as output_image content for compatibility
+        response_contents.append(
+            ResponseOutputContent(
+                type="output_image",
+                image_url=f"data:image/{img_format};base64,{image_base64}",
+                annotations=[],
             )
         )
 
@@ -1020,7 +1031,6 @@ async def create_response(
             for call in detected_tool_calls
         ]
 
-    response_contents: list[ResponseOutputContent] = []
     if assistant_text:
         response_contents.append(
             ResponseOutputContent(type="output_text", text=assistant_text, annotations=[])
@@ -1065,6 +1075,8 @@ async def create_response(
         usage=usage,
         input=normalized_input or None,
         metadata=request.metadata or None,
+        tools=request.tools,
+        tool_choice=request.tool_choice,
     )
 
     try:
@@ -1359,6 +1371,10 @@ def _create_responses_streaming_response(
         created_snapshot["metadata"] = response_dict["metadata"]
     if response_dict.get("input") is not None:
         created_snapshot["input"] = response_dict["input"]
+    if response_dict.get("tools") is not None:
+        created_snapshot["tools"] = response_dict["tools"]
+    if response_dict.get("tool_choice") is not None:
+        created_snapshot["tool_choice"] = response_dict["tool_choice"]
 
     async def generate_stream():
         # Emit creation event
@@ -1369,30 +1385,53 @@ def _create_responses_streaming_response(
         }
         yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
-        # Stream textual content, if any
-        if assistant_text:
-            for chunk in _iter_stream_segments(assistant_text):
-                delta_event = {
-                    **base_event,
-                    "type": "response.output_text.delta",
-                    "output_index": 0,
-                    "delta": chunk,
-                }
-                yield f"data: {orjson.dumps(delta_event).decode('utf-8')}\n\n"
+        # Stream output items (Message/Text, Tool Calls, Images)
+        for i, item in enumerate(response_payload.output):
+            item_json = item.model_dump(mode="json", exclude_none=True)
 
-            done_event = {
+            added_event = {
                 **base_event,
-                "type": "response.output_text.done",
-                "output_index": 0,
+                "type": "response.output_item.added",
+                "output_index": i,
+                "item": item_json,
             }
-            yield f"data: {orjson.dumps(done_event).decode('utf-8')}\n\n"
-        else:
-            done_event = {
+            yield f"data: {orjson.dumps(added_event).decode('utf-8')}\n\n"
+
+            # 2. Stream content if it's a message (text)
+            if item.type == "message":
+                content_text = ""
+                # Aggregate text content to stream
+                for c in item.content:
+                    if c.type == "output_text" and c.text:
+                        content_text += c.text
+
+                if content_text:
+                    for chunk in _iter_stream_segments(content_text):
+                        delta_event = {
+                            **base_event,
+                            "type": "response.output_text.delta",
+                            "output_index": i,
+                            "delta": chunk,
+                        }
+                        yield f"data: {orjson.dumps(delta_event).decode('utf-8')}\n\n"
+
+                    # Text done
+                    done_event = {
+                        **base_event,
+                        "type": "response.output_text.done",
+                        "output_index": i,
+                    }
+                    yield f"data: {orjson.dumps(done_event).decode('utf-8')}\n\n"
+
+            # 3. Emit output_item.done for all types
+            # This confirms the item is fully transferred.
+            item_done_event = {
                 **base_event,
-                "type": "response.output_text.done",
-                "output_index": 0,
+                "type": "response.output_item.done",
+                "output_index": i,
+                "item": item_json,
             }
-            yield f"data: {orjson.dumps(done_event).decode('utf-8')}\n\n"
+            yield f"data: {orjson.dumps(item_done_event).decode('utf-8')}\n\n"
 
         # Emit completed event with full payload
         completed_event = {
