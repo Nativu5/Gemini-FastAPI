@@ -233,9 +233,8 @@ class ResponseUsage(BaseModel):
 class ResponseOutputContent(BaseModel):
     """Content item for Responses API output."""
 
-    type: Literal["output_text", "output_image"]
+    type: Literal["output_text"]
     text: Optional[str] = ""
-    image_url: Optional[str] = None
     annotations: List[Dict[str, Any]] = Field(default_factory=list)
 
 

@@ -1015,12 +1015,9 @@ async def create_response(
                 size=f"{width}x{height}" if width and height else None,
             )
         )
-        # Add as output_image content for compatibility
+        # Add as output_text content for compatibility
         response_contents.append(
             ResponseOutputContent(type="output_text", text=image_url, annotations=[])
-        )
-        response_contents.append(
-            ResponseOutputContent(type="output_image", text="", image_url=image_url, annotations=[])
         )
 
     tool_call_items: list[ResponseToolCall] = []
