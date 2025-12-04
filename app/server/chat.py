@@ -1015,6 +1015,7 @@ async def create_response(
         response_contents.append(
             ResponseOutputContent(
                 type="output_image",
+                text="",
                 image_url=f"data:image/{img_format};base64,{image_base64}",
                 annotations=[],
             )
