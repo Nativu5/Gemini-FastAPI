@@ -44,7 +44,7 @@ from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationSt
 from ..services.client import CODE_BLOCK_HINT, XML_WRAP_HINT
 from ..utils import g_config
 from ..utils.helper import estimate_tokens
-from .middleware import get_temp_dir, verify_api_key
+from .middleware import get_image_store_dir, get_temp_dir, verify_api_key
 
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
@@ -588,6 +588,7 @@ async def create_chat_completion(
     request: ChatCompletionRequest,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
+    image_store: Path = Depends(get_image_store_dir),
 ):
     pool = GeminiClientPool()
     db = LMDBConversationStore()
@@ -775,6 +776,7 @@ async def create_response(
     request: ResponseCreateRequest,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
+    image_store: Path = Depends(get_image_store_dir),
 ):
     base_messages, normalized_input = _response_items_to_messages(request.input)
     if not base_messages:
@@ -996,12 +998,16 @@ async def create_response(
     image_call_items: list[ResponseImageGenerationCall] = []
     for image in images:
         try:
-            image_base64, width, height = await _image_to_base64(image, tmp_dir)
+            image_base64, width, height, filename = await _image_to_base64(image, tmp_dir)
         except Exception as exc:
             logger.warning(f"Failed to download generated image: {exc}")
             continue
 
         img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
+
+        # Use static URL for compatibility
+        image_url = f"{request.base_url}images/{filename}"
+
         image_call_items.append(
             ResponseImageGenerationCall(
                 id=f"img_{uuid.uuid4().hex}",
@@ -1013,12 +1019,10 @@ async def create_response(
         )
         # Add as output_image content for compatibility
         response_contents.append(
-            ResponseOutputContent(
-                type="output_image",
-                text="",
-                image_url=f"data:image/{img_format};base64,{image_base64}",
-                annotations=[],
-            )
+            ResponseOutputContent(type="output_text", text=image_url, annotations=[])
+        )
+        response_contents.append(
+            ResponseOutputContent(type="output_image", text="", image_url=image_url, annotations=[])
         )
 
     tool_call_items: list[ResponseToolCall] = []
@@ -1553,8 +1557,8 @@ def _extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
     return None, None
 
 
-async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | None, int | None]:
-    """Persist an image provided by gemini_webapi and return base64 plus dimensions."""
+async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | None, int | None, str]:
+    """Persist an image provided by gemini_webapi and return base64 plus dimensions and filename."""
     if isinstance(image, GeneratedImage):
         saved_path = await image.save(path=str(temp_dir), full_size=True)
     else:
@@ -1563,6 +1567,13 @@ async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | Non
     if not saved_path:
         raise ValueError("Failed to save generated image")
 
-    data = Path(saved_path).read_bytes()
+    # Rename file to a random UUID to ensure uniqueness and unpredictability
+    original_path = Path(saved_path)
+    random_name = f"img_{uuid.uuid4().hex}{original_path.suffix}"
+    new_path = temp_dir / random_name
+    original_path.rename(new_path)
+
+    data = new_path.read_bytes()
     width, height = _extract_image_dimensions(data)
-    return base64.b64encode(data).decode("ascii"), width, height
+    filename = random_name
+    return base64.b64encode(data).decode("ascii"), width, height, filename
