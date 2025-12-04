@@ -13,7 +13,7 @@ from loguru import logger
 from ..utils import g_config
 
 # Persistent directory for storing generated images
-IMAGE_STORE_DIR = Path(tempfile.gettempdir()) / "gemini_fastapi_images"
+IMAGE_STORE_DIR = Path(tempfile.gettempdir()) / "ai_generated_images"
 IMAGE_STORE_DIR.mkdir(parents=True, exist_ok=True)
 
 
