@@ -1004,7 +1004,9 @@ async def create_response(
         img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
 
         # Use static URL for compatibility
-        image_url = f"{request.base_url}images/{filename}?token={get_image_token(filename)}"
+        image_url = (
+            f"![{filename}]({request.base_url}images/{filename}?token={get_image_token(filename)})"
+        )
 
         image_call_items.append(
             ResponseImageGenerationCall(
