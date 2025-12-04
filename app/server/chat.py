@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import orjson
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from gemini_webapi.client import ChatSession
 from gemini_webapi.constants import Model
@@ -773,19 +773,15 @@ async def create_chat_completion(
 
 @router.post("/v1/responses")
 async def create_response(
-    request: ResponseCreateRequest,
+    request_data: ResponseCreateRequest,
+    request: Request,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
     image_store: Path = Depends(get_image_store_dir),
 ):
-    base_messages, normalized_input = _response_items_to_messages(request.input)
-    if not base_messages:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="No message input provided."
-        )
-
-    structured_requirement = _build_structured_requirement(request.response_format)
-    if structured_requirement and request.stream:
+    base_messages, normalized_input = _response_items_to_messages(request_data.input)
+    structured_requirement = _build_structured_requirement(request_data.response_format)
+    if structured_requirement and request_data.stream:
         logger.debug(
             "Structured response requested with streaming enabled; streaming not supported for Responses."
         )
@@ -801,7 +797,7 @@ async def create_response(
     standard_tools: list[Tool] = []
     image_tools: list[ResponseImageTool] = []
 
-    if request.tools:
+    if request_data.tools:
         for t in request.tools:
             if isinstance(t, Tool):
                 standard_tools.append(t)
@@ -817,13 +813,15 @@ async def create_response(
 
     image_instruction = _build_image_generation_instruction(
         image_tools,
-        request.tool_choice if isinstance(request.tool_choice, ResponseToolChoice) else None,
+        request_data.tool_choice
+        if isinstance(request_data.tool_choice, ResponseToolChoice)
+        else None,
     )
     if image_instruction:
         extra_instructions.append(image_instruction)
         logger.debug("Image generation support enabled for /v1/responses request.")
 
-    preface_messages = _instructions_to_messages(request.instructions)
+    preface_messages = _instructions_to_messages(request_data.instructions)
     conversation_messages = base_messages
     if preface_messages:
         conversation_messages = [*preface_messages, *base_messages]
@@ -834,10 +832,10 @@ async def create_response(
     # Pass standard tools to the prompt builder
     # Determine tool_choice for standard tools (ignore image_generation choice here as it is handled via instruction)
     model_tool_choice = None
-    if isinstance(request.tool_choice, str):
-        model_tool_choice = request.tool_choice
-    elif isinstance(request.tool_choice, ToolChoiceFunction):
-        model_tool_choice = request.tool_choice
+    if isinstance(request_data.tool_choice, str):
+        model_tool_choice = request_data.tool_choice
+    elif isinstance(request_data.tool_choice, ToolChoiceFunction):
+        model_tool_choice = request_data.tool_choice
     # If tool_choice is ResponseToolChoice (image_generation), we don't pass it as a function tool choice.
 
     messages = _prepare_messages_for_model(
@@ -851,7 +849,7 @@ async def create_response(
     db = LMDBConversationStore()
 
     try:
-        model = Model.from_name(request.model)
+        model = Model.from_name(request_data.model)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -971,7 +969,7 @@ async def create_response(
         )
 
     expects_image = (
-        request.tool_choice is not None and request.tool_choice.type == "image_generation"
+        request_data.tool_choice is not None and request_data.tool_choice.type == "image_generation"
     )
     images = model_output.images or []
     logger.debug(
@@ -1065,7 +1063,7 @@ async def create_response(
     response_payload = ResponseCreateResponse(
         id=response_id,
         created_at=created_time,
-        model=request.model,
+        model=request_data.model,
         output=[
             ResponseOutputMessage(
                 id=message_id,
@@ -1079,9 +1077,9 @@ async def create_response(
         status="completed",
         usage=usage,
         input=normalized_input or None,
-        metadata=request.metadata or None,
-        tools=request.tools,
-        tool_choice=request.tool_choice,
+        metadata=request_data.metadata or None,
+        tools=request_data.tools,
+        tool_choice=request_data.tool_choice,
     )
 
     try:
