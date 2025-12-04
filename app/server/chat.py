@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import orjson
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from gemini_webapi.client import ChatSession
 from gemini_webapi.constants import Model
@@ -44,7 +44,7 @@ from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationSt
 from ..services.client import CODE_BLOCK_HINT, XML_WRAP_HINT
 from ..utils import g_config
 from ..utils.helper import estimate_tokens
-from .middleware import get_temp_dir, verify_api_key
+from .middleware import get_image_store_dir, get_image_token, get_temp_dir, verify_api_key
 
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
@@ -588,6 +588,7 @@ async def create_chat_completion(
     request: ChatCompletionRequest,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
+    image_store: Path = Depends(get_image_store_dir),
 ):
     pool = GeminiClientPool()
     db = LMDBConversationStore()
@@ -772,18 +773,15 @@ async def create_chat_completion(
 
 @router.post("/v1/responses")
 async def create_response(
-    request: ResponseCreateRequest,
+    request_data: ResponseCreateRequest,
+    request: Request,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
+    image_store: Path = Depends(get_image_store_dir),
 ):
-    base_messages, normalized_input = _response_items_to_messages(request.input)
-    if not base_messages:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="No message input provided."
-        )
-
-    structured_requirement = _build_structured_requirement(request.response_format)
-    if structured_requirement and request.stream:
+    base_messages, normalized_input = _response_items_to_messages(request_data.input)
+    structured_requirement = _build_structured_requirement(request_data.response_format)
+    if structured_requirement and request_data.stream:
         logger.debug(
             "Structured response requested with streaming enabled; streaming not supported for Responses."
         )
@@ -799,8 +797,8 @@ async def create_response(
     standard_tools: list[Tool] = []
     image_tools: list[ResponseImageTool] = []
 
-    if request.tools:
-        for t in request.tools:
+    if request_data.tools:
+        for t in request_data.tools:
             if isinstance(t, Tool):
                 standard_tools.append(t)
             elif isinstance(t, ResponseImageTool):
@@ -815,13 +813,15 @@ async def create_response(
 
     image_instruction = _build_image_generation_instruction(
         image_tools,
-        request.tool_choice if isinstance(request.tool_choice, ResponseToolChoice) else None,
+        request_data.tool_choice
+        if isinstance(request_data.tool_choice, ResponseToolChoice)
+        else None,
     )
     if image_instruction:
         extra_instructions.append(image_instruction)
         logger.debug("Image generation support enabled for /v1/responses request.")
 
-    preface_messages = _instructions_to_messages(request.instructions)
+    preface_messages = _instructions_to_messages(request_data.instructions)
     conversation_messages = base_messages
     if preface_messages:
         conversation_messages = [*preface_messages, *base_messages]
@@ -832,10 +832,10 @@ async def create_response(
     # Pass standard tools to the prompt builder
     # Determine tool_choice for standard tools (ignore image_generation choice here as it is handled via instruction)
     model_tool_choice = None
-    if isinstance(request.tool_choice, str):
-        model_tool_choice = request.tool_choice
-    elif isinstance(request.tool_choice, ToolChoiceFunction):
-        model_tool_choice = request.tool_choice
+    if isinstance(request_data.tool_choice, str):
+        model_tool_choice = request_data.tool_choice
+    elif isinstance(request_data.tool_choice, ToolChoiceFunction):
+        model_tool_choice = request_data.tool_choice
     # If tool_choice is ResponseToolChoice (image_generation), we don't pass it as a function tool choice.
 
     messages = _prepare_messages_for_model(
@@ -849,7 +849,7 @@ async def create_response(
     db = LMDBConversationStore()
 
     try:
-        model = Model.from_name(request.model)
+        model = Model.from_name(request_data.model)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -969,7 +969,7 @@ async def create_response(
         )
 
     expects_image = (
-        request.tool_choice is not None and request.tool_choice.type == "image_generation"
+        request_data.tool_choice is not None and request_data.tool_choice.type == "image_generation"
     )
     images = model_output.images or []
     logger.debug(
@@ -984,7 +984,7 @@ async def create_response(
                 summary = f"{summary[:197]}..."
         logger.warning(
             "Image generation requested but Gemini produced no images. "
-            f"client_id={client_id}, forced_tool_choice={request.tool_choice is not None}, "
+            f"client_id={client_id}, forced_tool_choice={request_data.tool_choice is not None}, "
             f"instruction_applied={bool(image_instruction)}, assistant_preview='{summary}'"
         )
         detail = "LLM returned no images for the requested image_generation tool."
@@ -992,21 +992,34 @@ async def create_response(
             detail = f"{detail} Assistant response: {summary}"
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
 
+    response_contents: list[ResponseOutputContent] = []
     image_call_items: list[ResponseImageGenerationCall] = []
     for image in images:
         try:
-            image_base64, width, height = await _image_to_base64(image, tmp_dir)
+            image_base64, width, height, filename = await _image_to_base64(image, image_store)
         except Exception as exc:
             logger.warning(f"Failed to download generated image: {exc}")
             continue
+
+        img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
+
+        # Use static URL for compatibility
+        image_url = (
+            f"![{filename}]({request.base_url}images/{filename}?token={get_image_token(filename)})"
+        )
+
         image_call_items.append(
             ResponseImageGenerationCall(
                 id=f"img_{uuid.uuid4().hex}",
                 status="completed",
                 result=image_base64,
-                output_format="png" if isinstance(image, GeneratedImage) else "jpeg",
+                output_format=img_format,
                 size=f"{width}x{height}" if width and height else None,
             )
+        )
+        # Add as output_text content for compatibility
+        response_contents.append(
+            ResponseOutputContent(type="output_text", text=image_url, annotations=[])
         )
 
     tool_call_items: list[ResponseToolCall] = []
@@ -1020,12 +1033,13 @@ async def create_response(
             for call in detected_tool_calls
         ]
 
-    response_contents: list[ResponseOutputContent] = []
     if assistant_text:
-        response_contents.append(ResponseOutputContent(type="output_text", text=assistant_text))
+        response_contents.append(
+            ResponseOutputContent(type="output_text", text=assistant_text, annotations=[])
+        )
 
     if not response_contents:
-        response_contents.append(ResponseOutputContent(type="output_text", text=""))
+        response_contents.append(ResponseOutputContent(type="output_text", text="", annotations=[]))
 
     created_time = int(datetime.now(tz=timezone.utc).timestamp())
     response_id = f"resp_{uuid.uuid4().hex}"
@@ -1047,8 +1061,8 @@ async def create_response(
 
     response_payload = ResponseCreateResponse(
         id=response_id,
-        created=created_time,
-        model=request.model,
+        created_at=created_time,
+        model=request_data.model,
         output=[
             ResponseOutputMessage(
                 id=message_id,
@@ -1059,11 +1073,12 @@ async def create_response(
             *tool_call_items,
             *image_call_items,
         ],
-        output_text=assistant_text or None,
         status="completed",
         usage=usage,
         input=normalized_input or None,
-        metadata=request.metadata or None,
+        metadata=request_data.metadata or None,
+        tools=request_data.tools,
+        tool_choice=request_data.tool_choice,
     )
 
     try:
@@ -1084,7 +1099,7 @@ async def create_response(
     except Exception as exc:
         logger.warning(f"Failed to save Responses conversation to LMDB: {exc}")
 
-    if request.stream:
+    if request_data.stream:
         logger.debug(
             f"Streaming Responses API payload (response_id={response_payload.id}, text_chunks={bool(assistant_text)})."
         )
@@ -1333,7 +1348,7 @@ def _create_responses_streaming_response(
 
     response_dict = response_payload.model_dump(mode="json")
     response_id = response_payload.id
-    created_time = response_payload.created
+    created_time = response_payload.created_at
     model = response_payload.model
 
     logger.debug(
@@ -1343,14 +1358,14 @@ def _create_responses_streaming_response(
     base_event = {
         "id": response_id,
         "object": "response",
-        "created": created_time,
+        "created_at": created_time,
         "model": model,
     }
 
     created_snapshot: dict[str, Any] = {
         "id": response_id,
         "object": "response",
-        "created": created_time,
+        "created_at": created_time,
         "model": model,
         "status": "in_progress",
     }
@@ -1358,6 +1373,10 @@ def _create_responses_streaming_response(
         created_snapshot["metadata"] = response_dict["metadata"]
     if response_dict.get("input") is not None:
         created_snapshot["input"] = response_dict["input"]
+    if response_dict.get("tools") is not None:
+        created_snapshot["tools"] = response_dict["tools"]
+    if response_dict.get("tool_choice") is not None:
+        created_snapshot["tool_choice"] = response_dict["tool_choice"]
 
     async def generate_stream():
         # Emit creation event
@@ -1368,30 +1387,53 @@ def _create_responses_streaming_response(
         }
         yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
-        # Stream textual content, if any
-        if assistant_text:
-            for chunk in _iter_stream_segments(assistant_text):
-                delta_event = {
-                    **base_event,
-                    "type": "response.output_text.delta",
-                    "output_index": 0,
-                    "delta": chunk,
-                }
-                yield f"data: {orjson.dumps(delta_event).decode('utf-8')}\n\n"
+        # Stream output items (Message/Text, Tool Calls, Images)
+        for i, item in enumerate(response_payload.output):
+            item_json = item.model_dump(mode="json", exclude_none=True)
 
-            done_event = {
+            added_event = {
                 **base_event,
-                "type": "response.output_text.done",
-                "output_index": 0,
+                "type": "response.output_item.added",
+                "output_index": i,
+                "item": item_json,
             }
-            yield f"data: {orjson.dumps(done_event).decode('utf-8')}\n\n"
-        else:
-            done_event = {
+            yield f"data: {orjson.dumps(added_event).decode('utf-8')}\n\n"
+
+            # 2. Stream content if it's a message (text)
+            if item.type == "message":
+                content_text = ""
+                # Aggregate text content to stream
+                for c in item.content:
+                    if c.type == "output_text" and c.text:
+                        content_text += c.text
+
+                if content_text:
+                    for chunk in _iter_stream_segments(content_text):
+                        delta_event = {
+                            **base_event,
+                            "type": "response.output_text.delta",
+                            "output_index": i,
+                            "delta": chunk,
+                        }
+                        yield f"data: {orjson.dumps(delta_event).decode('utf-8')}\n\n"
+
+                    # Text done
+                    done_event = {
+                        **base_event,
+                        "type": "response.output_text.done",
+                        "output_index": i,
+                    }
+                    yield f"data: {orjson.dumps(done_event).decode('utf-8')}\n\n"
+
+            # 3. Emit output_item.done for all types
+            # This confirms the item is fully transferred.
+            item_done_event = {
                 **base_event,
-                "type": "response.output_text.done",
-                "output_index": 0,
+                "type": "response.output_item.done",
+                "output_index": i,
+                "item": item_json,
             }
-            yield f"data: {orjson.dumps(done_event).decode('utf-8')}\n\n"
+            yield f"data: {orjson.dumps(item_done_event).decode('utf-8')}\n\n"
 
         # Emit completed event with full payload
         completed_event = {
@@ -1512,8 +1554,8 @@ def _extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
     return None, None
 
 
-async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | None, int | None]:
-    """Persist an image provided by gemini_webapi and return base64 plus dimensions."""
+async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | None, int | None, str]:
+    """Persist an image provided by gemini_webapi and return base64 plus dimensions and filename."""
     if isinstance(image, GeneratedImage):
         saved_path = await image.save(path=str(temp_dir), full_size=True)
     else:
@@ -1522,6 +1564,13 @@ async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | Non
     if not saved_path:
         raise ValueError("Failed to save generated image")
 
-    data = Path(saved_path).read_bytes()
+    # Rename file to a random UUID to ensure uniqueness and unpredictability
+    original_path = Path(saved_path)
+    random_name = f"img_{uuid.uuid4().hex}{original_path.suffix}"
+    new_path = temp_dir / random_name
+    original_path.rename(new_path)
+
+    data = new_path.read_bytes()
     width, height = _extract_image_dimensions(data)
-    return base64.b64encode(data).decode("ascii"), width, height
+    filename = random_name
+    return base64.b64encode(data).decode("ascii"), width, height, filename

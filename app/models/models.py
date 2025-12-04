@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ContentItem(BaseModel):
@@ -12,7 +12,9 @@ class ContentItem(BaseModel):
     type: Literal["text", "image_url", "file", "input_audio"]
     text: Optional[str] = None
     image_url: Optional[Dict[str, str]] = None
+    input_audio: Optional[Dict[str, Any]] = None
     file: Optional[Dict[str, str]] = None
+    annotations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class Message(BaseModel):
@@ -22,6 +24,10 @@ class Message(BaseModel):
     content: Union[str, List[ContentItem], None] = None
     name: Optional[str] = None
     tool_calls: Optional[List["ToolCall"]] = None
+    refusal: Optional[str] = None
+    reasoning_content: Optional[str] = None
+    audio: Optional[Dict[str, Any]] = None
+    annotations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class Choice(BaseModel):
@@ -30,6 +36,7 @@ class Choice(BaseModel):
     index: int
     message: Message
     finish_reason: str
+    logprobs: Optional[Dict[str, Any]] = None
 
 
 class FunctionCall(BaseModel):
@@ -81,6 +88,8 @@ class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: Optional[Dict[str, int]] = None
+    completion_tokens_details: Optional[Dict[str, int]] = None
 
 
 class ModelData(BaseModel):
@@ -161,6 +170,15 @@ class ResponseInputContent(BaseModel):
     file_url: Optional[str] = None
     file_data: Optional[str] = None
     filename: Optional[str] = None
+    annotations: List[Dict[str, Any]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_output_text(cls, data: Any) -> Any:
+        """Allow output_text (from previous turns) to be treated as input_text."""
+        if isinstance(data, dict) and data.get("type") == "output_text":
+            data["type"] = "input_text"
+        return data
 
 
 class ResponseInputItem(BaseModel):
@@ -216,7 +234,8 @@ class ResponseOutputContent(BaseModel):
     """Content item for Responses API output."""
 
     type: Literal["output_text"]
-    text: Optional[str] = None
+    text: Optional[str] = ""
+    annotations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ResponseOutputMessage(BaseModel):
@@ -254,20 +273,22 @@ class ResponseCreateResponse(BaseModel):
 
     id: str
     object: Literal["response"] = "response"
-    created: int
+    created_at: int
     model: str
     output: List[Union[ResponseOutputMessage, ResponseImageGenerationCall, ResponseToolCall]]
-    output_text: Optional[str] = None
     status: Literal[
         "in_progress",
         "completed",
         "failed",
         "incomplete",
+        "cancelled",
         "requires_action",
     ] = "completed"
+    tool_choice: Optional[Union[str, ResponseToolChoice]] = None
+    tools: Optional[List[Union[Tool, ResponseImageTool]]] = None
     usage: ResponseUsage
+    error: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, Any]] = None
-    system_fingerprint: Optional[str] = None
     input: Optional[Union[str, List[ResponseInputItem]]] = None
 
 

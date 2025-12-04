@@ -1,12 +1,71 @@
+import hashlib
+import hmac
 import tempfile
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from loguru import logger
 
 from ..utils import g_config
+
+# Persistent directory for storing generated images
+IMAGE_STORE_DIR = Path(tempfile.gettempdir()) / "ai_generated_images"
+IMAGE_STORE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_image_store_dir() -> Path:
+    """Returns a persistent directory for storing images."""
+    return IMAGE_STORE_DIR
+
+
+def get_image_token(filename: str) -> str:
+    """Generate a HMAC-SHA256 token for a filename using the API key."""
+    secret = g_config.server.api_key
+    if not secret:
+        return ""
+
+    msg = filename.encode("utf-8")
+    secret_bytes = secret.encode("utf-8")
+    return hmac.new(secret_bytes, msg, hashlib.sha256).hexdigest()
+
+
+def verify_image_token(filename: str, token: str | None) -> bool:
+    """Verify the provided token against the filename."""
+    expected = get_image_token(filename)
+    if not expected:
+        return True  # No auth required
+    if not token:
+        return False
+    return hmac.compare_digest(token, expected)
+
+
+def cleanup_expired_images(retention_days: int) -> int:
+    """Delete images in IMAGE_STORE_DIR older than retention_days."""
+    if retention_days <= 0:
+        return 0
+
+    now = time.time()
+    retention_seconds = retention_days * 24 * 60 * 60
+    cutoff = now - retention_seconds
+
+    count = 0
+    for file_path in IMAGE_STORE_DIR.iterdir():
+        if not file_path.is_file():
+            continue
+        try:
+            if file_path.stat().st_mtime < cutoff:
+                file_path.unlink()
+                count += 1
+        except Exception as e:
+            logger.warning(f"Failed to delete expired image {file_path}: {e}")
+
+    if count > 0:
+        logger.info(f"Cleaned up {count} expired images.")
+    return count
 
 
 def global_exception_handler(request: Request, exc: Exception):

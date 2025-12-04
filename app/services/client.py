@@ -76,6 +76,9 @@ class GeminiClientWrapper(GeminiClient):
             logger.exception(f"Failed to initialize GeminiClient {self.id}")
             raise
 
+    def running(self) -> bool:
+        return self._running
+
     @staticmethod
     async def process_message(
         message: Message, tempdir: Path | None = None, tagged: bool = True
