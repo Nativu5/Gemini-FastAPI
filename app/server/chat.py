@@ -798,7 +798,7 @@ async def create_response(
     image_tools: list[ResponseImageTool] = []
 
     if request_data.tools:
-        for t in request.tools:
+        for t in request_data.tools:
             if isinstance(t, Tool):
                 standard_tools.append(t)
             elif isinstance(t, ResponseImageTool):
@@ -984,7 +984,7 @@ async def create_response(
                 summary = f"{summary[:197]}..."
         logger.warning(
             "Image generation requested but Gemini produced no images. "
-            f"client_id={client_id}, forced_tool_choice={request.tool_choice is not None}, "
+            f"client_id={client_id}, forced_tool_choice={request_data.tool_choice is not None}, "
             f"instruction_applied={bool(image_instruction)}, assistant_preview='{summary}'"
         )
         detail = "LLM returned no images for the requested image_generation tool."
@@ -1100,7 +1100,7 @@ async def create_response(
     except Exception as exc:
         logger.warning(f"Failed to save Responses conversation to LMDB: {exc}")
 
-    if request.stream:
+    if request_data.stream:
         logger.debug(
             f"Streaming Responses API payload (response_id={response_payload.id}, text_chunks={bool(assistant_text)})."
         )
