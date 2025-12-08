@@ -1557,7 +1557,11 @@ def _extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
 async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | None, int | None, str]:
     """Persist an image provided by gemini_webapi and return base64 plus dimensions and filename."""
     if isinstance(image, GeneratedImage):
-        saved_path = await image.save(path=str(temp_dir), full_size=True)
+        try:
+            saved_path = await image.save(path=str(temp_dir), full_size=True)
+        except Exception as e:
+            logger.warning(f"Failed to download full-size image, retrying with default size: {e}")
+            saved_path = await image.save(path=str(temp_dir), full_size=False)
     else:
         saved_path = await image.save(path=str(temp_dir))
 
