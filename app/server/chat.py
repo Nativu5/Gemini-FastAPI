@@ -1010,7 +1010,7 @@ async def create_response(
 
         image_call_items.append(
             ResponseImageGenerationCall(
-                id=f"img_{uuid.uuid4().hex}",
+                id=filename.split(".")[0],
                 status="completed",
                 result=image_base64,
                 output_format=img_format,
