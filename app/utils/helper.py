@@ -2,11 +2,16 @@ import base64
 import mimetypes
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from loguru import logger
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+}
 
 
 def add_tag(role: str, content: str, unclose: bool = False) -> str:
@@ -36,7 +41,7 @@ async def save_file_to_tempfile(
     return path
 
 
-async def save_url_to_tempfile(url: str, tempdir: Path | None = None):
+async def save_url_to_tempfile(url: str, tempdir: Path | None = None) -> Path:
     data: bytes | None = None
     suffix: str | None = None
     if url.startswith("data:image/"):
@@ -47,17 +52,26 @@ async def save_url_to_tempfile(url: str, tempdir: Path | None = None):
         base64_data = url.split(",")[1]
         data = base64.b64decode(base64_data)
 
-        # Guess extension from mime type, default to the subtype if not found
         suffix = mimetypes.guess_extension(mime_type)
         if not suffix:
             suffix = f".{mime_type.split('/')[1]}"
     else:
-        # http files
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             data = resp.content
-            suffix = Path(url).suffix or ".bin"
+            content_type = resp.headers.get("content-type")
+
+            if content_type:
+                mime_type = content_type.split(";")[0].strip()
+                suffix = mimetypes.guess_extension(mime_type)
+
+            if not suffix:
+                path_url = urlparse(url).path
+                suffix = Path(path_url).suffix
+
+            if not suffix:
+                suffix = ".bin"
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=tempdir) as tmp:
         tmp.write(data)
