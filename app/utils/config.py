@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -232,21 +232,34 @@ def _merge_clients_with_env(
     return result_clients if result_clients else base_clients
 
 
-def extract_gemini_models_env() -> dict[int, dict[str, str]]:
-    """Extract and remove all Gemini models related environment variables, return a mapping from index to field dict."""
+def extract_gemini_models_env() -> dict[int, dict[str, Any]]:
+    """Extract and remove all Gemini models related environment variables, supporting nested fields."""
     prefix = "CONFIG_GEMINI__MODELS__"
-    env_overrides: dict[int, dict[str, str]] = {}
+    env_overrides: dict[int, dict[str, Any]] = {}
     to_delete = []
     for k, v in os.environ.items():
         if k.startswith(prefix):
             parts = k.split("__")
             if len(parts) < 4:
                 continue
-            index_str, field = parts[2], parts[3].lower()
+            index_str = parts[2]
             if not index_str.isdigit():
                 continue
             idx = int(index_str)
-            env_overrides.setdefault(idx, {})[field] = v
+
+            # Navigate to the correct nested dict
+            current = env_overrides.setdefault(idx, {})
+            for i in range(3, len(parts) - 1):
+                field_name = parts[i].lower()
+                current = current.setdefault(field_name, {})
+
+            # Set the value (lowercase root field names, preserve sub-key casing)
+            last_part = parts[-1]
+            if len(parts) == 4:
+                current[last_part.lower()] = v
+            else:
+                current[last_part] = v
+
             to_delete.append(k)
     # Remove these environment variables to avoid Pydantic parsing errors
     for k in to_delete:
@@ -256,9 +269,9 @@ def extract_gemini_models_env() -> dict[int, dict[str, str]]:
 
 def _merge_models_with_env(
     base_models: list[GeminiModelConfig] | None,
-    env_overrides: dict[int, dict[str, str]],
+    env_overrides: dict[int, dict[str, Any]],
 ):
-    """Override base_models with env_overrides, return the new models list."""
+    """Override base_models with env_overrides using standard update (replace whole fields)."""
     if not env_overrides:
         return base_models or []
     result_models: list[GeminiModelConfig] = []
@@ -268,10 +281,12 @@ def _merge_models_with_env(
     for idx in sorted(env_overrides):
         overrides = env_overrides[idx]
         if idx < len(result_models):
+            # Update existing model: overwrite fields found in env
             model_dict = result_models[idx].model_dump()
             model_dict.update(overrides)
             result_models[idx] = GeminiModelConfig(**model_dict)
         elif idx == len(result_models):
+            # Append new model
             new_model = GeminiModelConfig(**overrides)
             result_models.append(new_model)
         else:
