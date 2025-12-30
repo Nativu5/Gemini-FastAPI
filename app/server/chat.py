@@ -562,24 +562,64 @@ def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
     return cleaned, tool_calls
 
 
-@router.get("/v1/models", response_model=ModelListResponse)
-async def list_models(api_key: str = Depends(verify_api_key)):
+def _get_model_by_name(name: str) -> Model:
+    """
+    Retrieve a Model instance by name, considering custom models from config
+    and the update strategy (append or overwrite).
+    """
+    strategy = g_config.gemini.model_strategy
+    custom_models = {m.model_name: m for m in g_config.gemini.models if m.model_name}
+
+    if name in custom_models:
+        return Model.from_dict(custom_models[name].model_dump())
+
+    if strategy == "overwrite":
+        raise ValueError(f"Model '{name}' not found in custom models (strategy='overwrite').")
+
+    return Model.from_name(name)
+
+
+def _get_available_models() -> list[ModelData]:
+    """
+    Return a list of available models based on configuration strategy.
+    """
     now = int(datetime.now(tz=timezone.utc).timestamp())
+    strategy = g_config.gemini.model_strategy
+    models_data = []
 
-    models = []
-    for model in Model:
-        m_name = model.model_name
-        if not m_name or m_name == "unspecified":
-            continue
-
-        models.append(
+    custom_models = [m for m in g_config.gemini.models if m.model_name]
+    for m in custom_models:
+        models_data.append(
             ModelData(
-                id=m_name,
+                id=m.model_name,
                 created=now,
-                owned_by="gemini-web",
+                owned_by="custom",
             )
         )
 
+    if strategy == "append":
+        custom_ids = {m.model_name for m in custom_models}
+        for model in Model:
+            m_name = model.model_name
+            if not m_name or m_name == "unspecified":
+                continue
+            if m_name in custom_ids:
+                continue
+
+            models_data.append(
+                ModelData(
+                    id=m_name,
+                    created=now,
+                    owned_by="gemini-web",
+                )
+            )
+
+    return models_data
+
+
+@router.get("/v1/models", response_model=ModelListResponse)
+async def list_models(api_key: str = Depends(verify_api_key)):
+    models = _get_available_models()
     return ModelListResponse(data=models)
 
 
@@ -592,7 +632,11 @@ async def create_chat_completion(
 ):
     pool = GeminiClientPool()
     db = LMDBConversationStore()
-    model = Model.from_name(request.model)
+
+    try:
+        model = _get_model_by_name(request.model)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     if len(request.messages) == 0:
         raise HTTPException(
@@ -849,7 +893,7 @@ async def create_response(
     db = LMDBConversationStore()
 
     try:
-        model = Model.from_name(request_data.model)
+        model = _get_model_by_name(request_data.model)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

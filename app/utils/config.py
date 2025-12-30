@@ -50,11 +50,25 @@ class GeminiClientSettings(BaseModel):
         return stripped or None
 
 
+class GeminiModelConfig(BaseModel):
+    """Configuration for a custom Gemini model."""
+
+    model_name: Optional[str] = Field(default=None, description="Name of the model")
+    model_header: Optional[dict[str, Optional[str]]] = Field(
+        default=None, description="Header for the model"
+    )
+
+
 class GeminiConfig(BaseModel):
     """Gemini API configuration"""
 
     clients: list[GeminiClientSettings] = Field(
         ..., description="List of Gemini client credential pairs"
+    )
+    models: list[GeminiModelConfig] = Field(default=[], description="List of custom Gemini models")
+    model_strategy: Literal["append", "overwrite"] = Field(
+        default="append",
+        description="Strategy for loading models: 'append' merges custom with default, 'overwrite' uses only custom",
     )
     timeout: int = Field(default=120, ge=1, description="Init timeout")
     auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini cookies")
@@ -67,6 +81,13 @@ class GeminiConfig(BaseModel):
         ge=1,
         description="Maximum characters Gemini Web can accept per request",
     )
+
+    @field_validator("models")
+    @classmethod
+    def _filter_valid_models(cls, v: list[GeminiModelConfig]) -> list[GeminiModelConfig]:
+        """Filter out models that don't have a name set (placeholders)."""
+
+        return [model for model in v if model.model_name]
 
 
 class CORSConfig(BaseModel):
@@ -211,6 +232,53 @@ def _merge_clients_with_env(
     return result_clients if result_clients else base_clients
 
 
+def extract_gemini_models_env() -> dict[int, dict[str, str]]:
+    """Extract and remove all Gemini models related environment variables, return a mapping from index to field dict."""
+    prefix = "CONFIG_GEMINI__MODELS__"
+    env_overrides: dict[int, dict[str, str]] = {}
+    to_delete = []
+    for k, v in os.environ.items():
+        if k.startswith(prefix):
+            parts = k.split("__")
+            if len(parts) < 4:
+                continue
+            index_str, field = parts[2], parts[3].lower()
+            if not index_str.isdigit():
+                continue
+            idx = int(index_str)
+            env_overrides.setdefault(idx, {})[field] = v
+            to_delete.append(k)
+    # Remove these environment variables to avoid Pydantic parsing errors
+    for k in to_delete:
+        del os.environ[k]
+    return env_overrides
+
+
+def _merge_models_with_env(
+    base_models: list[GeminiModelConfig] | None,
+    env_overrides: dict[int, dict[str, str]],
+):
+    """Override base_models with env_overrides, return the new models list."""
+    if not env_overrides:
+        return base_models or []
+    result_models: list[GeminiModelConfig] = []
+    if base_models:
+        result_models = [model.model_copy() for model in base_models]
+
+    for idx in sorted(env_overrides):
+        overrides = env_overrides[idx]
+        if idx < len(result_models):
+            model_dict = result_models[idx].model_dump()
+            model_dict.update(overrides)
+            result_models[idx] = GeminiModelConfig(**model_dict)
+        elif idx == len(result_models):
+            new_model = GeminiModelConfig(**overrides)
+            result_models.append(new_model)
+        else:
+            raise IndexError(f"Model index {idx} in env is out of range (must be contiguous).")
+    return result_models
+
+
 def initialize_config() -> Config:
     """
     Initialize the configuration.
@@ -221,6 +289,8 @@ def initialize_config() -> Config:
     try:
         # First, extract and remove Gemini clients related environment variables
         env_clients_overrides = extract_gemini_clients_env()
+        # Extract and remove Gemini models related environment variables
+        env_models_overrides = extract_gemini_models_env()
 
         # Then, initialize Config with pydantic_settings
         config = Config()  # type: ignore
@@ -228,7 +298,10 @@ def initialize_config() -> Config:
         # Synthesize clients
         config.gemini.clients = _merge_clients_with_env(
             config.gemini.clients, env_clients_overrides
-        )  # type: ignore
+        )
+
+        # Synthesize models
+        config.gemini.models = _merge_models_with_env(config.gemini.models, env_models_overrides)
 
         return config
     except ValidationError as e:
