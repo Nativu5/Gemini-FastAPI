@@ -256,36 +256,26 @@ def _merge_clients_with_env(
 
 def extract_gemini_models_env() -> dict[int, dict[str, Any]]:
     """Extract and remove all Gemini models related environment variables, supporting nested fields."""
-    prefix = "CONFIG_GEMINI__MODELS__"
+    import json
+
+    root_key = "CONFIG_GEMINI__MODELS"
     env_overrides: dict[int, dict[str, Any]] = {}
-    to_delete = []
-    for k, v in os.environ.items():
-        if k.startswith(prefix):
-            parts = k.split("__")
-            if len(parts) < 4:
-                continue
-            index_str = parts[2]
-            if not index_str.isdigit():
-                continue
-            idx = int(index_str)
 
-            # Navigate to the correct nested dict
-            current = env_overrides.setdefault(idx, {})
-            for i in range(3, len(parts) - 1):
-                field_name = parts[i].lower()
-                current = current.setdefault(field_name, {})
+    if root_key in os.environ:
+        try:
+            val = os.environ[root_key]
+            if val.strip().startswith("["):
+                models_list = json.loads(val)
+                if isinstance(models_list, list):
+                    for idx, model_data in enumerate(models_list):
+                        if isinstance(model_data, dict):
+                            env_overrides[idx] = model_data
 
-            # Set the value (lowercase root field names, preserve sub-key casing)
-            last_part = parts[-1]
-            if len(parts) == 4:
-                current[last_part.lower()] = v
-            else:
-                current[last_part] = v
+            # Remove the environment variable to avoid Pydantic parsing errors
+            del os.environ[root_key]
+        except Exception as e:
+            logger.warning(f"Failed to parse {root_key} as JSON: {e}")
 
-            to_delete.append(k)
-    # Remove these environment variables to avoid Pydantic parsing errors
-    for k in to_delete:
-        del os.environ[k]
     return env_overrides
 
 
