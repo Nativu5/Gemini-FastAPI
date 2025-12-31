@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from typing import Any, Literal, Optional
@@ -58,6 +59,17 @@ class GeminiModelConfig(BaseModel):
         default=None, description="Header for the model"
     )
 
+    @field_validator("model_header", mode="before")
+    @classmethod
+    def _parse_json_string(cls, v: Any) -> Any:
+        if isinstance(v, str) and v.strip().startswith("{"):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                # Return the original value to let Pydantic handle the error or type mismatch
+                return v
+        return v
+
 
 class GeminiConfig(BaseModel):
     """Gemini API configuration"""
@@ -82,11 +94,21 @@ class GeminiConfig(BaseModel):
         description="Maximum characters Gemini Web can accept per request",
     )
 
+    @field_validator("models", mode="before")
+    @classmethod
+    def _parse_models_json(cls, v: Any) -> Any:
+        if isinstance(v, str) and v.strip().startswith("["):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse models JSON string: {e}")
+                return v
+        return v
+
     @field_validator("models")
     @classmethod
     def _filter_valid_models(cls, v: list[GeminiModelConfig]) -> list[GeminiModelConfig]:
         """Filter out models that don't have a name set (placeholders)."""
-
         return [model for model in v if model.model_name]
 
 
