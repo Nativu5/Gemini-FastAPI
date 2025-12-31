@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 import sys
@@ -256,25 +257,31 @@ def _merge_clients_with_env(
 
 def extract_gemini_models_env() -> dict[int, dict[str, Any]]:
     """Extract and remove all Gemini models related environment variables, supporting nested fields."""
-    import json
-
     root_key = "CONFIG_GEMINI__MODELS"
     env_overrides: dict[int, dict[str, Any]] = {}
 
     if root_key in os.environ:
+        val = os.environ[root_key]
+        models_list = None
+        parsed_successfully = False
+
         try:
-            val = os.environ[root_key]
-            if val.strip().startswith("["):
-                models_list = json.loads(val)
-                if isinstance(models_list, list):
-                    for idx, model_data in enumerate(models_list):
-                        if isinstance(model_data, dict):
-                            env_overrides[idx] = model_data
+            models_list = json.loads(val)
+            parsed_successfully = True
+        except json.JSONDecodeError:
+            try:
+                models_list = ast.literal_eval(val)
+                parsed_successfully = True
+            except (ValueError, SyntaxError) as e:
+                logger.warning(f"Failed to parse {root_key} as JSON or Python literal: {e}")
+
+        if parsed_successfully and isinstance(models_list, list):
+            for idx, model_data in enumerate(models_list):
+                if isinstance(model_data, dict):
+                    env_overrides[idx] = model_data
 
             # Remove the environment variable to avoid Pydantic parsing errors
             del os.environ[root_key]
-        except Exception as e:
-            logger.warning(f"Failed to parse {root_key} as JSON: {e}")
 
     return env_overrides
 
@@ -298,7 +305,7 @@ def _merge_models_with_env(
             model_dict.update(overrides)
             result_models[idx] = GeminiModelConfig(**model_dict)
         elif idx == len(result_models):
-            # Append new model
+            # Append new models
             new_model = GeminiModelConfig(**overrides)
             result_models.append(new_model)
         else:
