@@ -30,7 +30,7 @@ CODE_BLOCK_HINT = (
 )
 TOOL_BLOCK_RE = re.compile(r"```xml\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 TOOL_CALL_RE = re.compile(
-    r"<tool_call\s+name=[\"']([^\"']+)[\"']\s*>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
+    r"<tool_call\s+name=\"([^\"]+)\"\s*>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
 )
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>")
@@ -140,7 +140,7 @@ def strip_tagged_blocks(text: str) -> str:
         role_start = start + len(start_marker)
         newline = text.find("\n", role_start)
         if newline == -1:
-            # malformed block; keep remainder as-is (safe behavior)
+            # malformed block; keep the remainder as-is (safe behavior)
             result.append(text[start:])
             break
 
@@ -150,7 +150,7 @@ def strip_tagged_blocks(text: str) -> str:
         if end == -1:
             # missing end marker
             if role == "tool":
-                # drop from start marker to EOF (skip remainder)
+                # drop from the start marker to EOF (skip the remainder)
                 break
             else:
                 # keep inner content from after the role newline to EOF
@@ -160,7 +160,7 @@ def strip_tagged_blocks(text: str) -> str:
         block_end = end + len(end_marker)
 
         if role == "tool":
-            # drop whole block
+            # drop the whole block
             idx = block_end
             continue
 
@@ -217,7 +217,7 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
     tool_calls: list[ToolCall] = []
 
     def _create_tool_call(name: str, raw_args: str) -> None:
-        """Helper to parse args and append to tool_calls list."""
+        """Helper to parse args and append to the tool_calls list."""
         if not name:
             logger.warning("Encountered tool_call without a function name.")
             return
