@@ -47,8 +47,10 @@ def add_tag(role: str, content: str, unclose: bool = False) -> str:
     return f"<|im_start|>{role}\n{content}" + ("\n<|im_end|>" if not unclose else "")
 
 
-def estimate_tokens(text: str) -> int:
+def estimate_tokens(text: str | None) -> int:
     """Estimate the number of tokens heuristically based on character count"""
+    if not text:
+        return 0
     return int(len(text) / 3)
 
 
