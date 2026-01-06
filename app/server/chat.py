@@ -72,25 +72,40 @@ class StructuredOutputRequirement:
     raw_format: dict[str, Any]
 
 
-def _resolve_gem_or_400(gem_id: str | None) -> GemDefinition | None:
-    """Resolve a gem id into a config object.
+GEM_MODEL_PREFIX = "gem:"
 
-    Notes:
-        - When gem_id is missing/None, this returns None for backward compatibility.
-        - When gem_id is provided but not found, this raises a 400 error.
+
+def _resolve_gem_from_model_or_400(
+    model_str: str,
+) -> tuple[str | None, GemDefinition | None, str, str]:
+    """Resolve a `model` string into (gem_id, gem_def, public_model, actual_model).
+
+    Contract:
+        - If `model_str` is not a `gem:<id>` alias, returns (None, None, model_str, model_str).
+        - If `model_str` starts with `gem:` but no matching gem is found, raise HTTP 400.
+        - `public_model` should echo the client-provided `model` for OpenAI-style responses.
+        - `actual_model` is the Gemini model name used for the upstream call.
     """
 
-    if gem_id is None:
-        return None
+    public_model = model_str
+    if not model_str.startswith(GEM_MODEL_PREFIX):
+        return None, None, public_model, model_str
+
+    gem_id = model_str[len(GEM_MODEL_PREFIX) :].strip()
+    if not gem_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unknown gem id: (empty)",
+        )
 
     gem = g_config.get_gem(gem_id)
     if gem is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown gem_id: {gem_id}",
+            detail=f"Unknown gem id: {gem_id}",
         )
 
-    return gem
+    return gem_id, gem, public_model, gem.model
 
 
 def _apply_gem_overrides(
@@ -99,10 +114,10 @@ def _apply_gem_overrides(
 ) -> None:
     """Apply gem overrides onto a request object in-place.
 
-    This helper supports both Chat Completions and Responses request models.
+    Notes:
+        - This helper intentionally does NOT mutate `request_obj.model`.
+        - Upstream model selection is handled via `model=gem:<id>` parsing.
     """
-
-    request_obj.model = gem.model
 
     if hasattr(request_obj, "temperature"):
         request_obj.temperature = gem.default_temperature
@@ -684,14 +699,14 @@ async def create_chat_completion(
             detail="At least one message is required in the conversation.",
         )
 
-    gem = _resolve_gem_or_400(request.gem_id)
+    gem_id, gem, public_model, actual_model = _resolve_gem_from_model_or_400(request.model)
     if gem:
         _apply_gem_overrides(request, gem)
         if gem.system_prompt:
             _inject_gem_system_prompt(request.messages, gem.system_prompt)
 
     try:
-        model = Model.from_name(request.model)
+        model = Model.from_name(actual_model)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -713,7 +728,7 @@ async def create_chat_completion(
         pool,
         model,
         request.messages,
-        gem_id=request.gem_id,
+        gem_id=gem_id,
     )
 
     if session:
@@ -837,7 +852,7 @@ async def create_chat_completion(
         cleaned_history = db.sanitize_assistant_messages(request.messages)
         conv = ConversationInStore(
             model=model.model_name,
-            gem_id=request.gem_id,
+            gem_id=gem_id,
             client_id=client.id,
             metadata=session.metadata,
             messages=[*cleaned_history, last_message],
@@ -857,7 +872,7 @@ async def create_chat_completion(
             tool_calls_payload,
             completion_id,
             timestamp,
-            request.model,
+            public_model,
             request.messages,
         )
     else:
@@ -866,7 +881,7 @@ async def create_chat_completion(
             tool_calls_payload,
             completion_id,
             timestamp,
-            request.model,
+            public_model,
             request.messages,
         )
 
@@ -881,7 +896,7 @@ async def create_response(
 ):
     base_messages, normalized_input = _response_items_to_messages(request_data.input)
 
-    gem = _resolve_gem_or_400(request_data.gem_id)
+    gem_id, gem, public_model, actual_model = _resolve_gem_from_model_or_400(request_data.model)
     if gem:
         _apply_gem_overrides(request_data, gem)
 
@@ -957,7 +972,7 @@ async def create_response(
     db = LMDBConversationStore()
 
     try:
-        model = Model.from_name(request_data.model)
+        model = Model.from_name(actual_model)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -966,7 +981,7 @@ async def create_response(
         pool,
         model,
         messages,
-        gem_id=request_data.gem_id,
+        gem_id=gem_id,
     )
 
     async def _build_payload(
@@ -1177,7 +1192,7 @@ async def create_response(
     response_payload = ResponseCreateResponse(
         id=response_id,
         created_at=created_time,
-        model=request_data.model,
+        model=public_model,
         output=[
             ResponseOutputMessage(
                 id=message_id,
@@ -1205,7 +1220,7 @@ async def create_response(
         cleaned_history = db.sanitize_assistant_messages(messages)
         conv = ConversationInStore(
             model=model.model_name,
-            gem_id=request_data.gem_id,
+            gem_id=gem_id,
             client_id=client.id,
             metadata=session.metadata,
             messages=[*cleaned_history, last_message],

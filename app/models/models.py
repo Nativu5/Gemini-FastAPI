@@ -105,7 +105,6 @@ class ChatCompletionRequest(BaseModel):
     """Chat completion request model"""
 
     model: str
-    gem_id: Optional[str] = None
     messages: List[Message]
     stream: Optional[bool] = False
     user: Optional[str] = None
@@ -210,7 +209,6 @@ class ResponseCreateRequest(BaseModel):
     """Responses API request payload."""
 
     model: str
-    gem_id: Optional[str] = None
     input: Union[str, List[ResponseInputItem]]
     instructions: Optional[Union[str, List[ResponseInputItem]]] = None
     temperature: Optional[float] = 0.7

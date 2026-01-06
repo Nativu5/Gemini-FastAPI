@@ -137,9 +137,14 @@ The server reads a YAML configuration file located at `config/config.yaml`.
 
 For details on each configuration option, refer to the comments in the [`config/config.yaml`](https://github.com/Nativu5/Gemini-FastAPI/blob/main/config/config.yaml) file.
 
-### Gems (`gem_id`)
+### Gems (`model=gem:<id>`)
 
-You can define reusable presets ("gems") in the config file and select them per request via `gem_id`. When a gem is selected, it overrides model + sampling params and can inject an extra system prompt.
+You can define reusable presets ("gems") in the config file and select them per request by setting `model` to `gem:<id>`.
+
+When a gem is selected:
+
+- The server uses the gem definition's `model` as the actual Gemini model name for the upstream call.
+- The OpenAI-compatible response tries to echo back the client-provided `model` (i.e. `gem:<id>`) to keep client-side consistency.
 
 Example config:
 
@@ -159,8 +164,7 @@ Example request (Chat Completions):
 
 ```json
 {
-  "model": "models/gemini-1.5-pro",
-  "gem_id": "default-gem",
+  "model": "gem:default-gem",
   "messages": [{"role": "user", "content": "Hello"}]
 }
 ```
@@ -169,8 +173,7 @@ Example request (Responses API):
 
 ```json
 {
-  "model": "models/gemini-1.5-pro",
-  "gem_id": "default-gem",
+  "model": "gem:default-gem",
   "input": "Hello"
 }
 ```

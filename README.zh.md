@@ -137,9 +137,14 @@ docker compose up -d
 
 各项配置说明请参见 [`config/config.yaml`](https://github.com/Nativu5/Gemini-FastAPI/blob/main/config/config.yaml) 文件中的注释。
 
-### Gems（`gem_id`）
+### Gems（`model=gem:<id>`）
 
-你可以在配置文件中定义可复用的预设（gems），并在每次请求里通过 `gem_id` 选择。选中 gem 后会覆盖模型与采样参数，并可额外注入一段系统提示词（system prompt）。
+你可以在配置文件中定义可复用的预设（gems），并通过把请求里的 `model` 设置为 `gem:<id>` 来选择。
+
+当选择 gem 时：
+
+- 服务端会使用 gem 定义中的 `model` 作为实际调用的 Gemini 模型名。
+- 对外返回的 OpenAI 兼容响应会尽量回显客户端传入的 `model`（即 `gem:<id>`），以保证客户端一致性。
 
 配置示例：
 
@@ -159,8 +164,7 @@ gemini:
 
 ```json
 {
-  "model": "models/gemini-1.5-pro",
-  "gem_id": "default-gem",
+  "model": "gem:default-gem",
   "messages": [{"role": "user", "content": "你好"}]
 }
 ```
@@ -169,8 +173,7 @@ gemini:
 
 ```json
 {
-  "model": "models/gemini-1.5-pro",
-  "gem_id": "default-gem",
+  "model": "gem:default-gem",
   "input": "你好"
 }
 ```

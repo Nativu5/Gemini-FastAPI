@@ -51,7 +51,7 @@ class GeminiClientSettings(BaseModel):
 
 
 class GemDefinition(BaseModel):
-    """Preset configuration applied when a request provides `gem_id`."""
+    """Preset configuration applied when a request selects `model=gem:<id>`."""
 
     id: str = Field(..., description="Unique identifier for the gem")
     model: str = Field(..., description="Model name to use when this gem is selected")
@@ -86,7 +86,7 @@ class GeminiConfig(BaseModel):
     )
     gems: list[GemDefinition] = Field(
         default_factory=list,
-        description="Gem presets selectable via request gem_id",
+        description="Gem presets selectable via request model alias (model=gem:<id>)",
     )
     timeout: int = Field(default=120, ge=1, description="Init timeout")
     auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini cookies")
@@ -196,7 +196,7 @@ class Config(BaseSettings):
     )
 
     def get_gem(self, gem_id: str | None) -> GemDefinition | None:
-        """Return the configured gem preset by id, or None if not found."""
+        """Return the configured gem preset by id (used by `model=gem:<id>`)."""
         if not gem_id:
             return None
         for gem in self.gemini.gems:
