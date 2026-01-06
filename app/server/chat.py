@@ -41,6 +41,7 @@ from ..models import (
     ToolChoiceFunction,
 )
 from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
+from ..utils.config import GemDefinition
 from ..services.client import CODE_BLOCK_HINT, XML_WRAP_HINT
 from ..utils import g_config
 from ..utils.helper import estimate_tokens
@@ -69,6 +70,80 @@ class StructuredOutputRequirement:
     schema: dict[str, Any]
     instruction: str
     raw_format: dict[str, Any]
+
+
+def _resolve_gem_or_400(gem_id: str | None) -> GemDefinition | None:
+    """Resolve a gem id into a config object.
+
+    Notes:
+        - When gem_id is missing/None, this returns None for backward compatibility.
+        - When gem_id is provided but not found, this raises a 400 error.
+    """
+
+    if gem_id is None:
+        return None
+
+    gem = g_config.get_gem(gem_id)
+    if gem is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown gem_id: {gem_id}",
+        )
+
+    return gem
+
+
+def _apply_gem_overrides(
+    request_obj: Any,
+    gem: GemDefinition,
+) -> None:
+    """Apply gem overrides onto a request object in-place.
+
+    This helper supports both Chat Completions and Responses request models.
+    """
+
+    request_obj.model = gem.model
+
+    if hasattr(request_obj, "temperature"):
+        request_obj.temperature = gem.default_temperature
+
+    if gem.top_p is not None and hasattr(request_obj, "top_p"):
+        request_obj.top_p = gem.top_p
+
+    # ChatCompletions uses `max_tokens`, Responses uses `max_output_tokens`.
+    if hasattr(request_obj, "max_tokens"):
+        request_obj.max_tokens = gem.max_output_tokens
+    if hasattr(request_obj, "max_output_tokens"):
+        request_obj.max_output_tokens = gem.max_output_tokens
+
+    if gem.tool_policy == "disallow":
+        if hasattr(request_obj, "tools"):
+            request_obj.tools = None
+        if hasattr(request_obj, "tool_choice"):
+            request_obj.tool_choice = "none"
+    elif gem.tool_policy == "auto":
+        # Placeholder for future expansion.
+        pass
+    # Default behavior is `allow` (no changes).
+
+
+def _inject_gem_system_prompt(messages: list[Message], system_prompt: str) -> None:
+    """Inject a gem system prompt before model preparation.
+
+    The prompt is inserted as the first system message (or prepended to an
+    existing first system message) so it applies to the whole conversation.
+    """
+
+    if not system_prompt:
+        return
+
+    if messages and messages[0].role == "system" and isinstance(messages[0].content, str):
+        existing = messages[0].content or ""
+        separator = "\n\n" if existing else ""
+        messages[0].content = f"{system_prompt}{separator}{existing}"
+        return
+
+    messages.insert(0, Message(role="system", content=system_prompt))
 
 
 def _build_structured_requirement(
@@ -566,7 +641,7 @@ def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
 async def list_models(api_key: str = Depends(verify_api_key)):
     now = int(datetime.now(tz=timezone.utc).timestamp())
 
-    models = []
+    models: list[ModelData] = []
     for model in Model:
         m_name = model.model_name
         if not m_name or m_name == "unspecified":
@@ -577,6 +652,16 @@ async def list_models(api_key: str = Depends(verify_api_key)):
                 id=m_name,
                 created=now,
                 owned_by="gemini-web",
+            )
+        )
+
+    # Expose configured gems as virtual models.
+    for gem in g_config.gemini.gems:
+        models.append(
+            ModelData(
+                id=f"gem:{gem.id}",
+                created=now,
+                owned_by="gem-config",
             )
         )
 
@@ -592,13 +677,23 @@ async def create_chat_completion(
 ):
     pool = GeminiClientPool()
     db = LMDBConversationStore()
-    model = Model.from_name(request.model)
 
     if len(request.messages) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one message is required in the conversation.",
         )
+
+    gem = _resolve_gem_or_400(request.gem_id)
+    if gem:
+        _apply_gem_overrides(request, gem)
+        if gem.system_prompt:
+            _inject_gem_system_prompt(request.messages, gem.system_prompt)
+
+    try:
+        model = Model.from_name(request.model)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     structured_requirement = _build_structured_requirement(request.response_format)
     if structured_requirement and request.stream:
@@ -614,7 +709,11 @@ async def create_chat_completion(
 
     # Check if conversation is reusable
     session, client, remaining_messages = await _find_reusable_session(
-        db, pool, model, request.messages
+        db,
+        pool,
+        model,
+        request.messages,
+        gem_id=request.gem_id,
     )
 
     if session:
@@ -738,6 +837,7 @@ async def create_chat_completion(
         cleaned_history = db.sanitize_assistant_messages(request.messages)
         conv = ConversationInStore(
             model=model.model_name,
+            gem_id=request.gem_id,
             client_id=client.id,
             metadata=session.metadata,
             messages=[*cleaned_history, last_message],
@@ -780,6 +880,11 @@ async def create_response(
     image_store: Path = Depends(get_image_store_dir),
 ):
     base_messages, normalized_input = _response_items_to_messages(request_data.input)
+
+    gem = _resolve_gem_or_400(request_data.gem_id)
+    if gem:
+        _apply_gem_overrides(request_data, gem)
+
     structured_requirement = _build_structured_requirement(request_data.response_format)
     if structured_requirement and request_data.stream:
         logger.debug(
@@ -822,6 +927,9 @@ async def create_response(
         logger.debug("Image generation support enabled for /v1/responses request.")
 
     preface_messages = _instructions_to_messages(request_data.instructions)
+    if gem and gem.system_prompt:
+        _inject_gem_system_prompt(preface_messages, gem.system_prompt)
+
     conversation_messages = base_messages
     if preface_messages:
         conversation_messages = [*preface_messages, *base_messages]
@@ -853,7 +961,13 @@ async def create_response(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    session, client, remaining_messages = await _find_reusable_session(db, pool, model, messages)
+    session, client, remaining_messages = await _find_reusable_session(
+        db,
+        pool,
+        model,
+        messages,
+        gem_id=request_data.gem_id,
+    )
 
     async def _build_payload(
         _payload_messages: list[Message], _reuse_session: bool
@@ -969,7 +1083,8 @@ async def create_response(
         )
 
     expects_image = (
-        request_data.tool_choice is not None and request_data.tool_choice.type == "image_generation"
+        isinstance(request_data.tool_choice, ResponseToolChoice)
+        and request_data.tool_choice.type == "image_generation"
     )
     images = model_output.images or []
     logger.debug(
@@ -1090,6 +1205,7 @@ async def create_response(
         cleaned_history = db.sanitize_assistant_messages(messages)
         conv = ConversationInStore(
             model=model.model_name,
+            gem_id=request_data.gem_id,
             client_id=client.id,
             metadata=session.metadata,
             messages=[*cleaned_history, last_message],
@@ -1132,6 +1248,7 @@ async def _find_reusable_session(
     pool: GeminiClientPool,
     model: Model,
     messages: list[Message],
+    gem_id: str | None = None,
 ) -> tuple[ChatSession | None, GeminiClientWrapper | None, list[Message]]:
     """Find an existing chat session that matches the *longest* prefix of
     ``messages`` **whose last element is an assistant/system reply**.
@@ -1161,7 +1278,7 @@ async def _find_reusable_session(
         # Only try to match if the last stored message would be assistant/system.
         if search_history[-1].role in {"assistant", "system"}:
             try:
-                if conv := db.find(model.model_name, search_history):
+                if conv := db.find(model.model_name, search_history, gem_id=gem_id):
                     client = await pool.acquire(conv.client_id)
                     session = client.start_chat(metadata=conv.metadata, model=model)
                     remain = messages[search_end:]

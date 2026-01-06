@@ -22,12 +22,23 @@ def _hash_message(message: Message) -> str:
     return hashlib.sha256(message_bytes).hexdigest()
 
 
-def _hash_conversation(client_id: str, model: str, messages: List[Message]) -> str:
-    """Generate a hash for a list of messages and client id."""
+def _hash_conversation(
+    client_id: str,
+    model: str,
+    messages: List[Message],
+    gem_id: str | None = None,
+) -> str:
+    """Generate a hash for a list of messages and client id.
+
+    Note:
+        gem_id is included to prevent session reuse across different gem presets.
+    """
+
     # Create a combined hash from all individual message hashes
     combined_hash = hashlib.sha256()
     combined_hash.update(client_id.encode("utf-8"))
     combined_hash.update(model.encode("utf-8"))
+    combined_hash.update((gem_id or "").encode("utf-8"))
     for message in messages:
         message_hash = _hash_message(message)
         combined_hash.update(message_hash.encode("utf-8"))
@@ -126,7 +137,7 @@ class LMDBConversationStore(metaclass=Singleton):
             raise ValueError("Messages list cannot be empty")
 
         # Generate hash for the message list
-        message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
+        message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages, conv.gem_id)
         storage_key = custom_key or message_hash
 
         # Prepare data for storage
@@ -181,7 +192,12 @@ class LMDBConversationStore(metaclass=Singleton):
             logger.error(f"Failed to retrieve messages for key {key}: {e}")
             return None
 
-    def find(self, model: str, messages: List[Message]) -> Optional[ConversationInStore]:
+    def find(
+        self,
+        model: str,
+        messages: List[Message],
+        gem_id: str | None = None,
+    ) -> Optional[ConversationInStore]:
         """
         Search conversation data by message list.
 
@@ -196,13 +212,13 @@ class LMDBConversationStore(metaclass=Singleton):
             return None
 
         # --- Find with raw messages ---
-        if conv := self._find_by_message_list(model, messages):
+        if conv := self._find_by_message_list(model, messages, gem_id):
             logger.debug("Found conversation with raw message history.")
             return conv
 
         # --- Find with cleaned messages ---
         cleaned_messages = self.sanitize_assistant_messages(messages)
-        if conv := self._find_by_message_list(model, cleaned_messages):
+        if conv := self._find_by_message_list(model, cleaned_messages, gem_id):
             logger.debug("Found conversation with cleaned message history.")
             return conv
 
@@ -210,11 +226,14 @@ class LMDBConversationStore(metaclass=Singleton):
         return None
 
     def _find_by_message_list(
-        self, model: str, messages: List[Message]
+        self,
+        model: str,
+        messages: List[Message],
+        gem_id: str | None,
     ) -> Optional[ConversationInStore]:
         """Internal find implementation based on a message list."""
         for c in g_config.gemini.clients:
-            message_hash = _hash_conversation(c.id, model, messages)
+            message_hash = _hash_conversation(c.id, model, messages, gem_id)
 
             key = f"{self.HASH_LOOKUP_PREFIX}{message_hash}"
             try:
@@ -267,7 +286,12 @@ class LMDBConversationStore(metaclass=Singleton):
 
                 storage_data = orjson.loads(data)  # type: ignore
                 conv = ConversationInStore.model_validate(storage_data)
-                message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
+                message_hash = _hash_conversation(
+                    conv.client_id,
+                    conv.model,
+                    conv.messages,
+                    conv.gem_id,
+                )
 
                 # Delete main data
                 txn.delete(key.encode("utf-8"))
@@ -376,7 +400,12 @@ class LMDBConversationStore(metaclass=Singleton):
                     if not txn.delete(key_bytes):
                         continue
 
-                    message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
+                    message_hash = _hash_conversation(
+                        conv.client_id,
+                        conv.model,
+                        conv.messages,
+                        conv.gem_id,
+                    )
                     if message_hash and key_str != message_hash:
                         txn.delete(f"{self.HASH_LOOKUP_PREFIX}{message_hash}".encode("utf-8"))
                     removed += 1

@@ -27,6 +27,16 @@ gemini:
   refresh_interval: 540    # Refresh interval in seconds
   verbose: false           # Enable verbose logging for Gemini requests
   max_chars_per_request: 1000000     # Maximum characters Gemini Web accepts per request. Non-pro users might have a lower limit
+  gems: []
+  # Example gem configuration. Uncomment to define reusable presets.
+  # gems:
+  #   - id: "default-gem"
+  #     model: "models/gemini-1.5-pro"
+  #     system_prompt: "You are a careful assistant."
+  #     tool_policy: "allow"
+  #     default_temperature: 0.2
+  #     top_p: 0.8
+  #     max_output_tokens: 1024
 
 storage:
   path: "data/lmdb"        # Database storage path

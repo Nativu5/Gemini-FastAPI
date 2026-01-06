@@ -50,11 +50,43 @@ class GeminiClientSettings(BaseModel):
         return stripped or None
 
 
+class GemDefinition(BaseModel):
+    """Preset configuration applied when a request provides `gem_id`."""
+
+    id: str = Field(..., description="Unique identifier for the gem")
+    model: str = Field(..., description="Model name to use when this gem is selected")
+    system_prompt: Optional[str] = Field(
+        default=None,
+        description="Optional system prompt injected before user messages",
+    )
+    tool_policy: Literal["allow", "disallow", "auto"] = Field(
+        default="allow",
+        description="Tool handling policy for this gem",
+    )
+    default_temperature: float = Field(
+        ..., ge=0.0, le=2.0, description="Default temperature override"
+    )
+    top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Top-p override")
+    max_output_tokens: int = Field(..., ge=1, description="Maximum output tokens override")
+
+    @field_validator("system_prompt", mode="before")
+    @classmethod
+    def _blank_system_prompt_to_none(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
 class GeminiConfig(BaseModel):
     """Gemini API configuration"""
 
     clients: list[GeminiClientSettings] = Field(
         ..., description="List of Gemini client credential pairs"
+    )
+    gems: list[GemDefinition] = Field(
+        default_factory=list,
+        description="Gem presets selectable via request gem_id",
     )
     timeout: int = Field(default=120, ge=1, description="Init timeout")
     auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini cookies")
@@ -67,6 +99,20 @@ class GeminiConfig(BaseModel):
         ge=1,
         description="Maximum characters Gemini Web can accept per request",
     )
+
+    @field_validator("gems")
+    @classmethod
+    def _validate_unique_gems(cls, value: list[GemDefinition]) -> list[GemDefinition]:
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for gem in value:
+            if gem.id in seen:
+                duplicates.add(gem.id)
+            seen.add(gem.id)
+        if duplicates:
+            joined = ", ".join(sorted(duplicates))
+            raise ValueError(f"Duplicate gem id(s) in config: {joined}")
+        return value
 
 
 class CORSConfig(BaseModel):
@@ -148,6 +194,15 @@ class Config(BaseSettings):
         nested_model_default_partial_update=True,
         yaml_file=os.getenv("CONFIG_PATH", CONFIG_PATH),
     )
+
+    def get_gem(self, gem_id: str | None) -> GemDefinition | None:
+        """Return the configured gem preset by id, or None if not found."""
+        if not gem_id:
+            return None
+        for gem in self.gemini.gems:
+            if gem.id == gem_id:
+                return gem
+        return None
 
     @classmethod
     def settings_customise_sources(

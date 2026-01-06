@@ -105,6 +105,7 @@ class ChatCompletionRequest(BaseModel):
     """Chat completion request model"""
 
     model: str
+    gem_id: Optional[str] = None
     messages: List[Message]
     stream: Optional[bool] = False
     user: Optional[str] = None
@@ -153,6 +154,7 @@ class ConversationInStore(BaseModel):
 
     # NOTE: Gemini Web API do not support changing models once a conversation is created.
     model: str = Field(..., description="Model used for the conversation")
+    gem_id: Optional[str] = Field(default=None, description="Gem preset id used for the conversation")
     client_id: str = Field(..., description="Identifier of the Gemini client")
     metadata: list[str | None] = Field(
         ..., description="Metadata for Gemini API to locate the conversation"
@@ -208,6 +210,7 @@ class ResponseCreateRequest(BaseModel):
     """Responses API request payload."""
 
     model: str
+    gem_id: Optional[str] = None
     input: Union[str, List[ResponseInputItem]]
     instructions: Optional[Union[str, List[ResponseInputItem]]] = None
     temperature: Optional[float] = 0.7

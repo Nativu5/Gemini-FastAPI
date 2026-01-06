@@ -137,6 +137,44 @@ docker compose up -d
 
 各项配置说明请参见 [`config/config.yaml`](https://github.com/Nativu5/Gemini-FastAPI/blob/main/config/config.yaml) 文件中的注释。
 
+### Gems（`gem_id`）
+
+你可以在配置文件中定义可复用的预设（gems），并在每次请求里通过 `gem_id` 选择。选中 gem 后会覆盖模型与采样参数，并可额外注入一段系统提示词（system prompt）。
+
+配置示例：
+
+```yaml
+gemini:
+  gems:
+    - id: "default-gem"
+      model: "models/gemini-1.5-pro"
+      system_prompt: "You are a careful assistant."
+      tool_policy: "allow" # allow | disallow | auto
+      default_temperature: 0.2
+      top_p: 0.8
+      max_output_tokens: 1024
+```
+
+请求示例（Chat Completions）：
+
+```json
+{
+  "model": "models/gemini-1.5-pro",
+  "gem_id": "default-gem",
+  "messages": [{"role": "user", "content": "你好"}]
+}
+```
+
+请求示例（Responses API）：
+
+```json
+{
+  "model": "models/gemini-1.5-pro",
+  "gem_id": "default-gem",
+  "input": "你好"
+}
+```
+
 ### 环境变量覆盖
 
 > [!TIP]

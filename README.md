@@ -137,6 +137,44 @@ The server reads a YAML configuration file located at `config/config.yaml`.
 
 For details on each configuration option, refer to the comments in the [`config/config.yaml`](https://github.com/Nativu5/Gemini-FastAPI/blob/main/config/config.yaml) file.
 
+### Gems (`gem_id`)
+
+You can define reusable presets ("gems") in the config file and select them per request via `gem_id`. When a gem is selected, it overrides model + sampling params and can inject an extra system prompt.
+
+Example config:
+
+```yaml
+gemini:
+  gems:
+    - id: "default-gem"
+      model: "models/gemini-1.5-pro"
+      system_prompt: "You are a careful assistant."
+      tool_policy: "allow" # allow | disallow | auto
+      default_temperature: 0.2
+      top_p: 0.8
+      max_output_tokens: 1024
+```
+
+Example request (Chat Completions):
+
+```json
+{
+  "model": "models/gemini-1.5-pro",
+  "gem_id": "default-gem",
+  "messages": [{"role": "user", "content": "Hello"}]
+}
+```
+
+Example request (Responses API):
+
+```json
+{
+  "model": "models/gemini-1.5-pro",
+  "gem_id": "default-gem",
+  "input": "Hello"
+}
+```
+
 ### Environment Variable Overrides
 
 > [!TIP]
