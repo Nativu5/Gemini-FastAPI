@@ -10,6 +10,7 @@ on:
       - "**/*.md"
       - ".github/workflows/ruff.yaml"
       - ".github/workflows/track.yml"
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
