@@ -699,7 +699,11 @@ async def create_chat_completion(
             detail="At least one message is required in the conversation.",
         )
 
+    logger.info(f"[DEBUG_GEM] Received request.model: {request.model}")
+
     gem_id, gem, public_model, actual_model = _resolve_gem_from_model_or_400(request.model)
+    logger.info(f"[DEBUG_GEM] Resolved: gem_id={gem_id}, actual_model={actual_model}")
+
     if gem:
         _apply_gem_overrides(request, gem)
         if gem.system_prompt:
@@ -755,6 +759,7 @@ async def create_chat_completion(
         # Start a new session and concat messages into a single string
         try:
             client = await pool.acquire()
+            logger.info(f"[DEBUG_GEM] Initializing new chat session with model={model}")
             session = client.start_chat(model=model)
             messages_to_send = _prepare_messages_for_model(
                 request.messages, request.tools, request.tool_choice, extra_instructions

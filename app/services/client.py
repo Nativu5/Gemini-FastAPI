@@ -45,6 +45,11 @@ class GeminiClientWrapper(GeminiClient):
         super().__init__(**kwargs)
         self.id = client_id
 
+    def start_chat(self, **kwargs) -> Any:
+        model = kwargs.get("model")
+        logger.info(f"[DEBUG_GEM] GeminiClientWrapper.start_chat intercepted. model={model}, kwargs={kwargs}")
+        return super().start_chat(**kwargs)
+
     async def init(
         self,
         timeout: float = cast(float, _UNSET),
@@ -86,6 +91,7 @@ class GeminiClientWrapper(GeminiClient):
         """
         Process a single message and return model input.
         """
+        logger.debug(f"[DEBUG_GEM] Processing message: role={message.role}, content_type={type(message.content)}")
         files: list[Path | str] = []
         text_fragments: list[str] = []
 
