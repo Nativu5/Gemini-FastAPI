@@ -34,7 +34,7 @@
 #### 使用 uv (推荐)
 
 ```bash
-git clone https://github.com/Nativu5/Gemini-FastAPI.git
+git clone https://github.com/Sagit-chu/Gemini-FastAPI.git
 cd Gemini-FastAPI
 uv sync
 ```
@@ -42,7 +42,7 @@ uv sync
 #### 使用 pip
 
 ```bash
-git clone https://github.com/Nativu5/Gemini-FastAPI.git
+git clone https://github.com/Sagit-chu/Gemini-FastAPI.git
 cd Gemini-FastAPI
 pip install -e .
 ```
@@ -87,7 +87,7 @@ docker run -p 8000:8000 \
   -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid" \
   -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts" \
   -e GEMINI_COOKIE_PATH="/app/cache" \
-  ghcr.io/nativu5/gemini-fastapi
+  ghcr.io/Sagit-chu/gemini-fastapi
 ```
 
 > [!TIP]
@@ -102,7 +102,7 @@ docker run -p 8000:8000 \
 ```yaml
 services:
   gemini-fastapi:
-    image: ghcr.io/nativu5/gemini-fastapi:latest
+    image: ghcr.io/Sagit-chu/gemini-fastapi:latest
     ports:
       - "8000:8000"
     volumes:
@@ -135,7 +135,7 @@ docker compose up -d
 
 服务器读取 `config/config.yaml` 配置文件。
 
-各项配置说明请参见 [`config/config.yaml`](https://github.com/Nativu5/Gemini-FastAPI/blob/main/config/config.yaml) 文件中的注释。
+各项配置说明请参见 [`config/config.yaml`](https://github.com/Sagit-chu/Gemini-FastAPI/blob/main/config/config.yaml) 文件中的注释。
 
 ### Gems（`model=gem:<id>`）
 
@@ -152,7 +152,7 @@ docker compose up -d
 gemini:
   gems:
     - id: "default-gem"
-      model: "models/gemini-1.5-pro"
+      model: "gemini-3.0-pro"
       system_prompt: "You are a careful assistant."
       tool_policy: "allow" # allow | disallow | auto
       default_temperature: 0.2
