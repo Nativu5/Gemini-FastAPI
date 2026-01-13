@@ -14,9 +14,6 @@ from loguru import logger
 
 from ..models import FunctionCall, Message, ToolCall
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
-}
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 XML_WRAP_HINT = (
     "\nYou MUST wrap every tool call response inside a single fenced block exactly like:\n"
@@ -82,7 +79,7 @@ async def save_url_to_tempfile(url: str, tempdir: Path | None = None) -> Path:
         if not suffix:
             suffix = f".{mime_type.split('/')[1]}"
     else:
-        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             data = resp.content
