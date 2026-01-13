@@ -4,7 +4,6 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-
 [ [English](README.md) | 中文 ]
 
 将 Gemini 网页端模型封装为兼容 OpenAI API 的 API Server。基于 [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API) 实现。
@@ -50,6 +49,7 @@ pip install -e .
 ### 配置
 
 编辑 `config/config.yaml` 并提供至少一组凭证：
+
 ```yaml
 gemini:
   clients:
@@ -118,7 +118,7 @@ services:
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID=${SECURE_1PSID}
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS=${SECURE_1PSIDTS}
       - GEMINI_COOKIE_PATH=/app/cache # must match the cache volume mount above
-    restart: on-failure:3             # Avoid retrying too many times
+    restart: on-failure:3 # Avoid retrying too many times
 ```
 
 然后运行：
@@ -185,6 +185,51 @@ export CONFIG_STORAGE__MAX_SIZE=268435456  # 256 MB
 ### 代理设置
 
 每个客户端条目可以配置不同的代理，从而规避速率限制。省略 `proxy` 字段或将其设置为 `null` 或空字符串以保持直连。
+
+### 自定义模型
+
+你可以在 `config/config.yaml` 中或通过环境变量定义自定义模型。
+
+#### YAML 配置
+
+```yaml
+gemini:
+  model_strategy: "append" # "append" (默认 + 自定义) 或 "overwrite" (仅限自定义)
+  models:
+    - model_name: "gemini-3.0-pro"
+      model_header:
+        x-goog-ext-525001261-jspb: '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4],null,null,1]'
+```
+
+#### 环境变量
+
+你可以通过 `CONFIG_GEMINI__MODELS` 以 JSON 字符串或列表结构的形式提供模型。
+
+##### Bash
+
+```bash
+export CONFIG_GEMINI__MODEL_STRATEGY="overwrite"
+export CONFIG_GEMINI__MODELS='[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]'
+```
+
+##### Docker Compose
+
+```yaml
+services:
+  gemini-fastapi:
+    environment:
+      - CONFIG_GEMINI__MODEL_STRATEGY=overwrite
+      - CONFIG_GEMINI__MODELS=[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]
+```
+
+##### Docker CLI
+
+```bash
+docker run -d \
+  -e CONFIG_GEMINI__MODEL_STRATEGY="overwrite" \
+  -e CONFIG_GEMINI__MODELS='[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]' \
+  ghcr.io/nativu5/gemini-fastapi
+```
 
 ## 鸣谢
 

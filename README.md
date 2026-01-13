@@ -118,7 +118,7 @@ services:
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID=${SECURE_1PSID}
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS=${SECURE_1PSIDTS}
       - GEMINI_COOKIE_PATH=/app/cache # must match the cache volume mount above
-    restart: on-failure:3             # Avoid retrying too many times
+    restart: on-failure:3 # Avoid retrying too many times
 ```
 
 Then run:
@@ -186,6 +186,51 @@ To use Gemini-FastAPI, you need to extract your Gemini session cookies:
 ### Proxy Settings
 
 Each client entry can be configured with a different proxy to work around rate limits. Omit the `proxy` field or set it to `null` or an empty string to keep a direct connection.
+
+### Custom Models
+
+You can define custom models in `config/config.yaml` or via environment variables.
+
+#### YAML Configuration
+
+```yaml
+gemini:
+  model_strategy: "append" # "append" (default + custom) or "overwrite" (custom only)
+  models:
+    - model_name: "gemini-3.0-pro"
+      model_header:
+        x-goog-ext-525001261-jspb: '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4],null,null,1]'
+```
+
+#### Environment Variables
+
+You can supply models as a JSON string or list structure via `CONFIG_GEMINI__MODELS`.
+
+##### Bash
+
+```bash
+export CONFIG_GEMINI__MODEL_STRATEGY="overwrite"
+export CONFIG_GEMINI__MODELS='[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]'
+```
+
+##### Docker Compose
+
+```yaml
+services:
+  gemini-fastapi:
+    environment:
+      - CONFIG_GEMINI__MODEL_STRATEGY=overwrite
+      - CONFIG_GEMINI__MODELS=[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]
+```
+
+##### Docker CLI
+
+```bash
+docker run -d \
+  -e CONFIG_GEMINI__MODEL_STRATEGY="overwrite" \
+  -e CONFIG_GEMINI__MODELS='[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]' \
+  ghcr.io/nativu5/gemini-fastapi
+```
 
 ## Acknowledgments
 
