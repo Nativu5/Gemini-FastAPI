@@ -735,7 +735,14 @@ async def create_chat_completion(
         gem_id=gem_id,
     )
 
+    # Keep track of whether we are using a reused session for fallback logic
+    is_reused_session = False
+    model_input = ""
+    files = []
+
     if session:
+        logger.info(f"Reusing existing session with client: {client.id}")
+        is_reused_session = True
         messages_to_send = _prepare_messages_for_model(
             remaining_messages, request.tools, request.tool_choice, extra_instructions
         )
@@ -759,7 +766,7 @@ async def create_chat_completion(
         # Start a new session and concat messages into a single string
         try:
             client = await pool.acquire()
-            logger.info(f"[DEBUG_GEM] Initializing new chat session with model={model}")
+            logger.info(f"[DEBUG_GEM] Initializing new chat session with model={model} using client: {client.id}")
             session = client.start_chat(model=model)
             messages_to_send = _prepare_messages_for_model(
                 request.messages, request.tools, request.tool_choice, extra_instructions
@@ -776,7 +783,8 @@ async def create_chat_completion(
             raise
         logger.debug("New session started.")
 
-    # Generate response
+    # Generate response with Fallback/Retry logic
+    response = None
     try:
         assert session and client, "Session and client not available"
         client_id = client.id
@@ -784,21 +792,90 @@ async def create_chat_completion(
             f"Client ID: {client_id}, Input length: {len(model_input)}, files count: {len(files)}"
         )
         response = await _send_with_split(session, model_input, files=files)
-    except APIError as exc:
-        client_id = client.id if client else "unknown"
-        logger.warning(f"Gemini API returned invalid response for client {client_id}: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Gemini temporarily returned an invalid response. Please retry.",
-        ) from exc
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception(f"Unexpected error generating content from Gemini API: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Gemini returned an unexpected error.",
-        ) from e
+    except Exception as first_error:
+        # If the first attempt fails, we try to fallback to other clients
+        failed_client_id = client.id if client else "unknown"
+        logger.warning(f"First attempt failed with client {failed_client_id}: {first_error}")
+
+        # Prepare fallback input (full conversation) if we haven't already
+        fallback_model_input = model_input
+        fallback_files = files
+
+        if is_reused_session:
+            logger.info("Regenerating full conversation input for fallback...")
+            try:
+                full_messages_to_send = _prepare_messages_for_model(
+                    request.messages, request.tools, request.tool_choice, extra_instructions
+                )
+                fallback_model_input, fallback_files = await GeminiClientWrapper.process_conversation(
+                    full_messages_to_send, tmp_dir
+                )
+            except Exception as prep_e:
+                logger.error(f"Failed to prepare fallback input: {prep_e}")
+                if isinstance(first_error, APIError):
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Gemini temporarily returned an invalid response. Please retry.",
+                    ) from first_error
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Gemini returned an unexpected error.",
+                ) from first_error
+
+        # Retry loop
+        failed_clients = {failed_client_id}
+        retry_success = False
+        last_error = first_error
+
+        # Try up to N times (number of clients)
+        max_retries = len(pool.clients)
+
+        for i in range(max_retries):
+            try:
+                # Acquire a new client
+                retry_client = await pool.acquire()
+
+                # If we have multiple clients, skip the one that just failed if possible
+                if len(pool.clients) > 1 and retry_client.id in failed_clients:
+                    # If we cycled back to a failed client, we might want to skip.
+                    # But since acquire() is round-robin, we should just try the next one.
+                    pass
+
+                logger.info(
+                    f"Fallback attempt {i+1}/{max_retries}: Switching to client {retry_client.id}"
+                )
+
+                retry_session = retry_client.start_chat(model=model)
+                response = await _send_with_split(
+                    retry_session, fallback_model_input, files=fallback_files
+                )
+
+                # Success! Update references
+                client = retry_client
+                session = retry_session
+                retry_success = True
+                logger.info(f"Fallback successful with client {client.id}")
+                break
+
+            except Exception as retry_exc:
+                logger.warning(
+                    f"Fallback attempt failed with client {retry_client.id if 'retry_client' in locals() else 'unknown'}: {retry_exc}"
+                )
+                if "retry_client" in locals() and retry_client:
+                    failed_clients.add(retry_client.id)
+                last_error = retry_exc
+
+        if not retry_success:
+            logger.error("All fallback attempts failed.")
+            if isinstance(last_error, APIError):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Gemini temporarily returned an invalid response. Please retry.",
+                ) from last_error
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Gemini returned an unexpected error.",
+            ) from last_error
 
     # Format the response from API
     try:
@@ -1000,6 +1077,7 @@ async def create_response(
 
     reuse_session = session is not None
     if reuse_session:
+        logger.info(f"Reusing existing session with client: {client.id}")
         messages_to_send = _prepare_messages_for_model(
             remaining_messages,
             tools=None,
@@ -1019,6 +1097,7 @@ async def create_response(
     else:
         try:
             client = await pool.acquire()
+            logger.info(f"Initializing new session for responses with client: {client.id}")
             session = client.start_chat(model=model)
             payload_messages = messages
             model_input, files = await _build_payload(payload_messages, _reuse_session=False)
@@ -1031,6 +1110,7 @@ async def create_response(
             raise
         logger.debug("New session started for /v1/responses request.")
 
+    model_output = None
     try:
         assert session and client, "Session and client not available"
         client_id = client.id
@@ -1038,21 +1118,104 @@ async def create_response(
             f"Client ID: {client_id}, Input length: {len(model_input)}, files count: {len(files)}"
         )
         model_output = await _send_with_split(session, model_input, files=files)
-    except APIError as exc:
-        client_id = client.id if client else "unknown"
-        logger.warning(f"Gemini API returned invalid response for client {client_id}: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Gemini temporarily returned an invalid response. Please retry.",
-        ) from exc
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception(f"Unexpected error generating content from Gemini API for responses: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Gemini returned an unexpected error.",
-        ) from e
+    except Exception as first_error:
+        # If the first attempt fails, we try to fallback to other clients
+        failed_client_id = client.id if client else "unknown"
+        logger.warning(f"First attempt failed with client {failed_client_id}: {first_error}")
+
+        # Prepare fallback input (full conversation) if we haven't already
+        fallback_model_input = model_input
+        fallback_files = files
+
+        if reuse_session:
+            logger.info("Regenerating full conversation input for fallback...")
+            try:
+                # Reconstruct full messages
+                # Note: 'messages' variable in this scope holds the full conversation
+                # because we derived it earlier via _prepare_messages_for_model
+                # but we need to re-run _prepare_messages_for_model to get a fresh start if needed.
+                # Actually, in create_response, 'messages' (from line 1045) is already the prepared list of Messages.
+                # But wait, 'messages' was prepared for the *initial* session.
+                # If we are reusing a session, 'messages_to_send' (line 1079) was just the delta.
+                # So if we fallback, we need the FULL conversation prepared.
+
+                # We need to rebuild the full message list exactly as we did before pool acquisition.
+                # The variables 'conversation_messages', 'standard_tools', 'model_tool_choice', etc. are available.
+
+                full_messages_to_send = _prepare_messages_for_model(
+                    conversation_messages,
+                    tools=standard_tools or None,
+                    tool_choice=model_tool_choice,
+                    extra_instructions=extra_instructions or None,
+                )
+
+                fallback_model_input, fallback_files = await GeminiClientWrapper.process_conversation(
+                    full_messages_to_send, tmp_dir
+                )
+            except Exception as prep_e:
+                logger.error(f"Failed to prepare fallback input: {prep_e}")
+                if isinstance(first_error, APIError):
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Gemini temporarily returned an invalid response. Please retry.",
+                    ) from first_error
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Gemini returned an unexpected error.",
+                ) from first_error
+
+        # Retry loop
+        failed_clients = {failed_client_id}
+        retry_success = False
+        last_error = first_error
+
+        # Try up to N times (number of clients)
+        max_retries = len(pool.clients)
+
+        for i in range(max_retries):
+            try:
+                # Acquire a new client
+                retry_client = await pool.acquire()
+
+                # If we have multiple clients, skip the one that just failed if possible
+                if len(pool.clients) > 1 and retry_client.id in failed_clients:
+                    pass
+
+                logger.info(
+                    f"Fallback attempt {i+1}/{max_retries}: Switching to client {retry_client.id}"
+                )
+
+                retry_session = retry_client.start_chat(model=model)
+                model_output = await _send_with_split(
+                    retry_session, fallback_model_input, files=fallback_files
+                )
+
+                # Success! Update references
+                client = retry_client
+                session = retry_session
+                retry_success = True
+                logger.info(f"Fallback successful with client {client.id}")
+                break
+
+            except Exception as retry_exc:
+                logger.warning(
+                    f"Fallback attempt failed with client {retry_client.id if 'retry_client' in locals() else 'unknown'}: {retry_exc}"
+                )
+                if "retry_client" in locals() and retry_client:
+                    failed_clients.add(retry_client.id)
+                last_error = retry_exc
+
+        if not retry_success:
+            logger.error("All fallback attempts failed.")
+            if isinstance(last_error, APIError):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Gemini temporarily returned an invalid response. Please retry.",
+                ) from last_error
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Gemini returned an unexpected error.",
+            ) from last_error
 
     try:
         text_with_think = GeminiClientWrapper.extract_output(model_output, include_thoughts=True)

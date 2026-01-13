@@ -16,7 +16,7 @@ Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by [Hanao
 - **🔍 Google Search Included**: Get up-to-date answers using web-based Gemini's search capabilities.
 - **💾 Conversation Persistence**: LMDB-based storage supporting multi-turn conversations.
 - **🖼️ Multi-modal Support**: Support for handling text, images, and file uploads.
-- **⚖️ Multi-account Load Balancing**: Distribute requests across multiple accounts with per-account proxy settings.
+- **⚖️ Multi-account Load Balancing & Fallback**: Distribute requests across multiple accounts. Automatically switches to a healthy account if the current one fails (e.g. due to rate limits or expired cookies), ensuring high availability.
 
 ## Quick Start
 
