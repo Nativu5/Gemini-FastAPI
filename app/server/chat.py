@@ -709,6 +709,8 @@ async def create_chat_completion(
         if gem.system_prompt:
             _inject_gem_system_prompt(request.messages, gem.system_prompt)
 
+    native_gem_id = gem_id if (gem and gem.is_native) else None
+
     try:
         model = Model.from_name(actual_model)
     except ValueError as exc:
@@ -733,6 +735,7 @@ async def create_chat_completion(
         model,
         request.messages,
         gem_id=gem_id,
+        native_gem_id=native_gem_id,
     )
 
     # Keep track of whether we are using a reused session for fallback logic
@@ -767,7 +770,7 @@ async def create_chat_completion(
         try:
             client = await pool.acquire()
             logger.info(f"[DEBUG_GEM] Initializing new chat session with model={model} using client: {client.id}")
-            session = client.start_chat(model=model)
+            session = client.start_chat(model=model, gem=native_gem_id)
             messages_to_send = _prepare_messages_for_model(
                 request.messages, request.tools, request.tool_choice, extra_instructions
             )
@@ -845,7 +848,7 @@ async def create_chat_completion(
                     f"Fallback attempt {i+1}/{max_retries}: Switching to client {retry_client.id}"
                 )
 
-                retry_session = retry_client.start_chat(model=model)
+                retry_session = retry_client.start_chat(model=model, gem=native_gem_id)
                 response = await _send_with_split(
                     retry_session, fallback_model_input, files=fallback_files
                 )
@@ -982,6 +985,8 @@ async def create_response(
     if gem:
         _apply_gem_overrides(request_data, gem)
 
+    native_gem_id = gem_id if (gem and gem.is_native) else None
+
     structured_requirement = _build_structured_requirement(request_data.response_format)
     if structured_requirement and request_data.stream:
         logger.debug(
@@ -1064,6 +1069,7 @@ async def create_response(
         model,
         messages,
         gem_id=gem_id,
+        native_gem_id=native_gem_id,
     )
 
     async def _build_payload(
@@ -1098,7 +1104,7 @@ async def create_response(
         try:
             client = await pool.acquire()
             logger.info(f"Initializing new session for responses with client: {client.id}")
-            session = client.start_chat(model=model)
+            session = client.start_chat(model=model, gem=native_gem_id)
             payload_messages = messages
             model_input, files = await _build_payload(payload_messages, _reuse_session=False)
         except ValueError as e:
@@ -1185,7 +1191,7 @@ async def create_response(
                     f"Fallback attempt {i+1}/{max_retries}: Switching to client {retry_client.id}"
                 )
 
-                retry_session = retry_client.start_chat(model=model)
+                retry_session = retry_client.start_chat(model=model, gem=native_gem_id)
                 model_output = await _send_with_split(
                     retry_session, fallback_model_input, files=fallback_files
                 )
@@ -1432,6 +1438,7 @@ async def _find_reusable_session(
     model: Model,
     messages: list[Message],
     gem_id: str | None = None,
+    native_gem_id: str | None = None,
 ) -> tuple[ChatSession | None, GeminiClientWrapper | None, list[Message]]:
     """Find an existing chat session that matches the *longest* prefix of
     ``messages`` **whose last element is an assistant/system reply**.
@@ -1463,7 +1470,7 @@ async def _find_reusable_session(
             try:
                 if conv := db.find(model.model_name, search_history, gem_id=gem_id):
                     client = await pool.acquire(conv.client_id)
-                    session = client.start_chat(metadata=conv.metadata, model=model)
+                    session = client.start_chat(metadata=conv.metadata, model=model, gem=native_gem_id)
                     remain = messages[search_end:]
                     return session, client, remain
             except Exception as e:

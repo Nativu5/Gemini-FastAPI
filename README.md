@@ -158,6 +158,13 @@ gemini:
       default_temperature: 0.2
       top_p: 0.8
       max_output_tokens: 1024
+
+    # Native Gem (Use Gems created on gemini.google.com)
+    - id: "my-native-gem"
+      model: "gemini-2.0-flash"
+      is_native: true  # This flag passes the 'id' to Google's servers
+      default_temperature: 1.0 # Parameters can still be overridden locally
+      max_output_tokens: 8192
 ```
 
 Example request (Chat Completions):

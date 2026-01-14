@@ -158,6 +158,13 @@ gemini:
       default_temperature: 0.2
       top_p: 0.8
       max_output_tokens: 1024
+
+    # 原生 Gem (使用在 gemini.google.com 上创建的 Gems)
+    - id: "my-native-gem"
+      model: "gemini-2.0-flash"
+      is_native: true  # 此标志会将 'id' 传递给 Google 服务器
+      default_temperature: 1.0 # 仍然可以在本地覆盖参数
+      max_output_tokens: 8192
 ```
 
 请求示例（Chat Completions）：
