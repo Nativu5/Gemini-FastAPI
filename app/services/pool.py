@@ -45,6 +45,8 @@ class GeminiClientPool(metaclass=Singleton):
                         verbose=g_config.gemini.verbose,
                         refresh_interval=g_config.gemini.refresh_interval,
                     )
+                    if client.running():
+                        await client.sync_gems()
                 except Exception:
                     logger.exception(f"Failed to initialize client {client.id}")
 
@@ -97,6 +99,8 @@ class GeminiClientPool(metaclass=Singleton):
                     verbose=g_config.gemini.verbose,
                     refresh_interval=g_config.gemini.refresh_interval,
                 )
+                if client.running():
+                    await client.sync_gems()
                 logger.info(f"Restarted Gemini client {client.id} after it stopped.")
                 return True
             except Exception:

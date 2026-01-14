@@ -145,25 +145,19 @@ docker compose up -d
 
 - 服务端会使用 gem 定义中的 `model` 作为实际调用的 Gemini 模型名。
 - 对外返回的 OpenAI 兼容响应会尽量回显客户端传入的 `model`（即 `gem:<id>`），以保证客户端一致性。
+- **自动同步**：服务启动时会自动检查这些 Gem 是否存在于你的 Google 账号中。如果不存在，会自动根据提供的 `id`（作为标题）和 `system_prompt` 进行创建。
 
 配置示例：
 
 ```yaml
 gemini:
   gems:
-    - id: "default-gem"
-      model: "gemini-3.0-pro"
-      system_prompt: "You are a careful assistant."
+    - id: "coding-helper"
+      model: "gemini-2.0-flash"
+      system_prompt: "You are an expert software engineer."
       tool_policy: "allow" # allow | disallow | auto
       default_temperature: 0.2
       top_p: 0.8
-      max_output_tokens: 1024
-
-    # 原生 Gem (使用在 gemini.google.com 上创建的 Gems)
-    - id: "my-native-gem"
-      model: "gemini-2.0-flash"
-      is_native: true  # 此标志会将 'id' 传递给 Google 服务器
-      default_temperature: 1.0 # 仍然可以在本地覆盖参数
       max_output_tokens: 8192
 ```
 

@@ -55,10 +55,6 @@ class GemDefinition(BaseModel):
 
     id: str = Field(..., description="Unique identifier for the gem")
     model: str = Field(..., description="Model name to use when this gem is selected")
-    is_native: bool = Field(
-        default=False,
-        description="If True, this gem ID is passed upstream to Google's servers. If False, it is a local configuration preset.",
-    )
     system_prompt: Optional[str] = Field(
         default=None,
         description="Optional system prompt injected before user messages",

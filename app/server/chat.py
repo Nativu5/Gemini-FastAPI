@@ -108,59 +108,6 @@ def _resolve_gem_from_model_or_400(
     return gem_id, gem, public_model, gem.model
 
 
-def _apply_gem_overrides(
-    request_obj: Any,
-    gem: GemDefinition,
-) -> None:
-    """Apply gem overrides onto a request object in-place.
-
-    Notes:
-        - This helper intentionally does NOT mutate `request_obj.model`.
-        - Upstream model selection is handled via `model=gem:<id>` parsing.
-    """
-
-    if hasattr(request_obj, "temperature"):
-        request_obj.temperature = gem.default_temperature
-
-    if gem.top_p is not None and hasattr(request_obj, "top_p"):
-        request_obj.top_p = gem.top_p
-
-    # ChatCompletions uses `max_tokens`, Responses uses `max_output_tokens`.
-    if hasattr(request_obj, "max_tokens"):
-        request_obj.max_tokens = gem.max_output_tokens
-    if hasattr(request_obj, "max_output_tokens"):
-        request_obj.max_output_tokens = gem.max_output_tokens
-
-    if gem.tool_policy == "disallow":
-        if hasattr(request_obj, "tools"):
-            request_obj.tools = None
-        if hasattr(request_obj, "tool_choice"):
-            request_obj.tool_choice = "none"
-    elif gem.tool_policy == "auto":
-        # Placeholder for future expansion.
-        pass
-    # Default behavior is `allow` (no changes).
-
-
-def _inject_gem_system_prompt(messages: list[Message], system_prompt: str) -> None:
-    """Inject a gem system prompt before model preparation.
-
-    The prompt is inserted as the first system message (or prepended to an
-    existing first system message) so it applies to the whole conversation.
-    """
-
-    if not system_prompt:
-        return
-
-    if messages and messages[0].role == "system" and isinstance(messages[0].content, str):
-        existing = messages[0].content or ""
-        separator = "\n\n" if existing else ""
-        messages[0].content = f"{system_prompt}{separator}{existing}"
-        return
-
-    messages.insert(0, Message(role="system", content=system_prompt))
-
-
 def _build_structured_requirement(
     response_format: dict[str, Any] | None,
 ) -> StructuredOutputRequirement | None:
@@ -704,12 +651,7 @@ async def create_chat_completion(
     gem_id, gem, public_model, actual_model = _resolve_gem_from_model_or_400(request.model)
     logger.info(f"[DEBUG_GEM] Resolved: gem_id={gem_id}, actual_model={actual_model}")
 
-    if gem:
-        _apply_gem_overrides(request, gem)
-        if gem.system_prompt:
-            _inject_gem_system_prompt(request.messages, gem.system_prompt)
-
-    native_gem_id = gem_id if (gem and gem.is_native) else None
+    native_gem_id = gem_id if gem else None
 
     try:
         model = Model.from_name(actual_model)
@@ -982,10 +924,8 @@ async def create_response(
     base_messages, normalized_input = _response_items_to_messages(request_data.input)
 
     gem_id, gem, public_model, actual_model = _resolve_gem_from_model_or_400(request_data.model)
-    if gem:
-        _apply_gem_overrides(request_data, gem)
 
-    native_gem_id = gem_id if (gem and gem.is_native) else None
+    native_gem_id = gem_id if gem else None
 
     structured_requirement = _build_structured_requirement(request_data.response_format)
     if structured_requirement and request_data.stream:
@@ -1029,8 +969,6 @@ async def create_response(
         logger.debug("Image generation support enabled for /v1/responses request.")
 
     preface_messages = _instructions_to_messages(request_data.instructions)
-    if gem and gem.system_prompt:
-        _inject_gem_system_prompt(preface_messages, gem.system_prompt)
 
     conversation_messages = base_messages
     if preface_messages:

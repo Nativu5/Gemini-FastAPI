@@ -145,25 +145,19 @@ When a gem is selected:
 
 - The server uses the gem definition's `model` as the actual Gemini model name for the upstream call.
 - The OpenAI-compatible response tries to echo back the client-provided `model` (i.e. `gem:<id>`) to keep client-side consistency.
+- **Auto-Sync**: On startup, the server checks if these gems exist on your Google account. If missing, it automatically creates them using the provided `id` (as title) and `system_prompt`.
 
 Example config:
 
 ```yaml
 gemini:
   gems:
-    - id: "default-gem"
-      model: "gemini-3.0-pro"
-      system_prompt: "You are a careful assistant."
+    - id: "coding-helper"
+      model: "gemini-2.0-flash"
+      system_prompt: "You are an expert software engineer."
       tool_policy: "allow" # allow | disallow | auto
       default_temperature: 0.2
       top_p: 0.8
-      max_output_tokens: 1024
-
-    # Native Gem (Use Gems created on gemini.google.com)
-    - id: "my-native-gem"
-      model: "gemini-2.0-flash"
-      is_native: true  # This flag passes the 'id' to Google's servers
-      default_temperature: 1.0 # Parameters can still be overridden locally
       max_output_tokens: 8192
 ```
 

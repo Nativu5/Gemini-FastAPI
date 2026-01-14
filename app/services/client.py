@@ -81,6 +81,45 @@ class GeminiClientWrapper(GeminiClient):
             logger.exception(f"Failed to initialize GeminiClient {self.id}")
             raise
 
+    async def sync_gems(self) -> None:
+        """Ensure configured gems exist on the server."""
+        from ..utils import g_config
+
+        if not g_config.gemini.gems:
+            return
+
+        try:
+            gem_jar = await self.fetch_gems()
+            # GemJar behaves like a dict-like object where keys are ID and values are Gem objects
+            # Or it might be a list. Let's assume we can iterate it.
+            # To be safe against unknown structure, we'll try to inspect one if possible or just rely on 'title' attribute.
+            
+            # Since we can't easily debug, let's look at the probe output again.
+            # It has 'gems' attribute on client too. Maybe that's cached?
+            
+            existing_titles = set()
+            if gem_jar:
+                # Assuming gem_jar is iterable yielding Gem objects
+                for g in gem_jar:
+                    # Try to find the name/title attribute
+                    title = getattr(g, "title", getattr(g, "name", None))
+                    if title:
+                        existing_titles.add(title)
+
+            for gem_def in g_config.gemini.gems:
+                if gem_def.id not in existing_titles:
+                    logger.info(f"Creating missing gem for client {self.id}: {gem_def.id}")
+                    await self.create_gem(
+                        name=gem_def.id,
+                        prompt=gem_def.system_prompt or "",
+                        description=f"Auto-generated gem for {gem_def.id}",
+                    )
+                else:
+                    logger.debug(f"Gem already exists: {gem_def.id}")
+
+        except Exception as e:
+            logger.error(f"Failed to sync gems for client {self.id}: {e}")
+
     def running(self) -> bool:
         return self._running
 
