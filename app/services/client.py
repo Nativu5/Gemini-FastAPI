@@ -44,9 +44,19 @@ class GeminiClientWrapper(GeminiClient):
     def __init__(self, client_id: str, **kwargs):
         super().__init__(**kwargs)
         self.id = client_id
+        self.gem_id_mapping: dict[str, str] = {}  # config_id -> real_gem_id
 
     def start_chat(self, **kwargs) -> Any:
         model = kwargs.get("model")
+
+        # Intercept 'gem' argument and map it to real ID
+        if "gem" in kwargs:
+            gem_config_id = kwargs["gem"]
+            if gem_config_id in self.gem_id_mapping:
+                real_id = self.gem_id_mapping[gem_config_id]
+                logger.debug(f"Mapping gem config ID '{gem_config_id}' to real ID '{real_id}'")
+                kwargs["gem"] = real_id
+
         logger.info(f"[DEBUG_GEM] GeminiClientWrapper.start_chat intercepted. model={model}, kwargs={kwargs}")
         return super().start_chat(**kwargs)
 
@@ -90,32 +100,35 @@ class GeminiClientWrapper(GeminiClient):
 
         try:
             gem_jar = await self.fetch_gems()
-            # GemJar behaves like a dict-like object where keys are ID and values are Gem objects
-            # Or it might be a list. Let's assume we can iterate it.
-            # To be safe against unknown structure, we'll try to inspect one if possible or just rely on 'title' attribute.
-            
-            # Since we can't easily debug, let's look at the probe output again.
-            # It has 'gems' attribute on client too. Maybe that's cached?
-            
-            existing_titles = set()
-            if gem_jar:
-                # Assuming gem_jar is iterable yielding Gem objects
-                for g in gem_jar:
-                    # Try to find the name/title attribute
-                    title = getattr(g, "title", getattr(g, "name", None))
-                    if title:
-                        existing_titles.add(title)
 
+            # Map existing gems: Name (Title) -> Real ID
+            existing_gems_map = {}
+            if gem_jar:
+                for g in gem_jar:
+                    # Gem object has 'name' (title) and 'id' (real id)
+                    name = getattr(g, "name", None)
+                    real_id = getattr(g, "id", None)
+                    if name and real_id:
+                        existing_gems_map[name] = real_id
+
+            # Update internal mapping
             for gem_def in g_config.gemini.gems:
-                if gem_def.id not in existing_titles:
+                if gem_def.id in existing_gems_map:
+                    real_id = existing_gems_map[gem_def.id]
+                    self.gem_id_mapping[gem_def.id] = real_id
+                    logger.debug(f"Gem '{gem_def.id}' found with ID: {real_id}")
+                else:
                     logger.info(f"Creating missing gem for client {self.id}: {gem_def.id}")
-                    await self.create_gem(
+                    new_gem = await self.create_gem(
                         name=gem_def.id,
                         prompt=gem_def.system_prompt or "",
                         description=f"Auto-generated gem for {gem_def.id}",
                     )
-                else:
-                    logger.debug(f"Gem already exists: {gem_def.id}")
+                    if new_gem and hasattr(new_gem, "id"):
+                        self.gem_id_mapping[gem_def.id] = new_gem.id
+                        logger.info(f"Created gem '{gem_def.id}' with new ID: {new_gem.id}")
+                    else:
+                        logger.warning(f"Created gem '{gem_def.id}' but could not retrieve its ID.")
 
         except Exception as e:
             logger.error(f"Failed to sync gems for client {self.id}: {e}")
