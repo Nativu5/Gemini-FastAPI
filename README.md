@@ -204,32 +204,11 @@ gemini:
 
 #### Environment Variables
 
-You can supply models as a JSON string or list structure via `CONFIG_GEMINI__MODELS`.
-
-##### Bash
+You can supply models as a JSON string via `CONFIG_GEMINI__MODELS`. This provides a flexible way to override settings via the shell or in automated environments without modifying the configuration file.
 
 ```bash
 export CONFIG_GEMINI__MODEL_STRATEGY="overwrite"
 export CONFIG_GEMINI__MODELS='[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]'
-```
-
-##### Docker Compose
-
-```yaml
-services:
-  gemini-fastapi:
-    environment:
-      - CONFIG_GEMINI__MODEL_STRATEGY=overwrite
-      - CONFIG_GEMINI__MODELS=[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]
-```
-
-##### Docker CLI
-
-```bash
-docker run -d \
-  -e CONFIG_GEMINI__MODEL_STRATEGY="overwrite" \
-  -e CONFIG_GEMINI__MODELS='[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]' \
-  ghcr.io/nativu5/gemini-fastapi
 ```
 
 ## Acknowledgments

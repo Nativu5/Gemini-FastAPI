@@ -924,7 +924,7 @@ async def create_response(
 
         image_call_items.append(
             ResponseImageGenerationCall(
-                id=filename.split(".")[0],
+                id=filename.rsplit(".", 1)[0],
                 status="completed",
                 result=image_base64,
                 output_format=img_format,
@@ -1350,7 +1350,9 @@ async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | Non
         try:
             saved_path = await image.save(path=str(temp_dir), full_size=True)
         except Exception as e:
-            logger.warning(f"Failed to download full-size image, retrying with default size: {e}")
+            logger.warning(
+                f"Failed to download full-size GeneratedImage, retrying with default size: {e}"
+            )
             saved_path = await image.save(path=str(temp_dir), full_size=False)
     else:
         saved_path = await image.save(path=str(temp_dir))

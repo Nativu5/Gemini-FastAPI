@@ -109,8 +109,21 @@ class GeminiConfig(BaseModel):
     @field_validator("models")
     @classmethod
     def _filter_valid_models(cls, v: list[GeminiModelConfig]) -> list[GeminiModelConfig]:
-        """Filter out models that don't have a name set (placeholders)."""
-        return [model for model in v if model.model_name]
+        """Filter out models that don't have all required fields set."""
+        valid_models = []
+        for model in v:
+            if model.model_name and model.model_header:
+                valid_models.append(model)
+            else:
+                missing = []
+                if not model.model_name:
+                    missing.append("model_name")
+                if not model.model_header:
+                    missing.append("model_header")
+                logger.warning(
+                    f"Discarding custom model due to missing {', '.join(missing)}: {model}"
+                )
+        return valid_models
 
 
 class CORSConfig(BaseModel):
@@ -251,7 +264,10 @@ def _merge_clients_with_env(
             new_client = GeminiClientSettings(**overrides)
             result_clients.append(new_client)
         else:
-            raise IndexError(f"Client index {idx} in env is out of range.")
+            raise IndexError(
+                f"Client index {idx} in env is out of range (current count: {len(result_clients)}). "
+                "Client indices must be contiguous starting from 0."
+            )
     return result_clients if result_clients else base_clients
 
 
@@ -309,7 +325,10 @@ def _merge_models_with_env(
             new_model = GeminiModelConfig(**overrides)
             result_models.append(new_model)
         else:
-            raise IndexError(f"Model index {idx} in env is out of range (must be contiguous).")
+            raise IndexError(
+                f"Model index {idx} in env is out of range (current count: {len(result_models)}). "
+                "Model indices must be contiguous starting from 0."
+            )
     return result_models
 
 

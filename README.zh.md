@@ -203,32 +203,11 @@ gemini:
 
 #### 环境变量
 
-你可以通过 `CONFIG_GEMINI__MODELS` 以 JSON 字符串或列表结构的形式提供模型。
-
-##### Bash
+你可以通过 `CONFIG_GEMINI__MODELS` 以 JSON 字符串的形式提供模型。这为通过 shell 或在自动化环境中覆盖设置提供了一种灵活的方式，无需修改配置文件。
 
 ```bash
 export CONFIG_GEMINI__MODEL_STRATEGY="overwrite"
 export CONFIG_GEMINI__MODELS='[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]'
-```
-
-##### Docker Compose
-
-```yaml
-services:
-  gemini-fastapi:
-    environment:
-      - CONFIG_GEMINI__MODEL_STRATEGY=overwrite
-      - CONFIG_GEMINI__MODELS=[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]
-```
-
-##### Docker CLI
-
-```bash
-docker run -d \
-  -e CONFIG_GEMINI__MODEL_STRATEGY="overwrite" \
-  -e CONFIG_GEMINI__MODELS='[{"model_name": "gemini-3.0-pro", "model_header": {"x-goog-ext-525001261-jspb": "[1,null,null,null,\"9d8ca3786ebdfbea\",null,null,0,[4],null,null,1]"}}]' \
-  ghcr.io/nativu5/gemini-fastapi
 ```
 
 ## 鸣谢
