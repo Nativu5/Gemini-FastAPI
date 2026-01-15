@@ -203,7 +203,7 @@ gemini:
 
 #### 环境变量
 
-你可以通过 `CONFIG_GEMINI__MODELS` 以 JSON 字符串的形式提供模型。这为通过 shell 或在自动化环境中覆盖设置提供了一种灵活的方式，无需修改配置文件。
+你可以通过 `CONFIG_GEMINI__MODELS` 以 JSON 字符串或列表结构的形式提供模型。这为通过 shell 或在自动化环境（例如 Docker）中覆盖设置提供了一种灵活的方式，而无需修改配置文件。
 
 ```bash
 export CONFIG_GEMINI__MODEL_STRATEGY="overwrite"

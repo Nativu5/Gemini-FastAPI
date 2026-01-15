@@ -204,7 +204,7 @@ gemini:
 
 #### Environment Variables
 
-You can supply models as a JSON string via `CONFIG_GEMINI__MODELS`. This provides a flexible way to override settings via the shell or in automated environments without modifying the configuration file.
+You can supply models as a JSON string or list structure via `CONFIG_GEMINI__MODELS`. This provides a flexible way to override settings via the shell or in automated environments (e.g. Docker) without modifying the configuration file.
 
 ```bash
 export CONFIG_GEMINI__MODEL_STRATEGY="overwrite"
