@@ -9,18 +9,12 @@ from loguru import logger
 
 from ..models import Message
 from ..utils import g_config
-from ..utils.helper import add_tag, save_file_to_tempfile, save_url_to_tempfile
+from ..utils.helper import (
+    add_tag,
+    save_file_to_tempfile,
+    save_url_to_tempfile,
+)
 
-XML_WRAP_HINT = (
-    "\nYou MUST wrap every tool call response inside a single fenced block exactly like:\n"
-    '```xml\n<tool_call name="tool_name">{"arg": "value"}</tool_call>\n```\n'
-    "Do not surround the fence with any other text or whitespace; otherwise the call will be ignored.\n"
-)
-CODE_BLOCK_HINT = (
-    "\nWhenever you include code, markup, or shell snippets, wrap each snippet in a Markdown fenced "
-    "block and supply the correct language label (for example, ```python ... ``` or ```html ... ```).\n"
-    "Fence ONLY the actual code/markup; keep all narrative or explanatory text outside the fences.\n"
-)
 HTML_ESCAPE_RE = re.compile(r"&(?:lt|gt|amp|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);")
 MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=[-\\`*_{}\[\]()#+.!<>])")
 CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`\n]+?`)", re.DOTALL)

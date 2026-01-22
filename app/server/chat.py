@@ -1,12 +1,11 @@
 import base64
 import json
 import re
-import struct
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -21,7 +20,6 @@ from ..models import (
     ChatCompletionRequest,
     ContentItem,
     ConversationInStore,
-    FunctionCall,
     Message,
     ModelData,
     ModelListResponse,
@@ -37,26 +35,28 @@ from ..models import (
     ResponseToolChoice,
     ResponseUsage,
     Tool,
-    ToolCall,
     ToolChoiceFunction,
 )
 from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
-from ..services.client import CODE_BLOCK_HINT, XML_WRAP_HINT
 from ..utils import g_config
-from ..utils.helper import estimate_tokens
+from ..utils.helper import (
+    CODE_BLOCK_HINT,
+    CODE_HINT_STRIPPED,
+    XML_HINT_STRIPPED,
+    XML_WRAP_HINT,
+    estimate_tokens,
+    extract_image_dimensions,
+    extract_tool_calls,
+    iter_stream_segments,
+    remove_tool_call_blocks,
+    strip_code_fence,
+    text_from_message,
+)
 from .middleware import get_image_store_dir, get_image_token, get_temp_dir, verify_api_key
 
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 CONTINUATION_HINT = "\n(More messages to come, please reply with just 'ok.')"
-TOOL_BLOCK_RE = re.compile(r"```xml\s*(.*?)```", re.DOTALL | re.IGNORECASE)
-TOOL_CALL_RE = re.compile(
-    r"<tool_call\s+name=\"([^\"]+)\">(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
-)
-JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
-CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>")
-XML_HINT_STRIPPED = XML_WRAP_HINT.strip()
-CODE_HINT_STRIPPED = CODE_BLOCK_HINT.strip()
 
 router = APIRouter()
 
@@ -116,14 +116,6 @@ def _build_structured_requirement(
         instruction=instruction,
         raw_format=response_format,
     )
-
-
-def _strip_code_fence(text: str) -> str:
-    """Remove surrounding ```json fences if present."""
-    match = JSON_FENCE_RE.match(text.strip())
-    if match:
-        return match.group(1).strip()
-    return text.strip()
 
 
 def _build_tool_prompt(
@@ -312,75 +304,6 @@ def _prepare_messages_for_model(
     return prepared
 
 
-def _strip_system_hints(text: str) -> str:
-    """Remove system-level hint text from a given string."""
-    if not text:
-        return text
-    cleaned = _strip_tagged_blocks(text)
-    cleaned = cleaned.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
-    cleaned = cleaned.replace(CODE_BLOCK_HINT, "").replace(CODE_HINT_STRIPPED, "")
-    cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
-    return cleaned.strip()
-
-
-def _strip_tagged_blocks(text: str) -> str:
-    """Remove <|im_start|>role ... <|im_end|> sections, dropping tool blocks entirely.
-    - tool blocks are removed entirely (if missing end marker, drop to EOF).
-    - other roles: remove markers and role, keep inner content (if missing end marker, keep to EOF).
-    """
-    if not text:
-        return text
-
-    result: list[str] = []
-    idx = 0
-    length = len(text)
-    start_marker = "<|im_start|>"
-    end_marker = "<|im_end|>"
-
-    while idx < length:
-        start = text.find(start_marker, idx)
-        if start == -1:
-            result.append(text[idx:])
-            break
-
-        # append any content before this block
-        result.append(text[idx:start])
-
-        role_start = start + len(start_marker)
-        newline = text.find("\n", role_start)
-        if newline == -1:
-            # malformed block; keep remainder as-is (safe behavior)
-            result.append(text[start:])
-            break
-
-        role = text[role_start:newline].strip().lower()
-
-        end = text.find(end_marker, newline + 1)
-        if end == -1:
-            # missing end marker
-            if role == "tool":
-                # drop from start marker to EOF (skip remainder)
-                break
-            else:
-                # keep inner content from after the role newline to EOF
-                result.append(text[newline + 1 :])
-                break
-
-        block_end = end + len(end_marker)
-
-        if role == "tool":
-            # drop whole block
-            idx = block_end
-            continue
-
-        # keep the content without role markers
-        content = text[newline + 1 : end]
-        result.append(content)
-        idx = block_end
-
-    return "".join(result)
-
-
 def _response_items_to_messages(
     items: str | list[ResponseInputItem],
 ) -> tuple[list[Message], str | list[ResponseInputItem]]:
@@ -509,77 +432,64 @@ def _instructions_to_messages(
     return instruction_messages
 
 
-def _remove_tool_call_blocks(text: str) -> str:
-    """Strip tool call code blocks from text."""
-    if not text:
-        return text
-    cleaned = TOOL_BLOCK_RE.sub("", text)
-    return _strip_system_hints(cleaned)
+def _get_model_by_name(name: str) -> Model:
+    """
+    Retrieve a Model instance by name, considering custom models from config
+    and the update strategy (append or overwrite).
+    """
+    strategy = g_config.gemini.model_strategy
+    custom_models = {m.model_name: m for m in g_config.gemini.models if m.model_name}
+
+    if name in custom_models:
+        return Model.from_dict(custom_models[name].model_dump())
+
+    if strategy == "overwrite":
+        raise ValueError(f"Model '{name}' not found in custom models (strategy='overwrite').")
+
+    return Model.from_name(name)
 
 
-def _extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
-    """Extract tool call definitions and return cleaned text."""
-    if not text:
-        return text, []
+def _get_available_models() -> list[ModelData]:
+    """
+    Return a list of available models based on configuration strategy.
+    """
+    now = int(datetime.now(tz=timezone.utc).timestamp())
+    strategy = g_config.gemini.model_strategy
+    models_data = []
 
-    tool_calls: list[ToolCall] = []
+    custom_models = [m for m in g_config.gemini.models if m.model_name]
+    for m in custom_models:
+        models_data.append(
+            ModelData(
+                id=m.model_name,
+                created=now,
+                owned_by="custom",
+            )
+        )
 
-    def _replace(match: re.Match[str]) -> str:
-        block_content = match.group(1)
-        if not block_content:
-            return ""
-
-        for call_match in TOOL_CALL_RE.finditer(block_content):
-            name = (call_match.group(1) or "").strip()
-            raw_args = (call_match.group(2) or "").strip()
-            if not name:
-                logger.warning(
-                    f"Encountered tool_call block without a function name: {block_content}"
-                )
+    if strategy == "append":
+        custom_ids = {m.model_name for m in custom_models}
+        for model in Model:
+            m_name = model.model_name
+            if not m_name or m_name == "unspecified":
+                continue
+            if m_name in custom_ids:
                 continue
 
-            arguments = raw_args
-            try:
-                parsed_args = json.loads(raw_args)
-                arguments = json.dumps(parsed_args, ensure_ascii=False)
-            except json.JSONDecodeError:
-                logger.warning(
-                    f"Failed to parse tool call arguments for '{name}'. Passing raw string."
-                )
-
-            tool_calls.append(
-                ToolCall(
-                    id=f"call_{uuid.uuid4().hex}",
-                    type="function",
-                    function=FunctionCall(name=name, arguments=arguments),
+            models_data.append(
+                ModelData(
+                    id=m_name,
+                    created=now,
+                    owned_by="gemini-web",
                 )
             )
 
-        return ""
-
-    cleaned = TOOL_BLOCK_RE.sub(_replace, text)
-    cleaned = _strip_system_hints(cleaned)
-    return cleaned, tool_calls
+    return models_data
 
 
 @router.get("/v1/models", response_model=ModelListResponse)
 async def list_models(api_key: str = Depends(verify_api_key)):
-    now = int(datetime.now(tz=timezone.utc).timestamp())
-
-    models = []
-    for model in Model:
-        m_name = model.model_name
-        if not m_name or m_name == "unspecified":
-            continue
-
-        models.append(
-            ModelData(
-                id=m_name,
-                created=now,
-                owned_by="gemini-web",
-            )
-        )
-
+    models = _get_available_models()
     return ModelListResponse(data=models)
 
 
@@ -592,7 +502,11 @@ async def create_chat_completion(
 ):
     pool = GeminiClientPool()
     db = LMDBConversationStore()
-    model = Model.from_name(request.model)
+
+    try:
+        model = _get_model_by_name(request.model)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     if len(request.messages) == 0:
         raise HTTPException(
@@ -698,12 +612,12 @@ async def create_chat_completion(
             detail="Gemini output parsing failed unexpectedly.",
         ) from exc
 
-    visible_output, tool_calls = _extract_tool_calls(raw_output_with_think)
-    storage_output = _remove_tool_call_blocks(raw_output_clean).strip()
+    visible_output, tool_calls = extract_tool_calls(raw_output_with_think)
+    storage_output = remove_tool_call_blocks(raw_output_clean).strip()
     tool_calls_payload = [call.model_dump(mode="json") for call in tool_calls]
 
     if structured_requirement:
-        cleaned_visible = _strip_code_fence(visible_output or "")
+        cleaned_visible = strip_code_fence(visible_output or "")
         if not cleaned_visible:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -849,7 +763,7 @@ async def create_response(
     db = LMDBConversationStore()
 
     try:
-        model = Model.from_name(request_data.model)
+        model = _get_model_by_name(request_data.model)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -938,12 +852,12 @@ async def create_response(
             detail="Gemini output parsing failed unexpectedly.",
         ) from exc
 
-    visible_text, detected_tool_calls = _extract_tool_calls(text_with_think)
-    storage_output = _remove_tool_call_blocks(text_without_think).strip()
+    visible_text, detected_tool_calls = extract_tool_calls(text_with_think)
+    storage_output = remove_tool_call_blocks(text_without_think).strip()
     assistant_text = LMDBConversationStore.remove_think_tags(visible_text.strip())
 
     if structured_requirement:
-        cleaned_visible = _strip_code_fence(assistant_text or "")
+        cleaned_visible = strip_code_fence(assistant_text or "")
         if not cleaned_visible:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -1010,7 +924,7 @@ async def create_response(
 
         image_call_items.append(
             ResponseImageGenerationCall(
-                id=f"img_{uuid.uuid4().hex}",
+                id=filename.rsplit(".", 1)[0],
                 status="completed",
                 result=image_base64,
                 output_format=img_format,
@@ -1045,7 +959,7 @@ async def create_response(
     response_id = f"resp_{uuid.uuid4().hex}"
     message_id = f"msg_{uuid.uuid4().hex}"
 
-    input_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
+    input_tokens = sum(estimate_tokens(text_from_message(msg)) for msg in messages)
     tool_arg_text = "".join(call.function.arguments or "" for call in detected_tool_calls)
     completion_basis = assistant_text or ""
     if tool_arg_text:
@@ -1106,25 +1020,6 @@ async def create_response(
         return _create_responses_streaming_response(response_payload, assistant_text or "")
 
     return response_payload
-
-
-def _text_from_message(message: Message) -> str:
-    """Return text content from a message for token estimation."""
-    base_text = ""
-    if isinstance(message.content, str):
-        base_text = message.content
-    elif isinstance(message.content, list):
-        base_text = "\n".join(
-            item.text or "" for item in message.content if getattr(item, "type", "") == "text"
-        )
-    elif message.content is None:
-        base_text = ""
-
-    if message.tool_calls:
-        tool_arg_text = "".join(call.function.arguments or "" for call in message.tool_calls)
-        base_text = f"{base_text}\n{tool_arg_text}" if base_text else tool_arg_text
-
-    return base_text
 
 
 async def _find_reusable_session(
@@ -1224,47 +1119,6 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
         raise
 
 
-def _iter_stream_segments(model_output: str, chunk_size: int = 64):
-    """Yield stream segments while keeping <think> markers and words intact."""
-    if not model_output:
-        return
-
-    token_pattern = re.compile(r"\s+|\S+\s*")
-    pending = ""
-
-    def _flush_pending() -> Iterator[str]:
-        nonlocal pending
-        if pending:
-            yield pending
-            pending = ""
-
-    # Split on <think> boundaries so the markers are never fragmented.
-    parts = re.split(r"(</?think>)", model_output)
-    for part in parts:
-        if not part:
-            continue
-        if part in {"<think>", "</think>"}:
-            yield from _flush_pending()
-            yield part
-            continue
-
-        for match in token_pattern.finditer(part):
-            token = match.group(0)
-
-            if len(token) > chunk_size:
-                yield from _flush_pending()
-                for idx in range(0, len(token), chunk_size):
-                    yield token[idx : idx + chunk_size]
-                continue
-
-            if pending and len(pending) + len(token) > chunk_size:
-                yield from _flush_pending()
-
-            pending += token
-
-    yield from _flush_pending()
-
-
 def _create_streaming_response(
     model_output: str,
     tool_calls: list[dict],
@@ -1276,7 +1130,7 @@ def _create_streaming_response(
     """Create streaming response with `usage` calculation included in the final chunk."""
 
     # Calculate token usage
-    prompt_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
+    prompt_tokens = sum(estimate_tokens(text_from_message(msg)) for msg in messages)
     tool_args = "".join(call.get("function", {}).get("arguments", "") for call in tool_calls or [])
     completion_tokens = estimate_tokens(model_output + tool_args)
     total_tokens = prompt_tokens + completion_tokens
@@ -1294,7 +1148,7 @@ def _create_streaming_response(
         yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
         # Stream output text in chunks for efficiency
-        for chunk in _iter_stream_segments(model_output):
+        for chunk in iter_stream_segments(model_output):
             data = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -1408,7 +1262,7 @@ def _create_responses_streaming_response(
                         content_text += c.text
 
                 if content_text:
-                    for chunk in _iter_stream_segments(content_text):
+                    for chunk in iter_stream_segments(content_text):
                         delta_event = {
                             **base_event,
                             "type": "response.output_text.delta",
@@ -1457,7 +1311,7 @@ def _create_standard_response(
 ) -> dict:
     """Create standard response"""
     # Calculate token usage
-    prompt_tokens = sum(estimate_tokens(_text_from_message(msg)) for msg in messages)
+    prompt_tokens = sum(estimate_tokens(text_from_message(msg)) for msg in messages)
     tool_args = "".join(call.get("function", {}).get("arguments", "") for call in tool_calls or [])
     completion_tokens = estimate_tokens(model_output + tool_args)
     total_tokens = prompt_tokens + completion_tokens
@@ -1490,74 +1344,16 @@ def _create_standard_response(
     return result
 
 
-def _extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
-    """Return image dimensions (width, height) if PNG or JPEG headers are present."""
-    # PNG: dimensions stored in bytes 16..24 of the IHDR chunk
-    if len(data) >= 24 and data.startswith(b"\x89PNG\r\n\x1a\n"):
-        try:
-            width, height = struct.unpack(">II", data[16:24])
-            return int(width), int(height)
-        except struct.error:
-            return None, None
-
-    # JPEG: dimensions stored in SOF segment; iterate through markers to locate it
-    if len(data) >= 4 and data[0:2] == b"\xff\xd8":
-        idx = 2
-        length = len(data)
-        sof_markers = {
-            0xC0,
-            0xC1,
-            0xC2,
-            0xC3,
-            0xC5,
-            0xC6,
-            0xC7,
-            0xC9,
-            0xCA,
-            0xCB,
-            0xCD,
-            0xCE,
-            0xCF,
-        }
-        while idx < length:
-            # Find marker alignment (markers are prefixed with 0xFF bytes)
-            if data[idx] != 0xFF:
-                idx += 1
-                continue
-            while idx < length and data[idx] == 0xFF:
-                idx += 1
-            if idx >= length:
-                break
-            marker = data[idx]
-            idx += 1
-
-            if marker in (0xD8, 0xD9, 0x01) or 0xD0 <= marker <= 0xD7:
-                continue
-
-            if idx + 1 >= length:
-                break
-            segment_length = (data[idx] << 8) + data[idx + 1]
-            idx += 2
-            if segment_length < 2:
-                break
-
-            if marker in sof_markers:
-                if idx + 4 < length:
-                    # Skip precision byte at idx, then read height/width (big-endian)
-                    height = (data[idx + 1] << 8) + data[idx + 2]
-                    width = (data[idx + 3] << 8) + data[idx + 4]
-                    return int(width), int(height)
-                break
-
-            idx += segment_length - 2
-
-    return None, None
-
-
 async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | None, int | None, str]:
     """Persist an image provided by gemini_webapi and return base64 plus dimensions and filename."""
     if isinstance(image, GeneratedImage):
-        saved_path = await image.save(path=str(temp_dir), full_size=True)
+        try:
+            saved_path = await image.save(path=str(temp_dir), full_size=True)
+        except Exception as e:
+            logger.warning(
+                f"Failed to download full-size GeneratedImage, retrying with default size: {e}"
+            )
+            saved_path = await image.save(path=str(temp_dir), full_size=False)
     else:
         saved_path = await image.save(path=str(temp_dir))
 
@@ -1571,6 +1367,6 @@ async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | Non
     original_path.rename(new_path)
 
     data = new_path.read_bytes()
-    width, height = _extract_image_dimensions(data)
+    width, height = extract_image_dimensions(data)
     filename = random_name
     return base64.b64encode(data).decode("ascii"), width, height, filename

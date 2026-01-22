@@ -1,6 +1,8 @@
+import ast
+import json
 import os
 import sys
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -50,11 +52,36 @@ class GeminiClientSettings(BaseModel):
         return stripped or None
 
 
+class GeminiModelConfig(BaseModel):
+    """Configuration for a custom Gemini model."""
+
+    model_name: Optional[str] = Field(default=None, description="Name of the model")
+    model_header: Optional[dict[str, Optional[str]]] = Field(
+        default=None, description="Header for the model"
+    )
+
+    @field_validator("model_header", mode="before")
+    @classmethod
+    def _parse_json_string(cls, v: Any) -> Any:
+        if isinstance(v, str) and v.strip().startswith("{"):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                # Return the original value to let Pydantic handle the error or type mismatch
+                return v
+        return v
+
+
 class GeminiConfig(BaseModel):
     """Gemini API configuration"""
 
     clients: list[GeminiClientSettings] = Field(
         ..., description="List of Gemini client credential pairs"
+    )
+    models: list[GeminiModelConfig] = Field(default=[], description="List of custom Gemini models")
+    model_strategy: Literal["append", "overwrite"] = Field(
+        default="append",
+        description="Strategy for loading models: 'append' merges custom with default, 'overwrite' uses only custom",
     )
     timeout: int = Field(default=120, ge=1, description="Init timeout")
     auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini cookies")
@@ -67,6 +94,36 @@ class GeminiConfig(BaseModel):
         ge=1,
         description="Maximum characters Gemini Web can accept per request",
     )
+
+    @field_validator("models", mode="before")
+    @classmethod
+    def _parse_models_json(cls, v: Any) -> Any:
+        if isinstance(v, str) and v.strip().startswith("["):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse models JSON string: {e}")
+                return v
+        return v
+
+    @field_validator("models")
+    @classmethod
+    def _filter_valid_models(cls, v: list[GeminiModelConfig]) -> list[GeminiModelConfig]:
+        """Filter out models that don't have all required fields set."""
+        valid_models = []
+        for model in v:
+            if model.model_name and model.model_header:
+                valid_models.append(model)
+            else:
+                missing = []
+                if not model.model_name:
+                    missing.append("model_name")
+                if not model.model_header:
+                    missing.append("model_header")
+                logger.warning(
+                    f"Discarding custom model due to missing {', '.join(missing)}: {model}"
+                )
+        return valid_models
 
 
 class CORSConfig(BaseModel):
@@ -207,8 +264,72 @@ def _merge_clients_with_env(
             new_client = GeminiClientSettings(**overrides)
             result_clients.append(new_client)
         else:
-            raise IndexError(f"Client index {idx} in env is out of range.")
+            raise IndexError(
+                f"Client index {idx} in env is out of range (current count: {len(result_clients)}). "
+                "Client indices must be contiguous starting from 0."
+            )
     return result_clients if result_clients else base_clients
+
+
+def extract_gemini_models_env() -> dict[int, dict[str, Any]]:
+    """Extract and remove all Gemini models related environment variables, supporting nested fields."""
+    root_key = "CONFIG_GEMINI__MODELS"
+    env_overrides: dict[int, dict[str, Any]] = {}
+
+    if root_key in os.environ:
+        val = os.environ[root_key]
+        models_list = None
+        parsed_successfully = False
+
+        try:
+            models_list = json.loads(val)
+            parsed_successfully = True
+        except json.JSONDecodeError:
+            try:
+                models_list = ast.literal_eval(val)
+                parsed_successfully = True
+            except (ValueError, SyntaxError) as e:
+                logger.warning(f"Failed to parse {root_key} as JSON or Python literal: {e}")
+
+        if parsed_successfully and isinstance(models_list, list):
+            for idx, model_data in enumerate(models_list):
+                if isinstance(model_data, dict):
+                    env_overrides[idx] = model_data
+
+            # Remove the environment variable to avoid Pydantic parsing errors
+            del os.environ[root_key]
+
+    return env_overrides
+
+
+def _merge_models_with_env(
+    base_models: list[GeminiModelConfig] | None,
+    env_overrides: dict[int, dict[str, Any]],
+):
+    """Override base_models with env_overrides using standard update (replace whole fields)."""
+    if not env_overrides:
+        return base_models or []
+    result_models: list[GeminiModelConfig] = []
+    if base_models:
+        result_models = [model.model_copy() for model in base_models]
+
+    for idx in sorted(env_overrides):
+        overrides = env_overrides[idx]
+        if idx < len(result_models):
+            # Update existing model: overwrite fields found in env
+            model_dict = result_models[idx].model_dump()
+            model_dict.update(overrides)
+            result_models[idx] = GeminiModelConfig(**model_dict)
+        elif idx == len(result_models):
+            # Append new models
+            new_model = GeminiModelConfig(**overrides)
+            result_models.append(new_model)
+        else:
+            raise IndexError(
+                f"Model index {idx} in env is out of range (current count: {len(result_models)}). "
+                "Model indices must be contiguous starting from 0."
+            )
+    return result_models
 
 
 def initialize_config() -> Config:
@@ -221,6 +342,8 @@ def initialize_config() -> Config:
     try:
         # First, extract and remove Gemini clients related environment variables
         env_clients_overrides = extract_gemini_clients_env()
+        # Extract and remove Gemini models related environment variables
+        env_models_overrides = extract_gemini_models_env()
 
         # Then, initialize Config with pydantic_settings
         config = Config()  # type: ignore
@@ -228,7 +351,10 @@ def initialize_config() -> Config:
         # Synthesize clients
         config.gemini.clients = _merge_clients_with_env(
             config.gemini.clients, env_clients_overrides
-        )  # type: ignore
+        )
+
+        # Synthesize models
+        config.gemini.models = _merge_models_with_env(config.gemini.models, env_models_overrides)
 
         return config
     except ValidationError as e:
