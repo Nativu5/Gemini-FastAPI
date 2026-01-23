@@ -1,5 +1,7 @@
+import asyncio
 import base64
 import json
+import random
 import re
 import uuid
 from dataclasses import dataclass
@@ -95,7 +97,7 @@ def _build_structured_requirement(
     schema_name = json_schema.get("name") or "response"
     strict = json_schema.get("strict", True)
 
-    pretty_schema = json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True)
+    pretty_schema = json.dumps(schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     instruction_parts = [
         "You must respond with a single valid JSON document that conforms to the schema shown below.",
         "Do not include explanations, comments, or any text before or after the JSON.",
@@ -135,7 +137,7 @@ def _build_tool_prompt(
         description = function.description or "No description provided."
         lines.append(f"Tool `{function.name}`: {description}")
         if function.parameters:
-            schema_text = json.dumps(function.parameters, ensure_ascii=False, indent=2)
+            schema_text = json.dumps(function.parameters, ensure_ascii=False, separators=(",", ":"))
             lines.append("Arguments JSON schema:")
             lines.append(schema_text)
         else:
@@ -635,7 +637,7 @@ async def create_chat_completion(
                 detail="LLM returned invalid JSON for the requested response_format.",
             ) from exc
 
-        canonical_output = json.dumps(structured_payload, ensure_ascii=False)
+        canonical_output = json.dumps(structured_payload, ensure_ascii=False, separators=(",", ":"))
         visible_output = canonical_output
         storage_output = canonical_output
 
@@ -875,7 +877,7 @@ async def create_response(
                 detail="LLM returned invalid JSON for the requested response_format.",
             ) from exc
 
-        canonical_output = json.dumps(structured_payload, ensure_ascii=False)
+        canonical_output = json.dumps(structured_payload, ensure_ascii=False, separators=(",", ":"))
         assistant_text = canonical_output
         storage_output = canonical_output
         logger.debug(
@@ -1081,38 +1083,56 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
     that Gemini can produce the actual answer.
     """
     if len(text) <= MAX_CHARS_PER_REQUEST:
-        # No need to split - a single request is fine.
         try:
             return await session.send_message(text, files=files)
         except Exception as e:
             logger.exception(f"Error sending message to Gemini: {e}")
             raise
+
     hint_len = len(CONTINUATION_HINT)
-    chunk_size = MAX_CHARS_PER_REQUEST - hint_len
+    safe_chunk_size = MAX_CHARS_PER_REQUEST - hint_len
 
     chunks: list[str] = []
     pos = 0
     total = len(text)
+
     while pos < total:
-        end = min(pos + chunk_size, total)
-        chunk = text[pos:end]
-        pos = end
+        remaining = total - pos
+        if remaining <= MAX_CHARS_PER_REQUEST:
+            chunks.append(text[pos:])
+            break
 
-        # If this is NOT the last chunk, add the continuation hint.
-        if end < total:
-            chunk += CONTINUATION_HINT
+        end = pos + safe_chunk_size
+        slice_candidate = text[pos:end]
+        # Try to find a safe split point
+        split_idx = -1
+        idx = slice_candidate.rfind("\n")
+        if idx != -1:
+            split_idx = idx
+
+        if split_idx != -1:
+            split_at = pos + split_idx + 1
+        else:
+            split_at = end
+
+        chunk = text[pos:split_at] + CONTINUATION_HINT
         chunks.append(chunk)
+        pos = split_at
 
-    # Fire off all but the last chunk, discarding the interim "ok" replies.
-    for chk in chunks[:-1]:
+    chunks_size = len(chunks)
+    for i, chk in enumerate(chunks[:-1]):
         try:
+            logger.debug(f"Sending chunk {i + 1}/{chunks_size}...")
             await session.send_message(chk)
+            delay = random.uniform(1.0, 3.0)
+            logger.debug(f"Sleeping for {delay:.2f}s...")
+            await asyncio.sleep(delay)
         except Exception as e:
             logger.exception(f"Error sending chunk to Gemini: {e}")
             raise
 
-    # The last chunk carries the files (if any) and we return its response.
     try:
+        logger.debug(f"Sending final chunk {chunks_size}/{chunks_size}...")
         return await session.send_message(chunks[-1], files=files)
     except Exception as e:
         logger.exception(f"Error sending final chunk to Gemini: {e}")

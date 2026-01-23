@@ -222,7 +222,7 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
         arguments = raw_args
         try:
             parsed_args = json.loads(raw_args)
-            arguments = json.dumps(parsed_args, ensure_ascii=False)
+            arguments = json.dumps(parsed_args, ensure_ascii=False, separators=(",", ":"))
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse tool call arguments for '{name}'. Passing raw string.")
 

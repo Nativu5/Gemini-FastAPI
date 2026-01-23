@@ -123,7 +123,7 @@ class GeminiClientWrapper(GeminiClient):
                 args_text = call.function.arguments.strip()
                 try:
                     parsed_args = json.loads(args_text)
-                    args_text = json.dumps(parsed_args, ensure_ascii=False)
+                    args_text = json.dumps(parsed_args, ensure_ascii=False, separators=(",", ":"))
                 except (json.JSONDecodeError, TypeError):
                     # Leave args_text as is if it is not valid JSON
                     pass
@@ -132,7 +132,7 @@ class GeminiClientWrapper(GeminiClient):
                 )
 
             if tool_blocks:
-                tool_section = "```xml\n" + "\n".join(tool_blocks) + "\n```"
+                tool_section = "```xml\n" + "".join(tool_blocks) + "\n```"
                 text_fragments.append(tool_section)
 
         model_input = "\n".join(fragment for fragment in text_fragments if fragment)
