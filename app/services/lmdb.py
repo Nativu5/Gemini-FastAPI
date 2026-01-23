@@ -9,7 +9,7 @@ import lmdb
 import orjson
 from loguru import logger
 
-from ..models import ConversationInStore, Message
+from ..models import ContentItem, ConversationInStore, Message
 from ..utils import g_config
 from ..utils.singleton import Singleton
 
@@ -18,6 +18,19 @@ def _hash_message(message: Message) -> str:
     """Generate a hash for a single message."""
     # Convert message to dict and sort keys for consistent hashing
     message_dict = message.model_dump(mode="json")
+    content = message_dict.get("content")
+    if isinstance(content, list):
+        is_pure_text = True
+        text_parts = []
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "text":
+                is_pure_text = False
+                break
+            text_parts.append(item.get("text") or "")
+
+        if is_pure_text:
+            message_dict["content"] = "".join(text_parts)
+
     message_bytes = orjson.dumps(message_dict, option=orjson.OPT_SORT_KEYS)
     return hashlib.sha256(message_bytes).hexdigest()
 
@@ -435,12 +448,31 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         cleaned_messages = []
         for msg in messages:
-            if msg.role == "assistant" and isinstance(msg.content, str):
-                normalized_content = LMDBConversationStore.remove_think_tags(msg.content)
-                # Only create a new object if content actually changed
-                if normalized_content != msg.content:
-                    cleaned_msg = Message(role=msg.role, content=normalized_content, name=msg.name)
-                    cleaned_messages.append(cleaned_msg)
+            if msg.role == "assistant":
+                if isinstance(msg.content, str):
+                    normalized_content = LMDBConversationStore.remove_think_tags(msg.content)
+                    if normalized_content != msg.content:
+                        cleaned_msg = Message(
+                            role=msg.role, content=normalized_content, name=msg.name
+                        )
+                        cleaned_messages.append(cleaned_msg)
+                    else:
+                        cleaned_messages.append(msg)
+                elif isinstance(msg.content, list):
+                    new_content = []
+                    changed = False
+                    for item in msg.content:
+                        if isinstance(item, ContentItem) and item.type == "text" and item.text:
+                            cleaned_text = LMDBConversationStore.remove_think_tags(item.text)
+                            if cleaned_text != item.text:
+                                changed = True
+                                item = item.model_copy(update={"text": cleaned_text})
+                        new_content.append(item)
+
+                    if changed:
+                        cleaned_messages.append(msg.model_copy(update={"content": new_content}))
+                    else:
+                        cleaned_messages.append(msg)
                 else:
                     cleaned_messages.append(msg)
             else:
