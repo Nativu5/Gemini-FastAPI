@@ -319,8 +319,6 @@ def _response_items_to_messages(
     normalized_input: list[ResponseInputItem] = []
     for item in items:
         role = item.role
-        if role == "developer":
-            role = "system"
 
         content = item.content
         normalized_contents: list[ResponseInputContent] = []
@@ -394,8 +392,6 @@ def _instructions_to_messages(
             continue
 
         role = item.role
-        if role == "developer":
-            role = "system"
 
         content = item.content
         if isinstance(content, str):
@@ -1054,7 +1050,7 @@ async def _find_reusable_session(
     while search_end >= 2:
         search_history = messages[:search_end]
 
-        # Only try to match if the last stored message would be assistant/system.
+        # Only try to match if the last stored message would be assistant/system before querying LMDB.
         if search_history[-1].role in {"assistant", "system"}:
             try:
                 if conv := db.find(model.model_name, search_history):
