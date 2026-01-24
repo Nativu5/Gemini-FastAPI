@@ -18,8 +18,12 @@ def _hash_message(message: Message) -> str:
     """Generate a hash for a single message."""
     # Convert message to dict and sort keys for consistent hashing
     message_dict = message.model_dump(mode="json")
+
+    # Normalize content: empty string -> None
     content = message_dict.get("content")
-    if isinstance(content, list):
+    if content == "":
+        message_dict["content"] = None
+    elif isinstance(content, list):
         is_pure_text = True
         text_parts = []
         for item in content:
@@ -29,7 +33,27 @@ def _hash_message(message: Message) -> str:
             text_parts.append(item.get("text") or "")
 
         if is_pure_text:
-            message_dict["content"] = "".join(text_parts)
+            text_content = "".join(text_parts)
+            message_dict["content"] = text_content if text_content else None
+
+    # Normalize tool_calls: empty list -> None, and canonicalize arguments
+    tool_calls = message_dict.get("tool_calls")
+    if not tool_calls:
+        message_dict["tool_calls"] = None
+    elif isinstance(tool_calls, list):
+        for tool_call in tool_calls:
+            if isinstance(tool_call, dict) and "function" in tool_call:
+                func = tool_call["function"]
+                args = func.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        # Parse and re-dump to canonicalize (remove extra whitespace, sort keys)
+                        parsed = orjson.loads(args)
+                        func["arguments"] = orjson.dumps(
+                            parsed, option=orjson.OPT_SORT_KEYS
+                        ).decode("utf-8")
+                    except Exception:
+                        pass
 
     message_bytes = orjson.dumps(message_dict, option=orjson.OPT_SORT_KEYS)
     return hashlib.sha256(message_bytes).hexdigest()
