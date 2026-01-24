@@ -58,6 +58,7 @@ from .middleware import get_image_store_dir, get_image_token, get_temp_dir, veri
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 CONTINUATION_HINT = "\n(More messages to come, please reply with just 'ok.')"
+METADATA_TTL_MINUTES = 20
 
 router = APIRouter()
 
@@ -1047,7 +1048,6 @@ async def _find_reusable_session(
 
     # Start with the full history and iteratively trim from the end.
     search_end = len(messages)
-    logger.debug(f"Searching for reusable session in history of length {search_end}...")
 
     while search_end >= 2:
         search_history = messages[:search_end]
@@ -1056,6 +1056,17 @@ async def _find_reusable_session(
         if search_history[-1].role in {"assistant", "system", "tool"}:
             try:
                 if conv := db.find(model.model_name, search_history):
+                    # Check if metadata is too old
+                    now = datetime.now()
+                    updated_at = conv.updated_at or conv.created_at or now
+                    age_minutes = (now - updated_at).total_seconds() / 60
+
+                    if age_minutes > METADATA_TTL_MINUTES:
+                        logger.debug(
+                            f"Matched conversation is too old ({age_minutes:.1f}m), skipping reuse."
+                        )
+                        break
+
                     client = await pool.acquire(conv.client_id)
                     session = client.start_chat(metadata=conv.metadata, model=model)
                     remain = messages[search_end:]
@@ -1072,7 +1083,6 @@ async def _find_reusable_session(
         # Trim one message and try again.
         search_end -= 1
 
-    logger.debug("No reusable session found after checking all possible prefixes.")
     return None, None, messages
 
 

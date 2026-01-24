@@ -68,13 +68,8 @@ def _hash_message(message: Message) -> str:
         core_data["tool_calls"] = calls_data
     else:
         core_data["tool_calls"] = None
-
-    message_bytes = orjson.dumps(core_data, option=orjson.OPT_SORT_KEYS)
-    msg_hash = hashlib.sha256(message_bytes).hexdigest()
-    logger.debug(
-        f"Hashing message (role={message.role}): {message_bytes.decode('utf-8')} -> {msg_hash}"
-    )
-    return msg_hash
+        message_bytes = orjson.dumps(core_data, option=orjson.OPT_SORT_KEYS)
+        return hashlib.sha256(message_bytes).hexdigest()
 
 
 def _hash_conversation(client_id: str, model: str, messages: List[Message]) -> str:
