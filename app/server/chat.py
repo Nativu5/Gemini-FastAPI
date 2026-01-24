@@ -1052,8 +1052,8 @@ async def _find_reusable_session(
     while search_end >= 2:
         search_history = messages[:search_end]
 
-        # Only try to match if the last stored message would be assistant/system before querying LMDB.
-        if search_history[-1].role in {"assistant", "system"}:
+        # Only try to match if the last stored message would be assistant/system/tool before querying LMDB.
+        if search_history[-1].role in {"assistant", "system", "tool"}:
             try:
                 if conv := db.find(model.model_name, search_history):
                     client = await pool.acquire(conv.client_id)
