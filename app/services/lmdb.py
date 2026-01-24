@@ -476,9 +476,7 @@ class LMDBConversationStore(metaclass=Singleton):
                 if isinstance(msg.content, str):
                     normalized_content = LMDBConversationStore.remove_think_tags(msg.content)
                     if normalized_content != msg.content:
-                        cleaned_msg = Message(
-                            role=msg.role, content=normalized_content, name=msg.name
-                        )
+                        cleaned_msg = msg.model_copy(update={"content": normalized_content})
                         cleaned_messages.append(cleaned_msg)
                     else:
                         cleaned_messages.append(msg)
