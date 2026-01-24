@@ -11,6 +11,7 @@ from loguru import logger
 
 from ..models import ContentItem, ConversationInStore, Message
 from ..utils import g_config
+from ..utils.helper import extract_tool_calls, remove_tool_call_blocks
 from ..utils.singleton import Singleton
 
 
@@ -26,8 +27,9 @@ def _hash_message(message: Message) -> str:
     if not content:
         core_data["content"] = None
     elif isinstance(content, str):
-        stripped = content.strip()
-        core_data["content"] = stripped if stripped else None
+        # Normalize line endings and strip whitespace
+        normalized = content.replace("\r\n", "\n").strip()
+        core_data["content"] = normalized if normalized else None
     elif isinstance(content, list):
         text_parts = []
         for item in content:
@@ -41,7 +43,7 @@ def _hash_message(message: Message) -> str:
                 break
 
         if text_parts is not None:
-            text_content = "".join(text_parts).strip()
+            text_content = "".join(text_parts).replace("\r\n", "\n").strip()
             core_data["content"] = text_content if text_content else None
         else:
             core_data["content"] = message.model_dump(mode="json")["content"]
@@ -260,7 +262,9 @@ class LMDBConversationStore(metaclass=Singleton):
         return None
 
     def _find_by_message_list(
-        self, model: str, messages: List[Message]
+        self,
+        model: str,
+        messages: List[Message],
     ) -> Optional[ConversationInStore]:
         """Internal find implementation based on a message list."""
         for c in g_config.gemini.clients:
@@ -471,40 +475,76 @@ class LMDBConversationStore(metaclass=Singleton):
     @staticmethod
     def remove_think_tags(text: str) -> str:
         """
-        Remove <think>...</think> tags at the start of text and strip whitespace.
+        Remove all <think>...</think> tags and strip whitespace.
         """
-        cleaned_content = re.sub(r"^(\s*<think>.*?</think>\n?)", "", text, flags=re.DOTALL)
+        # Remove all think blocks anywhere in the text
+        cleaned_content = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         return cleaned_content.strip()
 
     @staticmethod
     def sanitize_assistant_messages(messages: list[Message]) -> list[Message]:
         """
-        Create a new list of messages with assistant content cleaned of <think> tags.
-        This is useful for store the chat history.
+        Create a new list of messages with assistant content cleaned of <think> tags
+        and system hints/tool call blocks. This is used for both storing and
+        searching chat history to ensure consistency.
+
+        If a message has no tool_calls but contains tool call XML blocks in its
+        content, they will be extracted and moved to the tool_calls field.
         """
         cleaned_messages = []
         for msg in messages:
             if msg.role == "assistant":
                 if isinstance(msg.content, str):
-                    normalized_content = LMDBConversationStore.remove_think_tags(msg.content)
-                    if normalized_content != msg.content:
-                        cleaned_msg = msg.model_copy(update={"content": normalized_content})
+                    text = LMDBConversationStore.remove_think_tags(msg.content)
+                    tool_calls = msg.tool_calls
+                    if not tool_calls:
+                        text, tool_calls = extract_tool_calls(text)
+                    else:
+                        text = remove_tool_call_blocks(text).strip()
+
+                    normalized_content = text.strip()
+
+                    if normalized_content != msg.content or tool_calls != msg.tool_calls:
+                        cleaned_msg = msg.model_copy(
+                            update={
+                                "content": normalized_content or None,
+                                "tool_calls": tool_calls or None,
+                            }
+                        )
                         cleaned_messages.append(cleaned_msg)
                     else:
                         cleaned_messages.append(msg)
                 elif isinstance(msg.content, list):
                     new_content = []
+                    all_extracted_calls = list(msg.tool_calls or [])
                     changed = False
+
                     for item in msg.content:
                         if isinstance(item, ContentItem) and item.type == "text" and item.text:
-                            cleaned_text = LMDBConversationStore.remove_think_tags(item.text)
-                            if cleaned_text != item.text:
+                            text = LMDBConversationStore.remove_think_tags(item.text)
+
+                            if not msg.tool_calls:
+                                text, extracted = extract_tool_calls(text)
+                                if extracted:
+                                    all_extracted_calls.extend(extracted)
+                                    changed = True
+                            else:
+                                text = remove_tool_call_blocks(text).strip()
+
+                            if text != item.text:
                                 changed = True
-                                item = item.model_copy(update={"text": cleaned_text})
+                                item = item.model_copy(update={"text": text.strip() or None})
                         new_content.append(item)
 
                     if changed:
-                        cleaned_messages.append(msg.model_copy(update={"content": new_content}))
+                        cleaned_messages.append(
+                            msg.model_copy(
+                                update={
+                                    "content": new_content,
+                                    "tool_calls": all_extracted_calls or None,
+                                }
+                            )
+                        )
                     else:
                         cleaned_messages.append(msg)
                 else:

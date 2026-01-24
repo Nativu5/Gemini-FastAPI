@@ -58,7 +58,7 @@ from .middleware import get_image_store_dir, get_image_token, get_temp_dir, veri
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 CONTINUATION_HINT = "\n(More messages to come, please reply with just 'ok.')"
-METADATA_TTL_MINUTES = 20
+METADATA_TTL_MINUTES = 15
 
 router = APIRouter()
 
@@ -268,31 +268,35 @@ def _prepare_messages_for_model(
     tools: list[Tool] | None,
     tool_choice: str | ToolChoiceFunction | None,
     extra_instructions: list[str] | None = None,
+    inject_system_defaults: bool = True,
 ) -> list[Message]:
     """Return a copy of messages enriched with tool instructions when needed."""
     prepared = [msg.model_copy(deep=True) for msg in source_messages]
 
     instructions: list[str] = []
-    if tools:
-        tool_prompt = _build_tool_prompt(tools, tool_choice)
-        if tool_prompt:
-            instructions.append(tool_prompt)
+    if inject_system_defaults:
+        if tools:
+            tool_prompt = _build_tool_prompt(tools, tool_choice)
+            if tool_prompt:
+                instructions.append(tool_prompt)
 
-    if extra_instructions:
-        instructions.extend(instr for instr in extra_instructions if instr)
-        logger.debug(
-            f"Applied {len(extra_instructions)} extra instructions for tool/structured output."
-        )
+        if extra_instructions:
+            instructions.extend(instr for instr in extra_instructions if instr)
+            logger.debug(
+                f"Applied {len(extra_instructions)} extra instructions for tool/structured output."
+            )
 
-    if not _conversation_has_code_hint(prepared):
-        instructions.append(CODE_BLOCK_HINT)
-        logger.debug("Injected default code block hint for Gemini conversation.")
+        if not _conversation_has_code_hint(prepared):
+            instructions.append(CODE_BLOCK_HINT)
+            logger.debug("Injected default code block hint for Gemini conversation.")
 
     if not instructions:
+        # Still need to ensure XML hint for the last user message if tools are present
+        if tools and tool_choice != "none":
+            _append_xml_hint_to_last_user_message(prepared)
         return prepared
 
     combined_instructions = "\n\n".join(instructions)
-
     if prepared and prepared[0].role == "system" and isinstance(prepared[0].content, str):
         existing = prepared[0].content or ""
         separator = "\n\n" if existing else ""
@@ -530,8 +534,14 @@ async def create_chat_completion(
     )
 
     if session:
+        # Optimization: When reusing a session, we don't need to resend the heavy tool definitions
+        # or structured output instructions as they are already in the Gemini session history.
         messages_to_send = _prepare_messages_for_model(
-            remaining_messages, request.tools, request.tool_choice, extra_instructions
+            remaining_messages,
+            request.tools,
+            request.tool_choice,
+            extra_instructions,
+            inject_system_defaults=False,
         )
         if not messages_to_send:
             raise HTTPException(
@@ -642,17 +652,20 @@ async def create_chat_completion(
 
     # After formatting, persist the conversation to LMDB
     try:
-        last_message = Message(
+        current_assistant_message = Message(
             role="assistant",
             content=storage_output or None,
             tool_calls=tool_calls or None,
         )
-        cleaned_history = db.sanitize_assistant_messages(request.messages)
+        # Sanitize the entire history including the new message to ensure consistency
+        full_history = [*request.messages, current_assistant_message]
+        cleaned_history = db.sanitize_assistant_messages(full_history)
+
         conv = ConversationInStore(
             model=model.model_name,
             client_id=client.id,
             metadata=session.metadata,
-            messages=[*cleaned_history, last_message],
+            messages=cleaned_history,
         )
         key = db.store(conv)
         logger.debug(f"Conversation saved to LMDB with key: {key}")
@@ -780,9 +793,10 @@ async def create_response(
     if reuse_session:
         messages_to_send = _prepare_messages_for_model(
             remaining_messages,
-            tools=None,
-            tool_choice=None,
-            extra_instructions=extra_instructions or None,
+            tools=request_data.tools,  # Keep for XML hint logic
+            tool_choice=request_data.tool_choice,
+            extra_instructions=None,  # Already in session history
+            inject_system_defaults=False,
         )
         if not messages_to_send:
             raise HTTPException(
@@ -994,17 +1008,19 @@ async def create_response(
     )
 
     try:
-        last_message = Message(
+        current_assistant_message = Message(
             role="assistant",
             content=storage_output or None,
             tool_calls=detected_tool_calls or None,
         )
-        cleaned_history = db.sanitize_assistant_messages(messages)
+        full_history = [*messages, current_assistant_message]
+        cleaned_history = db.sanitize_assistant_messages(full_history)
+
         conv = ConversationInStore(
             model=model.model_name,
             client_id=client.id,
             metadata=session.metadata,
-            messages=[*cleaned_history, last_message],
+            messages=cleaned_history,
         )
         key = db.store(conv)
         logger.debug(f"Conversation saved to LMDB with key: {key}")
