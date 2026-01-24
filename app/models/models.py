@@ -24,6 +24,7 @@ class Message(BaseModel):
     content: Union[str, List[ContentItem], None] = None
     name: Optional[str] = None
     tool_calls: Optional[List["ToolCall"]] = None
+    tool_call_id: Optional[str] = None
     refusal: Optional[str] = None
     reasoning_content: Optional[str] = None
     audio: Optional[Dict[str, Any]] = None

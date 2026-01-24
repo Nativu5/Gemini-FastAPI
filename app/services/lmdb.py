@@ -15,53 +15,69 @@ from ..utils.singleton import Singleton
 
 
 def _hash_message(message: Message) -> str:
-    """Generate a hash for a single message."""
-    # Convert message to dict and sort keys for consistent hashing
-    message_dict = message.model_dump(mode="json")
+    """Generate a consistent hash for a single message focusing only on core identity fields."""
+    # Pick only fields that define the message in a conversation history
+    core_data = {
+        "role": message.role,
+        "name": message.name,
+        "tool_call_id": message.tool_call_id,
+    }
 
-    # Normalize content: empty string -> None
-    content = message_dict.get("content")
-    if content == "":
-        message_dict["content"] = None
+    # Normalize content: strip, handle empty/None, and list-of-text items
+    content = message.content
+    if not content:
+        core_data["content"] = None
+    elif isinstance(content, str):
+        stripped = content.strip()
+        core_data["content"] = stripped if stripped else None
     elif isinstance(content, list):
-        is_pure_text = True
         text_parts = []
         for item in content:
-            if not isinstance(item, dict) or item.get("type") != "text":
-                is_pure_text = False
+            if isinstance(item, ContentItem) and item.type == "text":
+                text_parts.append(item.text or "")
+            elif isinstance(item, dict) and item.get("type") == "text":
+                text_parts.append(item.get("text") or "")
+            else:
+                # If it contains non-text (images/files), keep the full list for hashing
+                text_parts = None
                 break
-            text_parts.append(item.get("text") or "")
 
-        if is_pure_text:
-            text_content = "".join(text_parts)
-            message_dict["content"] = text_content if text_content else None
+        if text_parts is not None:
+            text_content = "".join(text_parts).strip()
+            core_data["content"] = text_content if text_content else None
+        else:
+            core_data["content"] = message.model_dump(mode="json")["content"]
 
-    # Normalize tool_calls: empty list -> None, and canonicalize arguments
-    tool_calls = message_dict.get("tool_calls")
-    if not tool_calls:
-        message_dict["tool_calls"] = None
-    elif isinstance(tool_calls, list):
-        for tool_call in tool_calls:
-            if isinstance(tool_call, dict) and "function" in tool_call:
-                func = tool_call["function"]
-                args = func.get("arguments")
-                if isinstance(args, str):
-                    try:
-                        # Parse and re-dump to canonicalize (remove extra whitespace, sort keys)
-                        parsed = orjson.loads(args)
-                        func["arguments"] = orjson.dumps(
-                            parsed, option=orjson.OPT_SORT_KEYS
-                        ).decode("utf-8")
-                    except orjson.JSONDecodeError:
-                        pass
+    # Normalize tool_calls: canonicalize arguments and sort by name if multiple calls exist
+    if message.tool_calls:
+        calls_data = []
+        for tc in message.tool_calls:
+            args = tc.function.arguments or "{}"
+            try:
+                parsed = orjson.loads(args)
+                canon_args = orjson.dumps(parsed, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+            except orjson.JSONDecodeError:
+                canon_args = args
 
-    message_bytes = orjson.dumps(message_dict, option=orjson.OPT_SORT_KEYS)
+            calls_data.append(
+                {
+                    "id": tc.id,  # Deterministic IDs ensure this is stable
+                    "name": tc.function.name,
+                    "arguments": canon_args,
+                }
+            )
+        # Sort calls to be order-independent
+        calls_data.sort(key=lambda x: (x["name"], x["arguments"]))
+        core_data["tool_calls"] = calls_data
+    else:
+        core_data["tool_calls"] = None
+
+    message_bytes = orjson.dumps(core_data, option=orjson.OPT_SORT_KEYS)
     return hashlib.sha256(message_bytes).hexdigest()
 
 
 def _hash_conversation(client_id: str, model: str, messages: List[Message]) -> str:
-    """Generate a hash for a list of messages and client id."""
-    # Create a combined hash from all individual message hashes
+    """Generate a hash for a list of messages and model name, tied to a specific client_id."""
     combined_hash = hashlib.sha256()
     combined_hash.update(client_id.encode("utf-8"))
     combined_hash.update(model.encode("utf-8"))
@@ -252,7 +268,6 @@ class LMDBConversationStore(metaclass=Singleton):
         """Internal find implementation based on a message list."""
         for c in g_config.gemini.clients:
             message_hash = _hash_conversation(c.id, model, messages)
-
             key = f"{self.HASH_LOOKUP_PREFIX}{message_hash}"
             try:
                 with self._get_transaction(write=False) as txn:

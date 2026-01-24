@@ -1,9 +1,9 @@
 import base64
+import hashlib
 import mimetypes
 import re
 import struct
 import tempfile
-import uuid
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlparse
@@ -222,13 +222,17 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
         arguments = raw_args
         try:
             parsed_args = orjson.loads(raw_args)
-            arguments = orjson.dumps(parsed_args).decode("utf-8")
+            arguments = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode("utf-8")
         except orjson.JSONDecodeError:
             logger.warning(f"Failed to parse tool call arguments for '{name}'. Passing raw string.")
 
+        # Generate a deterministic ID based on name and arguments to avoid hash mismatch in LMDB
+        seed = f"{name}:{arguments}".encode("utf-8")
+        call_id = f"call_{hashlib.sha256(seed).hexdigest()[:24]}"
+
         tool_calls.append(
             ToolCall(
-                id=f"call_{uuid.uuid4().hex}",
+                id=call_id,
                 type="function",
                 function=FunctionCall(name=name, arguments=arguments),
             )
