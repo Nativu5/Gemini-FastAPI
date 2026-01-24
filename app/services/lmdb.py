@@ -15,12 +15,10 @@ from ..utils.singleton import Singleton
 
 
 def _hash_message(message: Message) -> str:
-    """Generate a consistent hash for a single message focusing only on core identity fields."""
-    # Pick only fields that define the message in a conversation history
+    """Generate a consistent hash for a single message focusing ONLY on logic/content, ignoring technical IDs."""
     core_data = {
         "role": message.role,
         "name": message.name,
-        "tool_call_id": message.tool_call_id,
     }
 
     # Normalize content: strip, handle empty/None, and list-of-text items
@@ -48,7 +46,7 @@ def _hash_message(message: Message) -> str:
         else:
             core_data["content"] = message.model_dump(mode="json")["content"]
 
-    # Normalize tool_calls: canonicalize arguments and sort by name if multiple calls exist
+    # Normalize tool_calls: Focus ONLY on function name and arguments
     if message.tool_calls:
         calls_data = []
         for tc in message.tool_calls:
@@ -61,7 +59,6 @@ def _hash_message(message: Message) -> str:
 
             calls_data.append(
                 {
-                    "id": tc.id,  # Deterministic IDs ensure this is stable
                     "name": tc.function.name,
                     "arguments": canon_args,
                 }

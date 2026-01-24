@@ -1047,6 +1047,8 @@ async def _find_reusable_session(
 
     # Start with the full history and iteratively trim from the end.
     search_end = len(messages)
+    logger.debug(f"Searching for reusable session in history of length {search_end}...")
+
     while search_end >= 2:
         search_history = messages[:search_end]
 
@@ -1057,14 +1059,20 @@ async def _find_reusable_session(
                     client = await pool.acquire(conv.client_id)
                     session = client.start_chat(metadata=conv.metadata, model=model)
                     remain = messages[search_end:]
+                    logger.debug(
+                        f"Match found at prefix length {search_end}. Client: {conv.client_id}"
+                    )
                     return session, client, remain
             except Exception as e:
-                logger.warning(f"Error checking LMDB for reusable session: {e}")
+                logger.warning(
+                    f"Error checking LMDB for reusable session at length {search_end}: {e}"
+                )
                 break
 
         # Trim one message and try again.
         search_end -= 1
 
+    logger.debug("No reusable session found after checking all possible prefixes.")
     return None, None, messages
 
 
