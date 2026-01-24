@@ -175,7 +175,7 @@ class LMDBConversationStore(metaclass=Singleton):
         value = orjson.dumps(conv.model_dump(mode="json"))
 
         try:
-            with self._get_transaction(self, write=True) as txn:
+            with self._get_transaction(write=True) as txn:
                 # Store main data
                 txn.put(storage_key.encode("utf-8"), value, overwrite=True)
 
@@ -203,7 +203,7 @@ class LMDBConversationStore(metaclass=Singleton):
             Conversation or None if not found
         """
         try:
-            with self._get_transaction(self, write=False) as txn:
+            with self._get_transaction(write=False) as txn:
                 data = txn.get(key.encode("utf-8"), default=None)
                 if not data:
                     return None
@@ -255,7 +255,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
             key = f"{self.HASH_LOOKUP_PREFIX}{message_hash}"
             try:
-                with self._get_transaction(self, write=False) as txn:
+                with self._get_transaction(write=False) as txn:
                     if mapped := txn.get(key.encode("utf-8")):  # type: ignore
                         return self.get(mapped.decode("utf-8"))  # type: ignore
             except Exception as e:
@@ -279,7 +279,7 @@ class LMDBConversationStore(metaclass=Singleton):
             bool: True if key exists, False otherwise
         """
         try:
-            with self._get_transaction(self, write=False) as txn:
+            with self._get_transaction(write=False) as txn:
                 return txn.get(key.encode("utf-8")) is not None
         except Exception as e:
             logger.error(f"Failed to check existence of key {key}: {e}")
@@ -296,7 +296,7 @@ class LMDBConversationStore(metaclass=Singleton):
             ConversationInStore: The deleted conversation data, or None if not found
         """
         try:
-            with self._get_transaction(self, write=True) as txn:
+            with self._get_transaction(write=True) as txn:
                 # Get data first to clean up hash mapping
                 data = txn.get(key.encode("utf-8"))
                 if not data:
@@ -333,7 +333,7 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         keys = []
         try:
-            with self._get_transaction(self, write=False) as txn:
+            with self._get_transaction(write=False) as txn:
                 cursor = txn.cursor()
                 cursor.first()
 
@@ -377,7 +377,7 @@ class LMDBConversationStore(metaclass=Singleton):
         expired_entries: list[tuple[str, ConversationInStore]] = []
 
         try:
-            with self._get_transaction(self, write=False) as txn:
+            with self._get_transaction(write=False) as txn:
                 cursor = txn.cursor()
 
                 for key_bytes, value_bytes in cursor:
@@ -407,7 +407,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
         removed = 0
         try:
-            with self._get_transaction(self, write=True) as txn:
+            with self._get_transaction(write=True) as txn:
                 for key_str, conv in expired_entries:
                     key_bytes = key_str.encode("utf-8")
                     if not txn.delete(key_bytes):
