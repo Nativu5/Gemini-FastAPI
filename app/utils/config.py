@@ -1,9 +1,9 @@
 import ast
-import json
 import os
 import sys
 from typing import Any, Literal, Optional
 
+import orjson
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from pydantic_settings import (
@@ -65,8 +65,8 @@ class GeminiModelConfig(BaseModel):
     def _parse_json_string(cls, v: Any) -> Any:
         if isinstance(v, str) and v.strip().startswith("{"):
             try:
-                return json.loads(v)
-            except json.JSONDecodeError:
+                return orjson.loads(v)
+            except orjson.JSONDecodeError:
                 # Return the original value to let Pydantic handle the error or type mismatch
                 return v
         return v
@@ -100,8 +100,8 @@ class GeminiConfig(BaseModel):
     def _parse_models_json(cls, v: Any) -> Any:
         if isinstance(v, str) and v.strip().startswith("["):
             try:
-                return json.loads(v)
-            except json.JSONDecodeError as e:
+                return orjson.loads(v)
+            except orjson.JSONDecodeError as e:
                 logger.warning(f"Failed to parse models JSON string: {e}")
                 return v
         return v
@@ -282,9 +282,9 @@ def extract_gemini_models_env() -> dict[int, dict[str, Any]]:
         parsed_successfully = False
 
         try:
-            models_list = json.loads(val)
+            models_list = orjson.loads(val)
             parsed_successfully = True
-        except json.JSONDecodeError:
+        except orjson.JSONDecodeError:
             try:
                 models_list = ast.literal_eval(val)
                 parsed_successfully = True

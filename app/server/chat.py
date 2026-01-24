@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import json
 import random
 import re
 import uuid
@@ -97,7 +96,7 @@ def _build_structured_requirement(
     schema_name = json_schema.get("name") or "response"
     strict = json_schema.get("strict", True)
 
-    pretty_schema = json.dumps(schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    pretty_schema = orjson.dumps(schema, option=orjson.OPT_SORT_KEYS).decode("utf-8")
     instruction_parts = [
         "You must respond with a single valid JSON document that conforms to the schema shown below.",
         "Do not include explanations, comments, or any text before or after the JSON.",
@@ -137,7 +136,7 @@ def _build_tool_prompt(
         description = function.description or "No description provided."
         lines.append(f"Tool `{function.name}`: {description}")
         if function.parameters:
-            schema_text = json.dumps(function.parameters, ensure_ascii=False, separators=(",", ":"))
+            schema_text = orjson.dumps(function.parameters).decode("utf-8")
             lines.append("Arguments JSON schema:")
             lines.append(schema_text)
         else:
@@ -626,8 +625,8 @@ async def create_chat_completion(
                 detail="LLM returned an empty response while JSON schema output was requested.",
             )
         try:
-            structured_payload = json.loads(cleaned_visible)
-        except json.JSONDecodeError as exc:
+            structured_payload = orjson.loads(cleaned_visible)
+        except orjson.JSONDecodeError as exc:
             logger.warning(
                 f"Failed to decode JSON for structured response (schema={structured_requirement.schema_name}): "
                 f"{cleaned_visible}"
@@ -637,7 +636,7 @@ async def create_chat_completion(
                 detail="LLM returned invalid JSON for the requested response_format.",
             ) from exc
 
-        canonical_output = json.dumps(structured_payload, ensure_ascii=False, separators=(",", ":"))
+        canonical_output = orjson.dumps(structured_payload).decode("utf-8")
         visible_output = canonical_output
         storage_output = canonical_output
 
@@ -866,8 +865,8 @@ async def create_response(
                 detail="LLM returned an empty response while JSON schema output was requested.",
             )
         try:
-            structured_payload = json.loads(cleaned_visible)
-        except json.JSONDecodeError as exc:
+            structured_payload = orjson.loads(cleaned_visible)
+        except orjson.JSONDecodeError as exc:
             logger.warning(
                 f"Failed to decode JSON for structured response (schema={structured_requirement.schema_name}): "
                 f"{cleaned_visible}"
@@ -877,7 +876,7 @@ async def create_response(
                 detail="LLM returned invalid JSON for the requested response_format.",
             ) from exc
 
-        canonical_output = json.dumps(structured_payload, ensure_ascii=False, separators=(",", ":"))
+        canonical_output = orjson.dumps(structured_payload).decode("utf-8")
         assistant_text = canonical_output
         storage_output = canonical_output
         logger.debug(

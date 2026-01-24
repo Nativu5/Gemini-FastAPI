@@ -1,5 +1,4 @@
 import base64
-import json
 import mimetypes
 import re
 import struct
@@ -10,6 +9,7 @@ from typing import Iterator
 from urllib.parse import urlparse
 
 import httpx
+import orjson
 from loguru import logger
 
 from ..models import FunctionCall, Message, ToolCall
@@ -221,9 +221,9 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
 
         arguments = raw_args
         try:
-            parsed_args = json.loads(raw_args)
-            arguments = json.dumps(parsed_args, ensure_ascii=False, separators=(",", ":"))
-        except json.JSONDecodeError:
+            parsed_args = orjson.loads(raw_args)
+            arguments = orjson.dumps(parsed_args).decode("utf-8")
+        except orjson.JSONDecodeError:
             logger.warning(f"Failed to parse tool call arguments for '{name}'. Passing raw string.")
 
         tool_calls.append(
