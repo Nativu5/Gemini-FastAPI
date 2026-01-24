@@ -68,15 +68,16 @@ def _hash_message(message: Message) -> str:
         core_data["tool_calls"] = calls_data
     else:
         core_data["tool_calls"] = None
-        message_bytes = orjson.dumps(core_data, option=orjson.OPT_SORT_KEYS)
-        return hashlib.sha256(message_bytes).hexdigest()
+
+    message_bytes = orjson.dumps(core_data, option=orjson.OPT_SORT_KEYS)
+    return hashlib.sha256(message_bytes).hexdigest()
 
 
 def _hash_conversation(client_id: str, model: str, messages: List[Message]) -> str:
     """Generate a hash for a list of messages and model name, tied to a specific client_id."""
     combined_hash = hashlib.sha256()
-    combined_hash.update(client_id.encode("utf-8"))
-    combined_hash.update(model.encode("utf-8"))
+    combined_hash.update((client_id or "").encode("utf-8"))
+    combined_hash.update((model or "").encode("utf-8"))
     for message in messages:
         message_hash = _hash_message(message)
         combined_hash.update(message_hash.encode("utf-8"))
