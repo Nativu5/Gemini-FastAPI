@@ -1,7 +1,6 @@
-import asyncio
 import base64
-import random
 import re
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -375,9 +374,7 @@ def _response_items_to_messages(
             ResponseInputItem(type="message", role=item.role, content=normalized_contents or [])
         )
 
-    logger.debug(
-        f"Normalized Responses input: {len(normalized_input)} message items (developer roles mapped to system)."
-    )
+    logger.debug(f"Normalized Responses input: {len(normalized_input)} message items.")
     return messages, normalized_input
 
 
@@ -1077,19 +1074,18 @@ async def _find_reusable_session(
                     updated_at = conv.updated_at or conv.created_at or now
                     age_minutes = (now - updated_at).total_seconds() / 60
 
-                    if age_minutes > METADATA_TTL_MINUTES:
+                    if age_minutes <= METADATA_TTL_MINUTES:
+                        client = await pool.acquire(conv.client_id)
+                        session = client.start_chat(metadata=conv.metadata, model=model)
+                        remain = messages[search_end:]
+                        logger.debug(
+                            f"Match found at prefix length {search_end}. Client: {conv.client_id}"
+                        )
+                        return session, client, remain
+                    else:
                         logger.debug(
                             f"Matched conversation is too old ({age_minutes:.1f}m), skipping reuse."
                         )
-                        break
-
-                    client = await pool.acquire(conv.client_id)
-                    session = client.start_chat(metadata=conv.metadata, model=model)
-                    remain = messages[search_end:]
-                    logger.debug(
-                        f"Match found at prefix length {search_end}. Client: {conv.client_id}"
-                    )
-                    return session, client, remain
             except Exception as e:
                 logger.warning(
                     f"Error checking LMDB for reusable session at length {search_end}: {e}"
@@ -1103,13 +1099,9 @@ async def _find_reusable_session(
 
 
 async def _send_with_split(session: ChatSession, text: str, files: list[Path | str] | None = None):
-    """Send text to Gemini, automatically splitting into multiple batches if it is
-    longer than ``MAX_CHARS_PER_REQUEST``.
-
-    Every intermediate batch (that is **not** the last one) is suffixed with a hint
-    telling Gemini that more content will come, and it should simply reply with
-    "ok". The final batch carries any file uploads and the real user prompt so
-    that Gemini can produce the actual answer.
+    """
+    Send text to Gemini. If text is longer than ``MAX_CHARS_PER_REQUEST``,
+    it is converted into a temporary text file attachment to avoid splitting issues.
     """
     if len(text) <= MAX_CHARS_PER_REQUEST:
         try:
@@ -1118,54 +1110,36 @@ async def _send_with_split(session: ChatSession, text: str, files: list[Path | s
             logger.exception(f"Error sending message to Gemini: {e}")
             raise
 
-    hint_len = len(CONTINUATION_HINT)
-    safe_chunk_size = MAX_CHARS_PER_REQUEST - hint_len
+    logger.info(
+        f"Message length ({len(text)}) exceeds limit ({MAX_CHARS_PER_REQUEST}). Converting text to file attachment."
+    )
 
-    chunks: list[str] = []
-    pos = 0
-    total = len(text)
+    # Create a temporary directory to hold the message.txt file
+    # This ensures the filename is exactly 'message.txt' as expected by the instruction.
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        temp_file_path = Path(tmpdirname) / "message.txt"
+        temp_file_path.write_text(text, encoding="utf-8")
 
-    while pos < total:
-        remaining = total - pos
-        if remaining <= MAX_CHARS_PER_REQUEST:
-            chunks.append(text[pos:])
-            break
-
-        end = pos + safe_chunk_size
-        slice_candidate = text[pos:end]
-        # Try to find a safe split point
-        split_idx = -1
-        idx = slice_candidate.rfind("\n")
-        if idx != -1:
-            split_idx = idx
-
-        if split_idx != -1:
-            split_at = pos + split_idx + 1
-        else:
-            split_at = end
-
-        chunk = text[pos:split_at] + CONTINUATION_HINT
-        chunks.append(chunk)
-        pos = split_at
-
-    chunks_size = len(chunks)
-    for i, chk in enumerate(chunks[:-1]):
         try:
-            logger.debug(f"Sending chunk {i + 1}/{chunks_size}...")
-            await session.send_message(chk)
-            delay = random.uniform(1.0, 3.0)
-            logger.debug(f"Sleeping for {delay:.2f}s...")
-            await asyncio.sleep(delay)
-        except Exception as e:
-            logger.exception(f"Error sending chunk to Gemini: {e}")
-            raise
+            # Prepare the files list
+            final_files = list(files) if files else []
+            final_files.append(temp_file_path)
 
-    try:
-        logger.debug(f"Sending final chunk {chunks_size}/{chunks_size}...")
-        return await session.send_message(chunks[-1], files=files)
-    except Exception as e:
-        logger.exception(f"Error sending final chunk to Gemini: {e}")
-        raise
+            instruction = (
+                "The user's input exceeds the character limit and is provided in the attached file `message.txt`.\n\n"
+                "**System Instruction:**\n"
+                "1. Read the content of `message.txt`.\n"
+                "2. Treat that content as the **primary** user prompt for this turn.\n"
+                "3. Execute the instructions or answer the questions found *inside* that file immediately.\n"
+            )
+
+            logger.debug(f"Sending prompt as temporary file: {temp_file_path}")
+
+            return await session.send_message(instruction, files=final_files)
+
+        except Exception as e:
+            logger.exception(f"Error sending large text as file to Gemini: {e}")
+            raise
 
 
 def _create_streaming_response(

@@ -43,8 +43,9 @@ def _hash_message(message: Message) -> str:
                 break
 
         if text_parts is not None:
-            text_content = "".join(text_parts).replace("\r\n", "\n").strip()
-            core_data["content"] = text_content if text_content else None
+            # Normalize each part but keep them as a list to preserve boundaries and avoid collisions
+            normalized_parts = [p.replace("\r\n", "\n") for p in text_parts]
+            core_data["content"] = normalized_parts if normalized_parts else None
         else:
             core_data["content"] = message.model_dump(mode="json")["content"]
 

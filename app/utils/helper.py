@@ -213,7 +213,7 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
 
     tool_calls: list[ToolCall] = []
 
-    def _create_tool_call(name: str, raw_args: str, index: int) -> None:
+    def _create_tool_call(name: str, raw_args: str) -> None:
         """Helper to parse args and append to the tool_calls list."""
         if not name:
             logger.warning("Encountered tool_call without a function name.")
@@ -226,7 +226,9 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
         except orjson.JSONDecodeError:
             logger.warning(f"Failed to parse tool call arguments for '{name}'. Passing raw string.")
 
-        # Generate a deterministic ID based on name, arguments, and index to avoid collisions
+        # Generate a deterministic ID based on name, arguments, and its global sequence index
+        # to ensure uniqueness across multiple fenced blocks while remaining stable for storage.
+        index = len(tool_calls)
         seed = f"{name}:{arguments}:{index}".encode("utf-8")
         call_id = f"call_{hashlib.sha256(seed).hexdigest()[:24]}"
 
@@ -244,11 +246,11 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
             return match.group(0)
 
         found_in_block = False
-        for i, call_match in enumerate(TOOL_CALL_RE.finditer(block_content)):
+        for call_match in TOOL_CALL_RE.finditer(block_content):
             found_in_block = True
             name = (call_match.group(1) or "").strip()
             raw_args = (call_match.group(2) or "").strip()
-            _create_tool_call(name, raw_args, i)
+            _create_tool_call(name, raw_args)
 
         if found_in_block:
             return ""
@@ -258,10 +260,9 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
     cleaned = TOOL_BLOCK_RE.sub(_replace_block, text)
 
     def _replace_orphan(match: re.Match[str]) -> str:
-        # Note: orphan calls are handled with a fallback index if they appear outside blocks
         name = (match.group(1) or "").strip()
         raw_args = (match.group(2) or "").strip()
-        _create_tool_call(name, raw_args, len(tool_calls))
+        _create_tool_call(name, raw_args)
         return ""
 
     cleaned = TOOL_CALL_RE.sub(_replace_orphan, cleaned)
