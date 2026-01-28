@@ -11,45 +11,98 @@ from loguru import logger
 
 from ..models import ContentItem, ConversationInStore, Message
 from ..utils import g_config
-from ..utils.helper import extract_tool_calls, remove_tool_call_blocks
+from ..utils.helper import (
+    CODE_BLOCK_HINT,
+    CODE_HINT_STRIPPED,
+    XML_HINT_STRIPPED,
+    XML_WRAP_HINT,
+    extract_tool_calls,
+    remove_tool_call_blocks,
+)
 from ..utils.singleton import Singleton
 
 
 def _hash_message(message: Message) -> str:
-    """Generate a consistent hash for a single message focusing ONLY on logic/content, ignoring technical IDs."""
+    """
+    Generate a stable, canonical hash for a single message.
+    Strips system hints, thoughts, and tool call blocks to ensure
+    identical logical content produces the same hash regardless of format.
+    """
     core_data = {
         "role": message.role,
         "name": message.name,
+        "tool_call_id": message.tool_call_id,
     }
 
-    # Normalize content: strip, handle empty/None, and list-of-text items
     content = message.content
     if not content:
         core_data["content"] = None
     elif isinstance(content, str):
-        # Normalize line endings and strip whitespace
-        normalized = content.replace("\r\n", "\n").strip()
+        normalized = content.replace("\r\n", "\n")
+
+        normalized = LMDBConversationStore.remove_think_tags(normalized)
+
+        for hint in [
+            XML_WRAP_HINT,
+            XML_HINT_STRIPPED,
+            CODE_BLOCK_HINT,
+            CODE_HINT_STRIPPED,
+        ]:
+            normalized = normalized.replace(hint, "")
+
+        if message.tool_calls:
+            normalized = remove_tool_call_blocks(normalized)
+        else:
+            temp_text, _extracted = extract_tool_calls(normalized)
+            normalized = temp_text
+
+        normalized = normalized.strip()
         core_data["content"] = normalized if normalized else None
     elif isinstance(content, list):
         text_parts = []
         for item in content:
+            text_val = ""
             if isinstance(item, ContentItem) and item.type == "text":
-                text_parts.append(item.text or "")
+                text_val = item.text or ""
             elif isinstance(item, dict) and item.get("type") == "text":
-                text_parts.append(item.get("text") or "")
+                text_val = item.get("text") or ""
+
+            if text_val:
+                text_val = text_val.replace("\r\n", "\n")
+                text_val = LMDBConversationStore.remove_think_tags(text_val)
+                for hint in [
+                    XML_WRAP_HINT,
+                    XML_HINT_STRIPPED,
+                    CODE_BLOCK_HINT,
+                    CODE_HINT_STRIPPED,
+                ]:
+                    text_val = text_val.replace(hint, "")
+                text_val = remove_tool_call_blocks(text_val).strip()
+                if text_val:
+                    text_parts.append(text_val)
+            elif isinstance(item, ContentItem) and item.type in ("image_url", "file"):
+                # For non-text items, include their unique markers to distinguish them
+                if item.type == "image_url":
+                    text_parts.append(
+                        f"[image_url:{item.image_url.get('url') if item.image_url else ''}]"
+                    )
+                elif item.type == "file":
+                    text_parts.append(
+                        f"[file:{item.file.get('url') or item.file.get('filename') if item.file else ''}]"
+                    )
             else:
-                # If it contains non-text (images/files), keep the full list for hashing
-                text_parts = None
-                break
+                # Fallback for other dict-based content parts
+                part_type = item.get("type") if isinstance(item, dict) else None
+                if part_type == "image_url":
+                    url = item.get("image_url", {}).get("url")
+                    text_parts.append(f"[image_url:{url}]")
+                elif part_type == "file":
+                    url = item.get("file", {}).get("url") or item.get("file", {}).get("filename")
+                    text_parts.append(f"[file:{url}]")
 
-        if text_parts is not None:
-            # Normalize each part but keep them as a list to preserve boundaries and avoid collisions
-            normalized_parts = [p.replace("\r\n", "\n") for p in text_parts]
-            core_data["content"] = normalized_parts if normalized_parts else None
-        else:
-            core_data["content"] = message.model_dump(mode="json")["content"]
+        combined_text = "\n".join(text_parts).replace("\r\n", "\n").strip()
+        core_data["content"] = combined_text if combined_text else None
 
-    # Normalize tool_calls: Focus ONLY on function name and arguments
     if message.tool_calls:
         calls_data = []
         for tc in message.tool_calls:
@@ -66,14 +119,14 @@ def _hash_message(message: Message) -> str:
                     "arguments": canon_args,
                 }
             )
-        # Sort calls to be order-independent
         calls_data.sort(key=lambda x: (x["name"], x["arguments"]))
         core_data["tool_calls"] = calls_data
     else:
         core_data["tool_calls"] = None
 
     message_bytes = orjson.dumps(core_data, option=orjson.OPT_SORT_KEYS)
-    return hashlib.sha256(message_bytes).hexdigest()
+    digest = hashlib.sha256(message_bytes).hexdigest()
+    return digest
 
 
 def _hash_conversation(client_id: str, model: str, messages: List[Message]) -> str:
@@ -123,16 +176,14 @@ class LMDBConversationStore(metaclass=Singleton):
         self._init_environment()
 
     def _ensure_db_path(self) -> None:
-        """Ensure database directory exists."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _init_environment(self) -> None:
-        """Initialize LMDB environment."""
         try:
             self._env = lmdb.open(
                 str(self.db_path),
                 map_size=self.max_db_size,
-                max_dbs=3,  # main, metadata, and index databases
+                max_dbs=3,
                 writemap=True,
                 readahead=False,
                 meminit=False,
@@ -144,7 +195,6 @@ class LMDBConversationStore(metaclass=Singleton):
 
     @contextmanager
     def _get_transaction(self, write: bool = False):
-        """Get LMDB transaction context manager."""
         if not self._env:
             raise RuntimeError("LMDB environment not initialized")
 
@@ -178,11 +228,15 @@ class LMDBConversationStore(metaclass=Singleton):
         if not conv:
             raise ValueError("Messages list cannot be empty")
 
+        # Sanitize messages before computing hash and storing to ensure consistency
+        # with the search (find) logic, which also sanitizes its prefix.
+        sanitized_messages = self.sanitize_assistant_messages(conv.messages)
+        conv.messages = sanitized_messages
+
         # Generate hash for the message list
         message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
         storage_key = custom_key or message_hash
 
-        # Prepare data for storage
         now = datetime.now()
         if conv.created_at is None:
             conv.created_at = now
@@ -192,20 +246,18 @@ class LMDBConversationStore(metaclass=Singleton):
 
         try:
             with self._get_transaction(write=True) as txn:
-                # Store main data
                 txn.put(storage_key.encode("utf-8"), value, overwrite=True)
 
-                # Store hash -> key mapping for reverse lookup
                 txn.put(
                     f"{self.HASH_LOOKUP_PREFIX}{message_hash}".encode("utf-8"),
                     storage_key.encode("utf-8"),
                 )
 
-                logger.debug(f"Stored {len(conv.messages)} messages with key: {storage_key}")
+                logger.debug(f"Stored {len(conv.messages)} messages with key: {storage_key[:12]}")
                 return storage_key
 
         except Exception as e:
-            logger.error(f"Failed to store conversation: {e}")
+            logger.error(f"Failed to store messages with key {storage_key[:12]}: {e}")
             raise
 
     def get(self, key: str) -> Optional[ConversationInStore]:
@@ -227,39 +279,35 @@ class LMDBConversationStore(metaclass=Singleton):
                 storage_data = orjson.loads(data)  # type: ignore
                 conv = ConversationInStore.model_validate(storage_data)
 
-                logger.debug(f"Retrieved {len(conv.messages)} messages for key: {key}")
+                logger.debug(f"Retrieved {len(conv.messages)} messages with key: {key[:12]}")
                 return conv
 
         except Exception as e:
-            logger.error(f"Failed to retrieve messages for key {key}: {e}")
+            logger.error(f"Failed to retrieve messages with key {key[:12]}: {e}")
             return None
 
     def find(self, model: str, messages: List[Message]) -> Optional[ConversationInStore]:
         """
         Search conversation data by message list.
-
-        Args:
-            model: Model name of the conversations
-            messages: List of messages to search for
-
-        Returns:
-            Conversation or None if not found
         """
         if not messages:
             return None
 
         # --- Find with raw messages ---
         if conv := self._find_by_message_list(model, messages):
-            logger.debug("Found conversation with raw message history.")
+            logger.debug(f"Session found for '{model}' with {len(messages)} raw messages.")
             return conv
 
         # --- Find with cleaned messages ---
         cleaned_messages = self.sanitize_assistant_messages(messages)
-        if conv := self._find_by_message_list(model, cleaned_messages):
-            logger.debug("Found conversation with cleaned message history.")
-            return conv
+        if cleaned_messages != messages:
+            if conv := self._find_by_message_list(model, cleaned_messages):
+                logger.debug(
+                    f"Session found for '{model}' with {len(cleaned_messages)} cleaned messages."
+                )
+                return conv
 
-        logger.debug("No conversation found for either raw or cleaned history.")
+        logger.debug(f"No session found for '{model}' with {len(messages)} messages.")
         return None
 
     def _find_by_message_list(
@@ -330,11 +378,11 @@ class LMDBConversationStore(metaclass=Singleton):
                 if message_hash and key != message_hash:
                     txn.delete(f"{self.HASH_LOOKUP_PREFIX}{message_hash}".encode("utf-8"))
 
-                logger.debug(f"Deleted messages with key: {key}")
+                logger.debug(f"Deleted messages with key: {key[:12]}")
                 return conv
 
         except Exception as e:
-            logger.error(f"Failed to delete key {key}: {e}")
+            logger.error(f"Failed to delete messages with key {key[:12]}: {e}")
             return None
 
     def keys(self, prefix: str = "", limit: Optional[int] = None) -> List[str]:
@@ -478,6 +526,8 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         Remove all <think>...</think> tags and strip whitespace.
         """
+        if not text:
+            return text
         # Remove all think blocks anywhere in the text
         cleaned_content = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         return cleaned_content.strip()
@@ -485,12 +535,8 @@ class LMDBConversationStore(metaclass=Singleton):
     @staticmethod
     def sanitize_assistant_messages(messages: list[Message]) -> list[Message]:
         """
-        Create a new list of messages with assistant content cleaned of <think> tags
-        and system hints/tool call blocks. This is used for both storing and
-        searching chat history to ensure consistency.
-
-        If a message has no tool_calls but contains tool call XML blocks in its
-        content, they will be extracted and moved to the tool_calls field.
+        Produce a canonical history where assistant messages are cleaned of
+        internal markers and tool call blocks are moved to metadata.
         """
         cleaned_messages = []
         for msg in messages:
@@ -503,12 +549,12 @@ class LMDBConversationStore(metaclass=Singleton):
                     else:
                         text = remove_tool_call_blocks(text).strip()
 
-                    normalized_content = text.strip()
+                    normalized_content = text.strip() or None
 
                     if normalized_content != msg.content or tool_calls != msg.tool_calls:
                         cleaned_msg = msg.model_copy(
                             update={
-                                "content": normalized_content or None,
+                                "content": normalized_content,
                                 "tool_calls": tool_calls or None,
                             }
                         )

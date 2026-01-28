@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class ContentItem(BaseModel):
-    """Content item model"""
+    """Individual content item (text, image, or file) within a message."""
 
     type: Literal["text", "image_url", "file", "input_audio"]
     text: Optional[str] = None
@@ -159,7 +159,7 @@ class ConversationInStore(BaseModel):
     created_at: Optional[datetime] = Field(default=None)
     updated_at: Optional[datetime] = Field(default=None)
 
-    # NOTE: Gemini Web API do not support changing models once a conversation is created.
+    # Gemini Web API does not support changing models once a conversation is created.
     model: str = Field(..., description="Model used for the conversation")
     client_id: str = Field(..., description="Identifier of the Gemini client")
     metadata: list[str | None] = Field(

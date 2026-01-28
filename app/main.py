@@ -15,7 +15,7 @@ from .server.middleware import (
 )
 from .services import GeminiClientPool, LMDBConversationStore
 
-RETENTION_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60  # 6 hours
+RETENTION_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60  # Check every 6 hours
 
 
 async def _run_retention_cleanup(stop_event: asyncio.Event) -> None:

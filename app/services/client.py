@@ -78,7 +78,8 @@ class GeminiClientWrapper(GeminiClient):
         message: Message, tempdir: Path | None = None, tagged: bool = True
     ) -> tuple[str, list[Path | str]]:
         """
-        Process a single message and return model input.
+        Process a single Message object into a format suitable for the Gemini API.
+        Extracts text fragments, handles images and files, and appends tool call blocks if present.
         """
         files: list[Path | str] = []
         text_fragments: list[str] = []
@@ -88,8 +89,7 @@ class GeminiClientWrapper(GeminiClient):
             if message.content:
                 text_fragments.append(message.content)
         elif isinstance(message.content, list):
-            # Mixed content
-            # TODO: Use Pydantic to enforce the value checking
+            # Mixed content (text, image_url, or file)
             for item in message.content:
                 if item.type == "text":
                     # Append multiple text fragments
@@ -177,7 +177,8 @@ class GeminiClientWrapper(GeminiClient):
     @staticmethod
     def extract_output(response: ModelOutput, include_thoughts: bool = True) -> str:
         """
-        Extract and format the output text from the Gemini response.
+        Extract and format the output text from a ModelOutput.
+        Includes reasoning thoughts (wrapped in <think> tags) and unescapes content.
         """
         text = ""
 
@@ -191,6 +192,7 @@ class GeminiClientWrapper(GeminiClient):
 
         # Fix some escaped characters
         def _unescape_html(text_content: str) -> str:
+            """Unescape HTML entities only in non-code sections of the text."""
             parts: list[str] = []
             last_index = 0
             for match in CODE_FENCE_RE.finditer(text_content):
@@ -205,6 +207,7 @@ class GeminiClientWrapper(GeminiClient):
             return "".join(parts)
 
         def _unescape_markdown(text_content: str) -> str:
+            """Remove backslash escapes for markdown characters in non-code sections."""
             parts: list[str] = []
             last_index = 0
             for match in CODE_FENCE_RE.finditer(text_content):
