@@ -9,25 +9,78 @@ import lmdb
 import orjson
 from loguru import logger
 
-from ..models import ConversationInStore, Message
+from ..models import ContentItem, ConversationInStore, Message
 from ..utils import g_config
+from ..utils.helper import extract_tool_calls, remove_tool_call_blocks
 from ..utils.singleton import Singleton
 
 
 def _hash_message(message: Message) -> str:
-    """Generate a hash for a single message."""
-    # Convert message to dict and sort keys for consistent hashing
-    message_dict = message.model_dump(mode="json")
-    message_bytes = orjson.dumps(message_dict, option=orjson.OPT_SORT_KEYS)
+    """Generate a consistent hash for a single message focusing ONLY on logic/content, ignoring technical IDs."""
+    core_data = {
+        "role": message.role,
+        "name": message.name,
+    }
+
+    # Normalize content: strip, handle empty/None, and list-of-text items
+    content = message.content
+    if not content:
+        core_data["content"] = None
+    elif isinstance(content, str):
+        # Normalize line endings and strip whitespace
+        normalized = content.replace("\r\n", "\n").strip()
+        core_data["content"] = normalized if normalized else None
+    elif isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, ContentItem) and item.type == "text":
+                text_parts.append(item.text or "")
+            elif isinstance(item, dict) and item.get("type") == "text":
+                text_parts.append(item.get("text") or "")
+            else:
+                # If it contains non-text (images/files), keep the full list for hashing
+                text_parts = None
+                break
+
+        if text_parts is not None:
+            # Normalize each part but keep them as a list to preserve boundaries and avoid collisions
+            normalized_parts = [p.replace("\r\n", "\n") for p in text_parts]
+            core_data["content"] = normalized_parts if normalized_parts else None
+        else:
+            core_data["content"] = message.model_dump(mode="json")["content"]
+
+    # Normalize tool_calls: Focus ONLY on function name and arguments
+    if message.tool_calls:
+        calls_data = []
+        for tc in message.tool_calls:
+            args = tc.function.arguments or "{}"
+            try:
+                parsed = orjson.loads(args)
+                canon_args = orjson.dumps(parsed, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+            except orjson.JSONDecodeError:
+                canon_args = args
+
+            calls_data.append(
+                {
+                    "name": tc.function.name,
+                    "arguments": canon_args,
+                }
+            )
+        # Sort calls to be order-independent
+        calls_data.sort(key=lambda x: (x["name"], x["arguments"]))
+        core_data["tool_calls"] = calls_data
+    else:
+        core_data["tool_calls"] = None
+
+    message_bytes = orjson.dumps(core_data, option=orjson.OPT_SORT_KEYS)
     return hashlib.sha256(message_bytes).hexdigest()
 
 
 def _hash_conversation(client_id: str, model: str, messages: List[Message]) -> str:
-    """Generate a hash for a list of messages and client id."""
-    # Create a combined hash from all individual message hashes
+    """Generate a hash for a list of messages and model name, tied to a specific client_id."""
     combined_hash = hashlib.sha256()
-    combined_hash.update(client_id.encode("utf-8"))
-    combined_hash.update(model.encode("utf-8"))
+    combined_hash.update((client_id or "").encode("utf-8"))
+    combined_hash.update((model or "").encode("utf-8"))
     for message in messages:
         message_hash = _hash_message(message)
         combined_hash.update(message_hash.encode("utf-8"))
@@ -210,12 +263,13 @@ class LMDBConversationStore(metaclass=Singleton):
         return None
 
     def _find_by_message_list(
-        self, model: str, messages: List[Message]
+        self,
+        model: str,
+        messages: List[Message],
     ) -> Optional[ConversationInStore]:
         """Internal find implementation based on a message list."""
         for c in g_config.gemini.clients:
             message_hash = _hash_conversation(c.id, model, messages)
-
             key = f"{self.HASH_LOOKUP_PREFIX}{message_hash}"
             try:
                 with self._get_transaction(write=False) as txn:
@@ -422,25 +476,78 @@ class LMDBConversationStore(metaclass=Singleton):
     @staticmethod
     def remove_think_tags(text: str) -> str:
         """
-        Remove <think>...</think> tags at the start of text and strip whitespace.
+        Remove all <think>...</think> tags and strip whitespace.
         """
-        cleaned_content = re.sub(r"^(\s*<think>.*?</think>\n?)", "", text, flags=re.DOTALL)
+        # Remove all think blocks anywhere in the text
+        cleaned_content = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         return cleaned_content.strip()
 
     @staticmethod
     def sanitize_assistant_messages(messages: list[Message]) -> list[Message]:
         """
-        Create a new list of messages with assistant content cleaned of <think> tags.
-        This is useful for store the chat history.
+        Create a new list of messages with assistant content cleaned of <think> tags
+        and system hints/tool call blocks. This is used for both storing and
+        searching chat history to ensure consistency.
+
+        If a message has no tool_calls but contains tool call XML blocks in its
+        content, they will be extracted and moved to the tool_calls field.
         """
         cleaned_messages = []
         for msg in messages:
-            if msg.role == "assistant" and isinstance(msg.content, str):
-                normalized_content = LMDBConversationStore.remove_think_tags(msg.content)
-                # Only create a new object if content actually changed
-                if normalized_content != msg.content:
-                    cleaned_msg = Message(role=msg.role, content=normalized_content, name=msg.name)
-                    cleaned_messages.append(cleaned_msg)
+            if msg.role == "assistant":
+                if isinstance(msg.content, str):
+                    text = LMDBConversationStore.remove_think_tags(msg.content)
+                    tool_calls = msg.tool_calls
+                    if not tool_calls:
+                        text, tool_calls = extract_tool_calls(text)
+                    else:
+                        text = remove_tool_call_blocks(text).strip()
+
+                    normalized_content = text.strip()
+
+                    if normalized_content != msg.content or tool_calls != msg.tool_calls:
+                        cleaned_msg = msg.model_copy(
+                            update={
+                                "content": normalized_content or None,
+                                "tool_calls": tool_calls or None,
+                            }
+                        )
+                        cleaned_messages.append(cleaned_msg)
+                    else:
+                        cleaned_messages.append(msg)
+                elif isinstance(msg.content, list):
+                    new_content = []
+                    all_extracted_calls = list(msg.tool_calls or [])
+                    changed = False
+
+                    for item in msg.content:
+                        if isinstance(item, ContentItem) and item.type == "text" and item.text:
+                            text = LMDBConversationStore.remove_think_tags(item.text)
+
+                            if not msg.tool_calls:
+                                text, extracted = extract_tool_calls(text)
+                                if extracted:
+                                    all_extracted_calls.extend(extracted)
+                                    changed = True
+                            else:
+                                text = remove_tool_call_blocks(text).strip()
+
+                            if text != item.text:
+                                changed = True
+                                item = item.model_copy(update={"text": text.strip() or None})
+                        new_content.append(item)
+
+                    if changed:
+                        cleaned_messages.append(
+                            msg.model_copy(
+                                update={
+                                    "content": new_content,
+                                    "tool_calls": all_extracted_calls or None,
+                                }
+                            )
+                        )
+                    else:
+                        cleaned_messages.append(msg)
                 else:
                     cleaned_messages.append(msg)
             else:

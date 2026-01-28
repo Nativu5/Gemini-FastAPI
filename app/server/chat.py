@@ -1,6 +1,6 @@
 import base64
-import json
 import re
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -57,6 +57,7 @@ from .middleware import get_image_store_dir, get_image_token, get_temp_dir, veri
 # Maximum characters Gemini Web can accept in a single request (configurable)
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 CONTINUATION_HINT = "\n(More messages to come, please reply with just 'ok.')"
+METADATA_TTL_MINUTES = 15
 
 router = APIRouter()
 
@@ -95,7 +96,7 @@ def _build_structured_requirement(
     schema_name = json_schema.get("name") or "response"
     strict = json_schema.get("strict", True)
 
-    pretty_schema = json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True)
+    pretty_schema = orjson.dumps(schema, option=orjson.OPT_SORT_KEYS).decode("utf-8")
     instruction_parts = [
         "You must respond with a single valid JSON document that conforms to the schema shown below.",
         "Do not include explanations, comments, or any text before or after the JSON.",
@@ -135,7 +136,7 @@ def _build_tool_prompt(
         description = function.description or "No description provided."
         lines.append(f"Tool `{function.name}`: {description}")
         if function.parameters:
-            schema_text = json.dumps(function.parameters, ensure_ascii=False, indent=2)
+            schema_text = orjson.dumps(function.parameters).decode("utf-8")
             lines.append("Arguments JSON schema:")
             lines.append(schema_text)
         else:
@@ -266,31 +267,35 @@ def _prepare_messages_for_model(
     tools: list[Tool] | None,
     tool_choice: str | ToolChoiceFunction | None,
     extra_instructions: list[str] | None = None,
+    inject_system_defaults: bool = True,
 ) -> list[Message]:
     """Return a copy of messages enriched with tool instructions when needed."""
     prepared = [msg.model_copy(deep=True) for msg in source_messages]
 
     instructions: list[str] = []
-    if tools:
-        tool_prompt = _build_tool_prompt(tools, tool_choice)
-        if tool_prompt:
-            instructions.append(tool_prompt)
+    if inject_system_defaults:
+        if tools:
+            tool_prompt = _build_tool_prompt(tools, tool_choice)
+            if tool_prompt:
+                instructions.append(tool_prompt)
 
-    if extra_instructions:
-        instructions.extend(instr for instr in extra_instructions if instr)
-        logger.debug(
-            f"Applied {len(extra_instructions)} extra instructions for tool/structured output."
-        )
+        if extra_instructions:
+            instructions.extend(instr for instr in extra_instructions if instr)
+            logger.debug(
+                f"Applied {len(extra_instructions)} extra instructions for tool/structured output."
+            )
 
-    if not _conversation_has_code_hint(prepared):
-        instructions.append(CODE_BLOCK_HINT)
-        logger.debug("Injected default code block hint for Gemini conversation.")
+        if not _conversation_has_code_hint(prepared):
+            instructions.append(CODE_BLOCK_HINT)
+            logger.debug("Injected default code block hint for Gemini conversation.")
 
     if not instructions:
+        # Still need to ensure XML hint for the last user message if tools are present
+        if tools and tool_choice != "none":
+            _append_xml_hint_to_last_user_message(prepared)
         return prepared
 
     combined_instructions = "\n\n".join(instructions)
-
     if prepared and prepared[0].role == "system" and isinstance(prepared[0].content, str):
         existing = prepared[0].content or ""
         separator = "\n\n" if existing else ""
@@ -318,8 +323,6 @@ def _response_items_to_messages(
     normalized_input: list[ResponseInputItem] = []
     for item in items:
         role = item.role
-        if role == "developer":
-            role = "system"
 
         content = item.content
         normalized_contents: list[ResponseInputContent] = []
@@ -371,9 +374,7 @@ def _response_items_to_messages(
             ResponseInputItem(type="message", role=item.role, content=normalized_contents or [])
         )
 
-    logger.debug(
-        f"Normalized Responses input: {len(normalized_input)} message items (developer roles mapped to system)."
-    )
+    logger.debug(f"Normalized Responses input: {len(normalized_input)} message items.")
     return messages, normalized_input
 
 
@@ -393,8 +394,6 @@ def _instructions_to_messages(
             continue
 
         role = item.role
-        if role == "developer":
-            role = "system"
 
         content = item.content
         if isinstance(content, str):
@@ -532,8 +531,14 @@ async def create_chat_completion(
     )
 
     if session:
+        # Optimization: When reusing a session, we don't need to resend the heavy tool definitions
+        # or structured output instructions as they are already in the Gemini session history.
         messages_to_send = _prepare_messages_for_model(
-            remaining_messages, request.tools, request.tool_choice, extra_instructions
+            remaining_messages,
+            request.tools,
+            request.tool_choice,
+            extra_instructions,
+            inject_system_defaults=False,
         )
         if not messages_to_send:
             raise HTTPException(
@@ -624,8 +629,8 @@ async def create_chat_completion(
                 detail="LLM returned an empty response while JSON schema output was requested.",
             )
         try:
-            structured_payload = json.loads(cleaned_visible)
-        except json.JSONDecodeError as exc:
+            structured_payload = orjson.loads(cleaned_visible)
+        except orjson.JSONDecodeError as exc:
             logger.warning(
                 f"Failed to decode JSON for structured response (schema={structured_requirement.schema_name}): "
                 f"{cleaned_visible}"
@@ -635,7 +640,7 @@ async def create_chat_completion(
                 detail="LLM returned invalid JSON for the requested response_format.",
             ) from exc
 
-        canonical_output = json.dumps(structured_payload, ensure_ascii=False)
+        canonical_output = orjson.dumps(structured_payload).decode("utf-8")
         visible_output = canonical_output
         storage_output = canonical_output
 
@@ -644,17 +649,20 @@ async def create_chat_completion(
 
     # After formatting, persist the conversation to LMDB
     try:
-        last_message = Message(
+        current_assistant_message = Message(
             role="assistant",
             content=storage_output or None,
             tool_calls=tool_calls or None,
         )
-        cleaned_history = db.sanitize_assistant_messages(request.messages)
+        # Sanitize the entire history including the new message to ensure consistency
+        full_history = [*request.messages, current_assistant_message]
+        cleaned_history = db.sanitize_assistant_messages(full_history)
+
         conv = ConversationInStore(
             model=model.model_name,
             client_id=client.id,
             metadata=session.metadata,
-            messages=[*cleaned_history, last_message],
+            messages=cleaned_history,
         )
         key = db.store(conv)
         logger.debug(f"Conversation saved to LMDB with key: {key}")
@@ -782,9 +790,10 @@ async def create_response(
     if reuse_session:
         messages_to_send = _prepare_messages_for_model(
             remaining_messages,
-            tools=None,
-            tool_choice=None,
-            extra_instructions=extra_instructions or None,
+            tools=request_data.tools,  # Keep for XML hint logic
+            tool_choice=request_data.tool_choice,
+            extra_instructions=None,  # Already in session history
+            inject_system_defaults=False,
         )
         if not messages_to_send:
             raise HTTPException(
@@ -864,8 +873,8 @@ async def create_response(
                 detail="LLM returned an empty response while JSON schema output was requested.",
             )
         try:
-            structured_payload = json.loads(cleaned_visible)
-        except json.JSONDecodeError as exc:
+            structured_payload = orjson.loads(cleaned_visible)
+        except orjson.JSONDecodeError as exc:
             logger.warning(
                 f"Failed to decode JSON for structured response (schema={structured_requirement.schema_name}): "
                 f"{cleaned_visible}"
@@ -875,7 +884,7 @@ async def create_response(
                 detail="LLM returned invalid JSON for the requested response_format.",
             ) from exc
 
-        canonical_output = json.dumps(structured_payload, ensure_ascii=False)
+        canonical_output = orjson.dumps(structured_payload).decode("utf-8")
         assistant_text = canonical_output
         storage_output = canonical_output
         logger.debug(
@@ -996,17 +1005,19 @@ async def create_response(
     )
 
     try:
-        last_message = Message(
+        current_assistant_message = Message(
             role="assistant",
             content=storage_output or None,
             tool_calls=detected_tool_calls or None,
         )
-        cleaned_history = db.sanitize_assistant_messages(messages)
+        full_history = [*messages, current_assistant_message]
+        cleaned_history = db.sanitize_assistant_messages(full_history)
+
         conv = ConversationInStore(
             model=model.model_name,
             client_id=client.id,
             metadata=session.metadata,
-            messages=[*cleaned_history, last_message],
+            messages=cleaned_history,
         )
         key = db.store(conv)
         logger.debug(f"Conversation saved to LMDB with key: {key}")
@@ -1050,19 +1061,35 @@ async def _find_reusable_session(
 
     # Start with the full history and iteratively trim from the end.
     search_end = len(messages)
+
     while search_end >= 2:
         search_history = messages[:search_end]
 
-        # Only try to match if the last stored message would be assistant/system.
-        if search_history[-1].role in {"assistant", "system"}:
+        # Only try to match if the last stored message would be assistant/system/tool before querying LMDB.
+        if search_history[-1].role in {"assistant", "system", "tool"}:
             try:
                 if conv := db.find(model.model_name, search_history):
-                    client = await pool.acquire(conv.client_id)
-                    session = client.start_chat(metadata=conv.metadata, model=model)
-                    remain = messages[search_end:]
-                    return session, client, remain
+                    # Check if metadata is too old
+                    now = datetime.now()
+                    updated_at = conv.updated_at or conv.created_at or now
+                    age_minutes = (now - updated_at).total_seconds() / 60
+
+                    if age_minutes <= METADATA_TTL_MINUTES:
+                        client = await pool.acquire(conv.client_id)
+                        session = client.start_chat(metadata=conv.metadata, model=model)
+                        remain = messages[search_end:]
+                        logger.debug(
+                            f"Match found at prefix length {search_end}. Client: {conv.client_id}"
+                        )
+                        return session, client, remain
+                    else:
+                        logger.debug(
+                            f"Matched conversation is too old ({age_minutes:.1f}m), skipping reuse."
+                        )
             except Exception as e:
-                logger.warning(f"Error checking LMDB for reusable session: {e}")
+                logger.warning(
+                    f"Error checking LMDB for reusable session at length {search_end}: {e}"
+                )
                 break
 
         # Trim one message and try again.
@@ -1072,51 +1099,47 @@ async def _find_reusable_session(
 
 
 async def _send_with_split(session: ChatSession, text: str, files: list[Path | str] | None = None):
-    """Send text to Gemini, automatically splitting into multiple batches if it is
-    longer than ``MAX_CHARS_PER_REQUEST``.
-
-    Every intermediate batch (that is **not** the last one) is suffixed with a hint
-    telling Gemini that more content will come, and it should simply reply with
-    "ok". The final batch carries any file uploads and the real user prompt so
-    that Gemini can produce the actual answer.
+    """
+    Send text to Gemini. If text is longer than ``MAX_CHARS_PER_REQUEST``,
+    it is converted into a temporary text file attachment to avoid splitting issues.
     """
     if len(text) <= MAX_CHARS_PER_REQUEST:
-        # No need to split - a single request is fine.
         try:
             return await session.send_message(text, files=files)
         except Exception as e:
             logger.exception(f"Error sending message to Gemini: {e}")
             raise
-    hint_len = len(CONTINUATION_HINT)
-    chunk_size = MAX_CHARS_PER_REQUEST - hint_len
 
-    chunks: list[str] = []
-    pos = 0
-    total = len(text)
-    while pos < total:
-        end = min(pos + chunk_size, total)
-        chunk = text[pos:end]
-        pos = end
+    logger.info(
+        f"Message length ({len(text)}) exceeds limit ({MAX_CHARS_PER_REQUEST}). Converting text to file attachment."
+    )
 
-        # If this is NOT the last chunk, add the continuation hint.
-        if end < total:
-            chunk += CONTINUATION_HINT
-        chunks.append(chunk)
+    # Create a temporary directory to hold the message.txt file
+    # This ensures the filename is exactly 'message.txt' as expected by the instruction.
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        temp_file_path = Path(tmpdirname) / "message.txt"
+        temp_file_path.write_text(text, encoding="utf-8")
 
-    # Fire off all but the last chunk, discarding the interim "ok" replies.
-    for chk in chunks[:-1]:
         try:
-            await session.send_message(chk)
-        except Exception as e:
-            logger.exception(f"Error sending chunk to Gemini: {e}")
-            raise
+            # Prepare the files list
+            final_files = list(files) if files else []
+            final_files.append(temp_file_path)
 
-    # The last chunk carries the files (if any) and we return its response.
-    try:
-        return await session.send_message(chunks[-1], files=files)
-    except Exception as e:
-        logger.exception(f"Error sending final chunk to Gemini: {e}")
-        raise
+            instruction = (
+                "The user's input exceeds the character limit and is provided in the attached file `message.txt`.\n\n"
+                "**System Instruction:**\n"
+                "1. Read the content of `message.txt`.\n"
+                "2. Treat that content as the **primary** user prompt for this turn.\n"
+                "3. Execute the instructions or answer the questions found *inside* that file immediately.\n"
+            )
+
+            logger.debug(f"Sending prompt as temporary file: {temp_file_path}")
+
+            return await session.send_message(instruction, files=final_files)
+
+        except Exception as e:
+            logger.exception(f"Error sending large text as file to Gemini: {e}")
+            raise
 
 
 def _create_streaming_response(

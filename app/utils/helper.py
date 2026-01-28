@@ -1,15 +1,15 @@
 import base64
-import json
+import hashlib
 import mimetypes
 import re
 import struct
 import tempfile
-import uuid
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlparse
 
 import httpx
+import orjson
 from loguru import logger
 
 from ..models import FunctionCall, Message, ToolCall
@@ -221,14 +221,20 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
 
         arguments = raw_args
         try:
-            parsed_args = json.loads(raw_args)
-            arguments = json.dumps(parsed_args, ensure_ascii=False)
-        except json.JSONDecodeError:
+            parsed_args = orjson.loads(raw_args)
+            arguments = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+        except orjson.JSONDecodeError:
             logger.warning(f"Failed to parse tool call arguments for '{name}'. Passing raw string.")
+
+        # Generate a deterministic ID based on name, arguments, and its global sequence index
+        # to ensure uniqueness across multiple fenced blocks while remaining stable for storage.
+        index = len(tool_calls)
+        seed = f"{name}:{arguments}:{index}".encode("utf-8")
+        call_id = f"call_{hashlib.sha256(seed).hexdigest()[:24]}"
 
         tool_calls.append(
             ToolCall(
-                id=f"call_{uuid.uuid4().hex}",
+                id=call_id,
                 type="function",
                 function=FunctionCall(name=name, arguments=arguments),
             )

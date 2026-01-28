@@ -1,9 +1,9 @@
 import html
-import json
 import re
 from pathlib import Path
 from typing import Any, cast
 
+import orjson
 from gemini_webapi import GeminiClient, ModelOutput
 from loguru import logger
 
@@ -122,9 +122,9 @@ class GeminiClientWrapper(GeminiClient):
             for call in message.tool_calls:
                 args_text = call.function.arguments.strip()
                 try:
-                    parsed_args = json.loads(args_text)
-                    args_text = json.dumps(parsed_args, ensure_ascii=False)
-                except (json.JSONDecodeError, TypeError):
+                    parsed_args = orjson.loads(args_text)
+                    args_text = orjson.dumps(parsed_args).decode("utf-8")
+                except orjson.JSONDecodeError:
                     # Leave args_text as is if it is not valid JSON
                     pass
                 tool_blocks.append(
@@ -132,7 +132,7 @@ class GeminiClientWrapper(GeminiClient):
                 )
 
             if tool_blocks:
-                tool_section = "```xml\n" + "\n".join(tool_blocks) + "\n```"
+                tool_section = "```xml\n" + "".join(tool_blocks) + "\n```"
                 text_fragments.append(tool_section)
 
         model_input = "\n".join(fragment for fragment in text_fragments if fragment)
