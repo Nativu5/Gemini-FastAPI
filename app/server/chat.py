@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import io
 import reprlib
 import uuid
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator
 
 import orjson
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from gemini_webapi import ModelOutput
 from gemini_webapi.client import ChatSession
@@ -72,8 +73,10 @@ class StructuredOutputRequirement:
 # --- Helper Functions ---
 
 
-async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | None, int | None, str]:
-    """Persist an image provided by gemini_webapi and return base64 plus dimensions and filename."""
+async def _image_to_base64(
+    image: Image, temp_dir: Path
+) -> tuple[str, int | None, int | None, str, str]:
+    """Persist an image provided by gemini_webapi and return base64 plus dimensions, filename, and hash."""
     if isinstance(image, GeneratedImage):
         try:
             saved_path = await image.save(path=str(temp_dir), full_size=True)
@@ -96,7 +99,8 @@ async def _image_to_base64(image: Image, temp_dir: Path) -> tuple[str, int | Non
     data = new_path.read_bytes()
     width, height = extract_image_dimensions(data)
     filename = random_name
-    return base64.b64encode(data).decode("ascii"), width, height, filename
+    file_hash = hashlib.sha256(data).hexdigest()
+    return base64.b64encode(data).decode("ascii"), width, height, filename, file_hash
 
 
 def _calculate_usage(
@@ -925,6 +929,7 @@ def _create_real_streaming_response(
     model: Model,
     client_wrapper: GeminiClientWrapper,
     session: ChatSession,
+    base_url: str,
     structured_requirement: StructuredOutputRequirement | None = None,
 ) -> StreamingResponse:
     """
@@ -1024,16 +1029,30 @@ def _create_real_streaming_response(
         )
 
         images = []
+        seen_urls = set()
         for out in all_outputs:
             if out.images:
-                images.extend(out.images)
+                for img in out.images:
+                    # Use the image URL as a stable identifier across chunks
+                    if img.url not in seen_urls:
+                        images.append(img)
+                        seen_urls.add(img.url)
 
         image_markdown = ""
+        seen_hashes = set()
         for image in images:
             try:
                 image_store = get_image_store_dir()
-                _, _, _, filename = await _image_to_base64(image, image_store)
-                img_url = f"![{filename}](images/{filename}?token={get_image_token(filename)})"
+                _, _, _, filename, file_hash = await _image_to_base64(image, image_store)
+                if file_hash in seen_hashes:
+                    # Duplicate content, delete the file and skip
+                    (image_store / filename).unlink(missing_ok=True)
+                    continue
+                seen_hashes.add(file_hash)
+
+                img_url = (
+                    f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
+                )
                 image_markdown += f"\n\n{img_url}"
             except Exception as exc:
                 logger.warning(f"Failed to process image in OpenAI stream: {exc}")
@@ -1108,6 +1127,7 @@ def _create_responses_real_streaming_response(
     session: ChatSession,
     request: ResponseCreateRequest,
     image_store: Path,
+    base_url: str,
     structured_requirement: StructuredOutputRequirement | None = None,
 ) -> StreamingResponse:
     """
@@ -1172,16 +1192,30 @@ def _create_responses_real_streaming_response(
         )
 
         images = []
+        seen_urls = set()
         for out in all_outputs:
             if out.images:
-                images.extend(out.images)
+                for img in out.images:
+                    if img.url not in seen_urls:
+                        images.append(img)
+                        seen_urls.add(img.url)
 
         response_contents, image_call_items = [], []
+        seen_hashes = set()
         for image in images:
             try:
-                image_base64, width, height, filename = await _image_to_base64(image, image_store)
+                image_base64, width, height, filename, file_hash = await _image_to_base64(
+                    image, image_store
+                )
+                if file_hash in seen_hashes:
+                    (image_store / filename).unlink(missing_ok=True)
+                    continue
+                seen_hashes.add(file_hash)
+
                 img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
-                image_url = f"![{filename}](images/{filename}?token={get_image_token(filename)})"
+                image_url = (
+                    f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
+                )
                 image_call_items.append(
                     ResponseImageGenerationCall(
                         id=filename.rsplit(".", 1)[0],
@@ -1203,7 +1237,7 @@ def _create_responses_real_streaming_response(
         image_markdown = ""
         for img_call in image_call_items:
             fname = f"{img_call.id}.{img_call.output_format}"
-            img_url = f"![{fname}](images/{fname}?token={get_image_token(fname)})"
+            img_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
             image_markdown += f"\n\n{img_url}"
 
         if image_markdown:
@@ -1262,10 +1296,12 @@ async def list_models(api_key: str = Depends(verify_api_key)):
 @router.post("/v1/chat/completions")
 async def create_chat_completion(
     request: ChatCompletionRequest,
+    raw_request: Request,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
     image_store: Path = Depends(get_image_store_dir),
 ):
+    base_url = str(raw_request.base_url)
     pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
         model = _get_model_by_name(request.model)
@@ -1339,6 +1375,7 @@ async def create_chat_completion(
             model,
             client,
             session,
+            base_url,
             structured_requirement,
         )
 
@@ -1358,10 +1395,18 @@ async def create_chat_completion(
     # Process images for OpenAI non-streaming flow
     images = resp_or_stream.images or []
     image_markdown = ""
+    seen_hashes = set()
     for image in images:
         try:
-            _, _, _, filename = await _image_to_base64(image, image_store)
-            img_url = f"![{filename}](images/{filename}?token={get_image_token(filename)})"
+            _, _, _, filename, file_hash = await _image_to_base64(image, image_store)
+            if file_hash in seen_hashes:
+                (image_store / filename).unlink(missing_ok=True)
+                continue
+            seen_hashes.add(file_hash)
+
+            img_url = (
+                f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
+            )
             image_markdown += f"\n\n{img_url}"
         except Exception as exc:
             logger.warning(f"Failed to process image in OpenAI response: {exc}")
@@ -1400,10 +1445,12 @@ async def create_chat_completion(
 @router.post("/v1/responses")
 async def create_response(
     request: ResponseCreateRequest,
+    raw_request: Request,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
     image_store: Path = Depends(get_image_store_dir),
 ):
+    base_url = str(raw_request.base_url)
     base_messages, norm_input = _response_items_to_messages(request.input)
     struct_req = _build_structured_requirement(request.response_format)
     extra_instr = [struct_req.instruction] if struct_req else []
@@ -1492,6 +1539,7 @@ async def create_response(
             session,
             request,
             image_store,
+            base_url,
             struct_req,
         )
 
@@ -1512,13 +1560,19 @@ async def create_response(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No images returned.")
 
     contents, img_calls = [], []
+    seen_hashes = set()
     for img in images:
         try:
-            b64, w, h, fname = await _image_to_base64(img, image_store)
+            b64, w, h, fname, fhash = await _image_to_base64(img, image_store)
+            if fhash in seen_hashes:
+                (image_store / fname).unlink(missing_ok=True)
+                continue
+            seen_hashes.add(fhash)
+
             contents.append(
                 ResponseOutputContent(
                     type="output_text",
-                    text=f"![{fname}](images/{fname}?token={get_image_token(fname)})",
+                    text=f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})",
                 )
             )
             img_calls.append(
@@ -1541,7 +1595,7 @@ async def create_response(
     image_markdown = ""
     for img_call in img_calls:
         fname = f"{img_call.id}.{img_call.output_format}"
-        img_url = f"![{fname}](images/{fname}?token={get_image_token(fname)})"
+        img_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
         image_markdown += f"\n\n{img_url}"
 
     if image_markdown:
