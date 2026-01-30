@@ -207,7 +207,7 @@ class GeminiClientWrapper(GeminiClient):
             return "".join(parts)
 
         def _unescape_markdown(text_content: str) -> str:
-            """Remove backslash escapes for markdown characters in non-code sections."""
+            """Remove backslash escapes for Markdown characters in non-code sections."""
             parts: list[str] = []
             last_index = 0
             for match in CODE_FENCE_RE.finditer(text_content):

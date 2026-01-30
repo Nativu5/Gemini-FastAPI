@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator
 
 import orjson
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from gemini_webapi import ModelOutput
 from gemini_webapi.client import ChatSession
@@ -128,12 +128,11 @@ def _create_responses_standard_payload(
     response_id: str,
     created_time: int,
     model_name: str,
-    assistant_text: str | None,
     detected_tool_calls: list[Any] | None,
     image_call_items: list[ResponseImageGenerationCall],
     response_contents: list[ResponseOutputContent],
     usage: ResponseUsage,
-    request_data: ResponseCreateRequest,
+    request: ResponseCreateRequest,
     normalized_input: Any,
 ) -> ResponseCreateResponse:
     """Unified factory for building ResponseCreateResponse objects."""
@@ -166,9 +165,9 @@ def _create_responses_standard_payload(
         status="completed",
         usage=usage,
         input=normalized_input or None,
-        metadata=request_data.metadata or None,
-        tools=request_data.tools,
-        tool_choice=request_data.tool_choice,
+        metadata=request.metadata or None,
+        tools=request.tools,
+        tool_choice=request.tool_choice,
     )
 
 
@@ -1042,7 +1041,7 @@ def _create_real_streaming_response(
         if image_markdown:
             assistant_text += image_markdown
             storage_output += image_markdown
-            # Send the image markdown as a final text chunk before usage
+            # Send the image Markdown as a final text chunk before usage
             data = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -1107,9 +1106,8 @@ def _create_responses_real_streaming_response(
     model: Model,
     client_wrapper: GeminiClientWrapper,
     session: ChatSession,
-    request_data: ResponseCreateRequest,
+    request: ResponseCreateRequest,
     image_store: Path,
-    base_url: str,
     structured_requirement: StructuredOutputRequirement | None = None,
 ) -> StreamingResponse:
     """
@@ -1124,7 +1122,7 @@ def _create_responses_real_streaming_response(
     }
 
     async def generate_stream():
-        yield f"data: {orjson.dumps({**base_event, 'type': 'response.created', 'response': {'id': response_id, 'object': 'response', 'created_at': created_time, 'model': model_name, 'status': 'in_progress', 'metadata': request_data.metadata, 'input': None, 'tools': request_data.tools, 'tool_choice': request_data.tool_choice}}).decode('utf-8')}\n\n"
+        yield f"data: {orjson.dumps({**base_event, 'type': 'response.created', 'response': {'id': response_id, 'object': 'response', 'created_at': created_time, 'model': model_name, 'status': 'in_progress', 'metadata': request.metadata, 'input': None, 'tools': request.tools, 'tool_choice': request.tool_choice}}).decode('utf-8')}\n\n"
         message_id = f"msg_{uuid.uuid4().hex}"
         yield f"data: {orjson.dumps({**base_event, 'type': 'response.output_item.added', 'output_index': 0, 'item': {'id': message_id, 'type': 'message', 'role': 'assistant', 'content': []}}).decode('utf-8')}\n\n"
 
@@ -1183,9 +1181,7 @@ def _create_responses_real_streaming_response(
             try:
                 image_base64, width, height, filename = await _image_to_base64(image, image_store)
                 img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
-                image_url = (
-                    f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
-                )
+                image_url = f"![{filename}](images/{filename}?token={get_image_token(filename)})"
                 image_call_items.append(
                     ResponseImageGenerationCall(
                         id=filename.rsplit(".", 1)[0],
@@ -1232,12 +1228,11 @@ def _create_responses_real_streaming_response(
             response_id,
             created_time,
             model_name,
-            assistant_text,
             detected_tool_calls,
             image_call_items,
             response_contents,
             usage,
-            request_data,
+            request,
             None,
         )
         _persist_conversation(
@@ -1404,19 +1399,18 @@ async def create_chat_completion(
 
 @router.post("/v1/responses")
 async def create_response(
-    request_data: ResponseCreateRequest,
-    request: Request,
+    request: ResponseCreateRequest,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
     image_store: Path = Depends(get_image_store_dir),
 ):
-    base_messages, norm_input = _response_items_to_messages(request_data.input)
-    struct_req = _build_structured_requirement(request_data.response_format)
+    base_messages, norm_input = _response_items_to_messages(request.input)
+    struct_req = _build_structured_requirement(request.response_format)
     extra_instr = [struct_req.instruction] if struct_req else []
 
     standard_tools, image_tools = [], []
-    if request_data.tools:
-        for t in request_data.tools:
+    if request.tools:
+        for t in request.tools:
             if isinstance(t, Tool):
                 standard_tools.append(t)
             elif isinstance(t, ResponseImageTool):
@@ -1429,18 +1423,14 @@ async def create_response(
 
     img_instr = _build_image_generation_instruction(
         image_tools,
-        request_data.tool_choice
-        if isinstance(request_data.tool_choice, ResponseToolChoice)
-        else None,
+        request.tool_choice if isinstance(request.tool_choice, ResponseToolChoice) else None,
     )
     if img_instr:
         extra_instr.append(img_instr)
-    preface = _instructions_to_messages(request_data.instructions)
+    preface = _instructions_to_messages(request.instructions)
     conv_messages = [*preface, *base_messages] if preface else base_messages
     model_tool_choice = (
-        request_data.tool_choice
-        if isinstance(request_data.tool_choice, (str, ToolChoiceFunction))
-        else None
+        request.tool_choice if isinstance(request.tool_choice, (str, ToolChoiceFunction)) else None
     )
 
     messages = _prepare_messages_for_model(
@@ -1448,15 +1438,13 @@ async def create_response(
     )
     pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
-        model = _get_model_by_name(request_data.model)
+        model = _get_model_by_name(request.model)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     session, client, remain = await _find_reusable_session(db, pool, model, messages)
     if session:
-        msgs = _prepare_messages_for_model(
-            remain, request_data.tools, request_data.tool_choice, None, False
-        )
+        msgs = _prepare_messages_for_model(remain, request.tools, request.tool_choice, None, False)
         if not msgs:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
         m_input, files = (
@@ -1485,26 +1473,25 @@ async def create_response(
             f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
         )
         resp_or_stream = await _send_with_split(
-            session, m_input, files=files, stream=request_data.stream
+            session, m_input, files=files, stream=request.stream
         )
     except Exception as e:
         logger.exception("Gemini API error")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 
-    if request_data.stream:
+    if request.stream:
         return _create_responses_real_streaming_response(
             resp_or_stream,
             response_id,
             created_time,
-            request_data.model,
+            request.model,
             messages,
             db,
             model,
             client,
             session,
-            request_data,
+            request,
             image_store,
-            str(request.base_url),
             struct_req,
         )
 
@@ -1520,7 +1507,7 @@ async def create_response(
     assistant_text, storage_output, tool_calls = _process_llm_output(raw_t, raw_c, struct_req)
     images = resp_or_stream.images or []
     if (
-        request_data.tool_choice is not None and request_data.tool_choice.type == "image_generation"
+        request.tool_choice is not None and request.tool_choice.type == "image_generation"
     ) and not images:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No images returned.")
 
@@ -1531,7 +1518,7 @@ async def create_response(
             contents.append(
                 ResponseOutputContent(
                     type="output_text",
-                    text=f"![{fname}]({request.base_url}images/{fname}?token={get_image_token(fname)})",
+                    text=f"![{fname}](images/{fname}?token={get_image_token(fname)})",
                 )
             )
             img_calls.append(
@@ -1565,13 +1552,12 @@ async def create_response(
     payload = _create_responses_standard_payload(
         response_id,
         created_time,
-        request_data.model,
-        assistant_text,
+        request.model,
         tool_calls,
         img_calls,
         contents,
         usage,
-        request_data,
+        request,
         norm_input,
     )
     _persist_conversation(
