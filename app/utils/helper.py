@@ -110,9 +110,9 @@ def strip_code_fence(text: str) -> str:
 
 
 def strip_tagged_blocks(text: str) -> str:
-    """Remove <|im_start|>role ... <|im_end|> sections, dropping tool blocks entirely.
-    - tool blocks are removed entirely (if missing end marker, drop to EOF).
-    - other roles: remove markers and role, keep inner content (if missing end marker, keep to EOF).
+    """Remove <|im_start|>role ... <|im_end|> sections.
+    - tool blocks are removed entirely (including content).
+    - other roles: remove markers and role, keep inner content.
     """
     if not text:
         return text

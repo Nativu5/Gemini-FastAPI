@@ -481,6 +481,17 @@ def _prepare_messages_for_model(
     """Return a copy of messages enriched with tool instructions when needed."""
     prepared = [msg.model_copy(deep=True) for msg in source_messages]
 
+    # Resolve tool names for 'tool' messages by looking back at previous assistant tool calls
+    tool_id_to_name = {}
+    for msg in prepared:
+        if msg.role == "assistant" and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tool_id_to_name[tc.id] = tc.function.name
+
+    for msg in prepared:
+        if msg.role == "tool" and not msg.name and msg.tool_call_id:
+            msg.name = tool_id_to_name.get(msg.tool_call_id)
+
     instructions: list[str] = []
     if inject_system_defaults:
         if tools:

@@ -86,15 +86,15 @@ class GeminiClientWrapper(GeminiClient):
 
         if isinstance(message.content, str):
             # Pure text content
-            if message.content:
-                text_fragments.append(message.content)
+            if message.content or message.role == "tool":
+                text_fragments.append(message.content or "")
         elif isinstance(message.content, list):
             # Mixed content (text, image_url, or file)
             for item in message.content:
                 if item.type == "text":
                     # Append multiple text fragments
-                    if item.text:
-                        text_fragments.append(item.text)
+                    if item.text or message.role == "tool":
+                        text_fragments.append(item.text or "")
 
                 elif item.type == "image_url":
                     if not item.image_url:
@@ -114,8 +114,18 @@ class GeminiClientWrapper(GeminiClient):
                         files.append(await save_url_to_tempfile(url, tempdir))
                     else:
                         raise ValueError("File must contain 'file_data' or 'url' key")
+        elif message.content is None and message.role == "tool":
+            text_fragments.append("")
         elif message.content is not None:
             raise ValueError("Unsupported message content type.")
+
+        # Special handling for tool response format
+        if message.role == "tool":
+            tool_name = message.name or "unknown"
+            combined_content = "\n".join(text_fragments)
+            text_fragments = [
+                f'```xml\n<tool_response name="{tool_name}">{combined_content}</tool_response>\n```'
+            ]
 
         if message.tool_calls:
             tool_blocks: list[str] = []
@@ -135,10 +145,10 @@ class GeminiClientWrapper(GeminiClient):
                 tool_section = "```xml\n" + "".join(tool_blocks) + "\n```"
                 text_fragments.append(tool_section)
 
-        model_input = "\n".join(fragment for fragment in text_fragments if fragment)
+        model_input = "\n".join(fragment for fragment in text_fragments if fragment is not None)
 
         # Add role tag if needed
-        if model_input:
+        if model_input or message.role == "tool":
             if tagged:
                 model_input = add_tag(message.role, model_input)
 
