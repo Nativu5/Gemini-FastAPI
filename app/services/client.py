@@ -85,17 +85,13 @@ class GeminiClientWrapper(GeminiClient):
         text_fragments: list[str] = []
 
         if isinstance(message.content, str):
-            # Pure text content
             if message.content or message.role == "tool":
-                text_fragments.append(message.content or "")
+                text_fragments.append(message.content or "{}")
         elif isinstance(message.content, list):
-            # Mixed content (text, image_url, or file)
             for item in message.content:
                 if item.type == "text":
-                    # Append multiple text fragments
                     if item.text or message.role == "tool":
-                        text_fragments.append(item.text or "")
-
+                        text_fragments.append(item.text or "{}")
                 elif item.type == "image_url":
                     if not item.image_url:
                         raise ValueError("Image URL cannot be empty")
@@ -103,7 +99,6 @@ class GeminiClientWrapper(GeminiClient):
                         files.append(await save_url_to_tempfile(url, tempdir))
                     else:
                         raise ValueError("Image URL must contain 'url' key")
-
                 elif item.type == "file":
                     if not item.file:
                         raise ValueError("File cannot be empty")
@@ -115,19 +110,15 @@ class GeminiClientWrapper(GeminiClient):
                     else:
                         raise ValueError("File must contain 'file_data' or 'url' key")
         elif message.content is None and message.role == "tool":
-            text_fragments.append("")
+            text_fragments.append("{}")
         elif message.content is not None:
             raise ValueError("Unsupported message content type.")
 
-        # Special handling for tool response format
         if message.role == "tool":
             tool_name = message.name or "unknown"
-            combined_content = "\n".join(text_fragments).strip()
-            # If the tool result is literally empty, provide a clear indicator like empty JSON
-            if not combined_content:
-                combined_content = "{}"
+            combined_content = "\n".join(text_fragments).strip() or "{}"
             text_fragments = [
-                f'```xml\n<tool_response name="{tool_name}">{combined_content}</tool_response>\n```'
+                f'<tool_response name="{tool_name}">{combined_content}</tool_response>'
             ]
 
         if message.tool_calls:
@@ -138,7 +129,6 @@ class GeminiClientWrapper(GeminiClient):
                     parsed_args = orjson.loads(args_text)
                     args_text = orjson.dumps(parsed_args).decode("utf-8")
                 except orjson.JSONDecodeError:
-                    # Leave args_text as is if it is not valid JSON
                     pass
                 tool_blocks.append(
                     f'<tool_call name="{call.function.name}">{args_text}</tool_call>'
@@ -150,7 +140,6 @@ class GeminiClientWrapper(GeminiClient):
 
         model_input = "\n".join(fragment for fragment in text_fragments if fragment is not None)
 
-        # Add role tag if needed
         if model_input or message.role == "tool":
             if tagged:
                 model_input = add_tag(message.role, model_input)
@@ -161,51 +150,30 @@ class GeminiClientWrapper(GeminiClient):
     async def process_conversation(
         messages: list[Message], tempdir: Path | None = None
     ) -> tuple[str, list[Path | str]]:
-        """
-        Process the entire conversation and return a formatted string and list of
-        files. The last message is assumed to be the assistant's response.
-        """
-        # Determine once whether we need to wrap messages with role tags: only required
-        # if the history already contains assistant/system messages. When every message
-        # so far is from the user, we can skip tagging entirely.
         need_tag = any(m.role != "user" for m in messages)
-
         conversation: list[str] = []
         files: list[Path | str] = []
-
         for msg in messages:
             input_part, files_part = await GeminiClientWrapper.process_message(
                 msg, tempdir, tagged=need_tag
             )
             conversation.append(input_part)
             files.extend(files_part)
-
-        # Append an opening assistant tag only when we used tags above so that Gemini
-        # knows where to start its reply.
         if need_tag:
             conversation.append(add_tag("assistant", "", unclose=True))
-
         return "\n".join(conversation), files
 
     @staticmethod
     def extract_output(response: ModelOutput, include_thoughts: bool = True) -> str:
-        """
-        Extract and format the output text from a ModelOutput.
-        Includes reasoning thoughts (wrapped in <think> tags) and unescapes content.
-        """
         text = ""
-
         if include_thoughts and response.thoughts:
             text += f"<think>{response.thoughts}</think>\n"
-
         if response.text:
             text += response.text
         else:
             text += str(response)
 
-        # Fix some escaped characters
         def _unescape_html(text_content: str) -> str:
-            """Unescape HTML entities only in non-code sections of the text."""
             parts: list[str] = []
             last_index = 0
             for match in CODE_FENCE_RE.finditer(text_content):
@@ -220,7 +188,6 @@ class GeminiClientWrapper(GeminiClient):
             return "".join(parts)
 
         def _unescape_markdown(text_content: str) -> str:
-            """Remove backslash escapes for Markdown characters in non-code sections."""
             parts: list[str] = []
             last_index = 0
             for match in CODE_FENCE_RE.finditer(text_content):
