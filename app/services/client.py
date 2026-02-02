@@ -122,7 +122,10 @@ class GeminiClientWrapper(GeminiClient):
         # Special handling for tool response format
         if message.role == "tool":
             tool_name = message.name or "unknown"
-            combined_content = "\n".join(text_fragments)
+            combined_content = "\n".join(text_fragments).strip()
+            # If the tool result is literally empty, provide a clear indicator like empty JSON
+            if not combined_content:
+                combined_content = "{}"
             text_fragments = [
                 f'```xml\n<tool_response name="{tool_name}">{combined_content}</tool_response>\n```'
             ]
