@@ -5,24 +5,25 @@ description = "FastAPI Server built on Gemini Web API"
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
-    "fastapi>=0.115.12",
-    "gemini-webapi>=1.17.0",
-    "lmdb>=1.6.2",
-    "loguru>=0.7.0",
-    "pydantic-settings[yaml]>=2.9.1",
-    "uvicorn>=0.34.1",
-    "uvloop>=0.21.0; sys_platform != 'win32'",
+    "fastapi>=0.128.0",
+    "gemini-webapi>=1.17.3",
+    "lmdb>=1.7.5",
+    "loguru>=0.7.3",
+    "orjson>=3.11.5",
+    "pydantic-settings[yaml]>=2.12.0",
+    "uvicorn>=0.40.0",
+    "uvloop>=0.22.1; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.11.7",
+    "ruff>=0.14.14",
 ]
 
 [tool.ruff]
 line-length = 100
 lint.select = ["E", "F", "W", "I", "RUF"]
-lint.ignore = ["E501"] 
+lint.ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -30,5 +31,5 @@ indent-style = "space"
 
 [dependency-groups]
 dev = [
-    "ruff>=0.11.13",
+    "ruff>=0.14.14",
 ]

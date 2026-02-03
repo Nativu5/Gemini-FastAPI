@@ -24,10 +24,18 @@ class Message(BaseModel):
     content: Union[str, List[ContentItem], None] = None
     name: Optional[str] = None
     tool_calls: Optional[List["ToolCall"]] = None
+    tool_call_id: Optional[str] = None
     refusal: Optional[str] = None
     reasoning_content: Optional[str] = None
     audio: Optional[Dict[str, Any]] = None
     annotations: List[Dict[str, Any]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize_role(self) -> "Message":
+        """Normalize 'developer' role to 'system' for Gemini compatibility."""
+        if self.role == "developer":
+            self.role = "system"
+        return self
 
 
 class Choice(BaseModel):
