@@ -12,12 +12,9 @@ from loguru import logger
 from ..models import ContentItem, ConversationInStore, Message
 from ..utils import g_config
 from ..utils.helper import (
-    CODE_BLOCK_HINT,
-    CODE_HINT_STRIPPED,
-    XML_HINT_STRIPPED,
-    XML_WRAP_HINT,
     extract_tool_calls,
     remove_tool_call_blocks,
+    strip_system_hints,
 )
 from ..utils.singleton import Singleton
 
@@ -41,14 +38,7 @@ def _hash_message(message: Message) -> str:
         normalized = content.replace("\r\n", "\n")
 
         normalized = LMDBConversationStore.remove_think_tags(normalized)
-
-        for hint in [
-            XML_WRAP_HINT,
-            XML_HINT_STRIPPED,
-            CODE_BLOCK_HINT,
-            CODE_HINT_STRIPPED,
-        ]:
-            normalized = normalized.replace(hint, "")
+        normalized = strip_system_hints(normalized)
 
         if message.tool_calls:
             normalized = remove_tool_call_blocks(normalized)
@@ -70,13 +60,7 @@ def _hash_message(message: Message) -> str:
             if text_val:
                 text_val = text_val.replace("\r\n", "\n")
                 text_val = LMDBConversationStore.remove_think_tags(text_val)
-                for hint in [
-                    XML_WRAP_HINT,
-                    XML_HINT_STRIPPED,
-                    CODE_BLOCK_HINT,
-                    CODE_HINT_STRIPPED,
-                ]:
-                    text_val = text_val.replace(hint, "")
+                text_val = strip_system_hints(text_val)
                 text_val = remove_tool_call_blocks(text_val).strip()
                 if text_val:
                     text_parts.append(text_val)

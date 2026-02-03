@@ -127,7 +127,9 @@ class GeminiClientWrapper(GeminiClient):
                 args_text = call.function.arguments.strip()
                 try:
                     parsed_args = orjson.loads(args_text)
-                    args_text = orjson.dumps(parsed_args).decode("utf-8")
+                    args_text = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode(
+                        "utf-8"
+                    )
                 except orjson.JSONDecodeError:
                     pass
                 tool_blocks.append(
