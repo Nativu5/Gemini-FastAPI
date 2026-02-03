@@ -152,7 +152,7 @@ def strip_system_hints(text: str) -> str:
     cleaned = strip_tagged_blocks(text)
     cleaned = cleaned.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
     cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
-    return cleaned.strip()
+    return cleaned
 
 
 def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[ToolCall]]:
