@@ -477,6 +477,7 @@ def _prepare_messages_for_model(
     tool_choice: str | ToolChoiceFunction | None,
     extra_instructions: list[str] | None = None,
     inject_system_defaults: bool = True,
+    is_structured: bool = False,
 ) -> list[Message]:
     """Return a copy of messages enriched with tool instructions when needed."""
     prepared = [msg.model_copy(deep=True) for msg in source_messages]
@@ -505,7 +506,8 @@ def _prepare_messages_for_model(
                 f"Applied {len(extra_instructions)} extra instructions for tool/structured output."
             )
 
-        if not _conversation_has_code_hint(prepared):
+        # Only inject code block hint if NOT a structured response request
+        if not is_structured and not _conversation_has_code_hint(prepared):
             instructions.append(CODE_BLOCK_HINT)
             logger.debug("Injected default code block hint for Gemini conversation.")
 
@@ -1326,7 +1328,11 @@ async def create_chat_completion(
 
     # This ensures that server-injected system instructions are part of the history
     msgs = _prepare_messages_for_model(
-        request.messages, request.tools, request.tool_choice, extra_instr
+        request.messages,
+        request.tools,
+        request.tool_choice,
+        extra_instr,
+        is_structured=structured_requirement is not None,
     )
 
     session, client, remain = await _find_reusable_session(db, pool, model, msgs)
@@ -1338,7 +1344,12 @@ async def create_chat_completion(
         # For reused sessions, we only need to process the remaining messages.
         # We don't re-inject system defaults to avoid duplicating instructions already in history.
         input_msgs = _prepare_messages_for_model(
-            remain, request.tools, request.tool_choice, extra_instr, False
+            remain,
+            request.tools,
+            request.tool_choice,
+            extra_instr,
+            False,
+            is_structured=structured_requirement is not None,
         )
         if len(input_msgs) == 1:
             m_input, files = await GeminiClientWrapper.process_message(
@@ -1492,7 +1503,11 @@ async def create_response(
     )
 
     messages = _prepare_messages_for_model(
-        conv_messages, standard_tools or None, model_tool_choice, extra_instr or None
+        conv_messages,
+        standard_tools or None,
+        model_tool_choice,
+        extra_instr or None,
+        is_structured=struct_req is not None,
     )
     pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
@@ -1502,7 +1517,14 @@ async def create_response(
 
     session, client, remain = await _find_reusable_session(db, pool, model, messages)
     if session:
-        msgs = _prepare_messages_for_model(remain, request.tools, request.tool_choice, None, False)
+        msgs = _prepare_messages_for_model(
+            remain,
+            request.tools,
+            request.tool_choice,
+            None,
+            False,
+            is_structured=struct_req is not None,
+        )
         if not msgs:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
         m_input, files = (
