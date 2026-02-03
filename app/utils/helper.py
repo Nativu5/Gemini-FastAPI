@@ -19,19 +19,12 @@ XML_WRAP_HINT = (
     '```xml\n<tool_call name="tool_name">{"arg": "value"}</tool_call>\n```\n'
     "Do not surround the fence with any other text or whitespace; otherwise the call will be ignored.\n"
 )
-CODE_BLOCK_HINT = (
-    "\nWhenever you include code, markup, or shell snippets, wrap each snippet in a Markdown fenced "
-    "block and supply the correct language label (for example, ```python ... ``` or ```html ... ```).\n"
-    "Fence ONLY the actual code/markup; keep all narrative or explanatory text outside the fences.\n"
-)
 TOOL_BLOCK_RE = re.compile(r"```xml\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 TOOL_CALL_RE = re.compile(
     r"<tool_call\s+name=\"([^\"]+)\"\s*>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
 )
-JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>")
 XML_HINT_STRIPPED = XML_WRAP_HINT.strip()
-CODE_HINT_STRIPPED = CODE_BLOCK_HINT.strip()
 
 
 def add_tag(role: str, content: str, unclose: bool = False) -> str:
@@ -101,14 +94,6 @@ async def save_url_to_tempfile(url: str, tempdir: Path | None = None) -> Path:
     return path
 
 
-def strip_code_fence(text: str) -> str:
-    """Remove surrounding ```json fences if present."""
-    match = JSON_FENCE_RE.match(text.strip())
-    if match:
-        return match.group(1).strip()
-    return text.strip()
-
-
 def strip_tagged_blocks(text: str) -> str:
     """Remove <|im_start|>role ... <|im_end|> sections.
     - tool blocks are removed entirely (including content).
@@ -166,7 +151,6 @@ def strip_system_hints(text: str) -> str:
         return text
     cleaned = strip_tagged_blocks(text)
     cleaned = cleaned.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
-    cleaned = cleaned.replace(CODE_BLOCK_HINT, "").replace(CODE_HINT_STRIPPED, "")
     cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
     return cleaned.strip()
 

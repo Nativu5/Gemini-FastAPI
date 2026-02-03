@@ -41,15 +41,12 @@ from ..models import (
 from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from ..utils import g_config
 from ..utils.helper import (
-    CODE_BLOCK_HINT,
-    CODE_HINT_STRIPPED,
-    CONTROL_TOKEN_RE,
     XML_HINT_STRIPPED,
     XML_WRAP_HINT,
     estimate_tokens,
     extract_image_dimensions,
     extract_tool_calls,
-    strip_code_fence,
+    strip_system_hints,
     text_from_message,
 )
 from .middleware import get_image_store_dir, get_image_token, get_temp_dir, verify_api_key
@@ -225,10 +222,9 @@ def _process_llm_output(
 
     if structured_requirement:
         cleaned_for_json = LMDBConversationStore.remove_think_tags(visible_output)
-        json_text = strip_code_fence(cleaned_for_json or "")
-        if json_text:
+        if cleaned_for_json:
             try:
-                structured_payload = orjson.loads(json_text)
+                structured_payload = orjson.loads(cleaned_for_json)
                 canonical_output = orjson.dumps(structured_payload).decode("utf-8")
                 visible_output = canonical_output
                 storage_output = canonical_output
@@ -450,27 +446,6 @@ def _append_xml_hint_to_last_user_message(messages: list[Message]) -> None:
             return
 
 
-def _conversation_has_code_hint(messages: list[Message]) -> bool:
-    """Return True if any system message already includes the code block hint."""
-    for msg in messages:
-        if msg.role != "system" or msg.content is None:
-            continue
-
-        if isinstance(msg.content, str):
-            if CODE_HINT_STRIPPED in msg.content:
-                return True
-            continue
-
-        if isinstance(msg.content, list):
-            for part in msg.content:
-                if getattr(part, "type", None) != "text":
-                    continue
-                if part.text and CODE_HINT_STRIPPED in part.text:
-                    return True
-
-    return False
-
-
 def _prepare_messages_for_model(
     source_messages: list[Message],
     tools: list[Tool] | None,
@@ -505,11 +480,6 @@ def _prepare_messages_for_model(
             logger.debug(
                 f"Applied {len(extra_instructions)} extra instructions for tool/structured output."
             )
-
-        # Only inject code block hint if NOT a structured response request
-        if not is_structured and not _conversation_has_code_hint(prepared):
-            instructions.append(CODE_BLOCK_HINT)
-            logger.debug("Injected default code block hint for Gemini conversation.")
 
     if not instructions:
         if tools and tool_choice != "none":
@@ -791,7 +761,7 @@ class StreamingOutputFilter:
     2. ChatML tool blocks: <|im_start|>tool\n...<|im_end|>
     3. ChatML role headers: <|im_start|>role\n (only suppresses the header, keeps content)
     4. Control tokens: <|im_start|>, <|im_end|>
-    5. System instructions/hints: XML_WRAP_HINT, CODE_BLOCK_HINT, etc.
+    5. System instructions/hints.
     """
 
     def __init__(self):
@@ -805,12 +775,6 @@ class StreamingOutputFilter:
         self.XML_END = "```"
         self.TAG_START = "<|im_start|>"
         self.TAG_END = "<|im_end|>"
-        self.SYSTEM_HINTS = [
-            XML_WRAP_HINT,
-            XML_HINT_STRIPPED,
-            CODE_BLOCK_HINT,
-            CODE_HINT_STRIPPED,
-        ]
 
     def process(self, chunk: str) -> str:
         self.buffer += chunk
@@ -906,11 +870,7 @@ class StreamingOutputFilter:
                     break
 
         # Final pass: filter out system hints from the text to be yielded
-        for hint in self.SYSTEM_HINTS:
-            if hint in to_yield:
-                to_yield = to_yield.replace(hint, "")
-
-        return to_yield
+        return strip_system_hints(to_yield)
 
     def flush(self) -> str:
         # If we are stuck in a tool block or role header at the end,
@@ -922,11 +882,7 @@ class StreamingOutputFilter:
         self.buffer = ""
 
         # Filter out any orphaned/partial control tokens or hints
-        final_text = CONTROL_TOKEN_RE.sub("", final_text)
-        for hint in self.SYSTEM_HINTS:
-            final_text = final_text.replace(hint, "")
-
-        return final_text.strip()
+        return strip_system_hints(final_text)
 
 
 # --- Response Builders & Streaming ---
