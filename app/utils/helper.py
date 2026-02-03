@@ -5,7 +5,6 @@ import re
 import struct
 import tempfile
 from pathlib import Path
-from typing import Iterator
 from urllib.parse import urlparse
 
 import httpx
@@ -68,7 +67,6 @@ async def save_url_to_tempfile(url: str, tempdir: Path | None = None) -> Path:
     data: bytes | None = None
     suffix: str | None = None
     if url.startswith("data:image/"):
-        # Base64 encoded image
         metadata_part = url.split(",")[0]
         mime_type = metadata_part.split(":")[1].split(";")[0]
 
@@ -112,9 +110,9 @@ def strip_code_fence(text: str) -> str:
 
 
 def strip_tagged_blocks(text: str) -> str:
-    """Remove <|im_start|>role ... <|im_end|> sections, dropping tool blocks entirely.
-    - tool blocks are removed entirely (if missing end marker, drop to EOF).
-    - other roles: remove markers and role, keep inner content (if missing end marker, keep to EOF).
+    """Remove <|im_start|>role ... <|im_end|> sections.
+    - tool blocks are removed entirely (including content).
+    - other roles: remove markers and role, keep inner content.
     """
     if not text:
         return text
@@ -131,13 +129,11 @@ def strip_tagged_blocks(text: str) -> str:
             result.append(text[idx:])
             break
 
-        # append any content before this block
         result.append(text[idx:start])
 
         role_start = start + len(start_marker)
         newline = text.find("\n", role_start)
         if newline == -1:
-            # malformed block; keep the remainder as-is (safe behavior)
             result.append(text[start:])
             break
 
@@ -145,23 +141,18 @@ def strip_tagged_blocks(text: str) -> str:
 
         end = text.find(end_marker, newline + 1)
         if end == -1:
-            # missing end marker
             if role == "tool":
-                # drop from the start marker to EOF (skip the remainder)
                 break
             else:
-                # keep inner content from after the role newline to EOF
                 result.append(text[newline + 1 :])
                 break
 
         block_end = end + len(end_marker)
 
         if role == "tool":
-            # drop the whole block
             idx = block_end
             continue
 
-        # keep the content without role markers
         content = text[newline + 1 : end]
         result.append(content)
         idx = block_end
@@ -180,41 +171,19 @@ def strip_system_hints(text: str) -> str:
     return cleaned.strip()
 
 
-def remove_tool_call_blocks(text: str) -> str:
-    """Strip tool call code blocks from text."""
-    if not text:
-        return text
-
-    # 1. Remove fenced blocks ONLY if they contain tool calls
-    def _replace_block(match: re.Match[str]) -> str:
-        block_content = match.group(1)
-        if not block_content:
-            return match.group(0)
-
-        # Check if the block contains any tool call tag
-        if TOOL_CALL_RE.search(block_content):
-            return ""
-
-        # Preserve the block if no tool call found
-        return match.group(0)
-
-    cleaned = TOOL_BLOCK_RE.sub(_replace_block, text)
-
-    # 2. Remove orphaned tool calls
-    cleaned = TOOL_CALL_RE.sub("", cleaned)
-
-    return strip_system_hints(cleaned)
-
-
-def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
-    """Extract tool call definitions and return cleaned text."""
+def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[ToolCall]]:
+    """
+    Unified engine for stripping tool call blocks and extracting tool metadata.
+    If extract=True, parses JSON arguments and assigns deterministic call IDs.
+    """
     if not text:
         return text, []
 
     tool_calls: list[ToolCall] = []
 
     def _create_tool_call(name: str, raw_args: str) -> None:
-        """Helper to parse args and append to the tool_calls list."""
+        if not extract:
+            return
         if not name:
             logger.warning("Encountered tool_call without a function name.")
             return
@@ -226,8 +195,6 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
         except orjson.JSONDecodeError:
             logger.warning(f"Failed to parse tool call arguments for '{name}'. Passing raw string.")
 
-        # Generate a deterministic ID based on name, arguments, and its global sequence index
-        # to ensure uniqueness across multiple fenced blocks while remaining stable for storage.
         index = len(tool_calls)
         seed = f"{name}:{arguments}:{index}".encode("utf-8")
         call_id = f"call_{hashlib.sha256(seed).hexdigest()[:24]}"
@@ -245,14 +212,14 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
         if not block_content:
             return match.group(0)
 
-        found_in_block = False
-        for call_match in TOOL_CALL_RE.finditer(block_content):
-            found_in_block = True
-            name = (call_match.group(1) or "").strip()
-            raw_args = (call_match.group(2) or "").strip()
-            _create_tool_call(name, raw_args)
+        is_tool_block = bool(TOOL_CALL_RE.search(block_content))
 
-        if found_in_block:
+        if is_tool_block:
+            if extract:
+                for call_match in TOOL_CALL_RE.finditer(block_content):
+                    name = (call_match.group(1) or "").strip()
+                    raw_args = (call_match.group(2) or "").strip()
+                    _create_tool_call(name, raw_args)
             return ""
         else:
             return match.group(0)
@@ -260,56 +227,26 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
     cleaned = TOOL_BLOCK_RE.sub(_replace_block, text)
 
     def _replace_orphan(match: re.Match[str]) -> str:
-        name = (match.group(1) or "").strip()
-        raw_args = (match.group(2) or "").strip()
-        _create_tool_call(name, raw_args)
+        if extract:
+            name = (match.group(1) or "").strip()
+            raw_args = (match.group(2) or "").strip()
+            _create_tool_call(name, raw_args)
         return ""
 
     cleaned = TOOL_CALL_RE.sub(_replace_orphan, cleaned)
-
     cleaned = strip_system_hints(cleaned)
     return cleaned, tool_calls
 
 
-def iter_stream_segments(model_output: str, chunk_size: int = 64) -> Iterator[str]:
-    """Yield stream segments while keeping <think> markers and words intact."""
-    if not model_output:
-        return
+def remove_tool_call_blocks(text: str) -> str:
+    """Strip tool call code blocks from text."""
+    cleaned, _ = _process_tools_internal(text, extract=False)
+    return cleaned
 
-    token_pattern = re.compile(r"\s+|\S+\s*")
-    pending = ""
 
-    def _flush_pending() -> Iterator[str]:
-        nonlocal pending
-        if pending:
-            yield pending
-            pending = ""
-
-    # Split on <think> boundaries so the markers are never fragmented.
-    parts = re.split(r"(</?think>)", model_output)
-    for part in parts:
-        if not part:
-            continue
-        if part in {"<think>", "</think>"}:
-            yield from _flush_pending()
-            yield part
-            continue
-
-        for match in token_pattern.finditer(part):
-            token = match.group(0)
-
-            if len(token) > chunk_size:
-                yield from _flush_pending()
-                for idx in range(0, len(token), chunk_size):
-                    yield token[idx : idx + chunk_size]
-                continue
-
-            if pending and len(pending) + len(token) > chunk_size:
-                yield from _flush_pending()
-
-            pending += token
-
-    yield from _flush_pending()
+def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
+    """Extract tool call definitions and return cleaned text."""
+    return _process_tools_internal(text, extract=True)
 
 
 def text_from_message(message: Message) -> str:

@@ -31,7 +31,7 @@ class GeminiClientPool(metaclass=Singleton):
             self._clients.append(client)
             self._id_map[c.id] = client
             self._round_robin.append(client)
-            self._restart_locks[c.id] = asyncio.Lock()  # Pre-initialize
+            self._restart_locks[c.id] = asyncio.Lock()
 
     async def init(self) -> None:
         """Initialize all clients in the pool."""
@@ -84,7 +84,7 @@ class GeminiClientPool(metaclass=Singleton):
 
         lock = self._restart_locks.get(client.id)
         if lock is None:
-            return False  # Should not happen
+            return False
 
         async with lock:
             if client.running():
