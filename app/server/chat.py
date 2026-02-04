@@ -377,7 +377,10 @@ def _build_tool_prompt(
         "Use double quotes for JSON keys and values. If you omit the block or include any extra text, the system will assume you are NOT calling a tool and your request will fail."
     )
     lines.append(
-        "If multiple tool calls are required, include multiple [call:...]...[/call] entries inside the same [function_calls] block. Without a tool call, reply normally and do NOT emit any [function_calls] tag."
+        "To call multiple tools, list each [call:tool_name]...[/call] entry sequentially within a single [function_calls] block."
+    )
+    lines.append(
+        "If no tool call is needed, provide a normal response and DO NOT use the [function_calls] tag."
     )
 
     return "\n".join(lines)
