@@ -15,14 +15,14 @@ from ..models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 XML_WRAP_HINT = (
-    "\nYou MUST wrap every tool call response inside a single fenced block exactly like:\n"
-    '```xml\n<tool_call name="tool_name">{"argument": "value"}</tool_call>\n```\n'
-    "Do not surround the fence with any other text or whitespace; otherwise the call will be ignored.\n"
+    "\nYou MUST wrap every tool call response inside a single [function_calls] block exactly like:\n"
+    '[function_calls]\n[call:tool_name]{"argument": "value"}[/call]\n[/function_calls]\n'
+    "Do not surround the block with any other text or whitespace; otherwise the call will be ignored.\n"
 )
-TOOL_BLOCK_RE = re.compile(r"```xml\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
-TOOL_CALL_RE = re.compile(
-    r"<tool_call\s+name=\"([^\"]+)\"\s*>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
+TOOL_BLOCK_RE = re.compile(
+    r"\[function_calls]\s*(.*?)\s*\[/function_calls]", re.DOTALL | re.IGNORECASE
 )
+TOOL_CALL_RE = re.compile(r"\[call:([^]]+)]\s*(.*?)\s*\[/call]", re.DOTALL | re.IGNORECASE)
 CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>")
 XML_HINT_STRIPPED = XML_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in XML_WRAP_HINT.split("\n") if line.strip()]

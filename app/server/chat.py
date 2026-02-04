@@ -367,19 +367,17 @@ def _build_tool_prompt(
         )
 
     lines.append(
-        "When you decide to call a tool you MUST respond with nothing except a single fenced block exactly like the template below."
+        "When you decide to call a tool you MUST respond with nothing except a single [function_calls] block exactly like the template below."
+    )
+    lines.append("Do not add text before or after it.")
+    lines.append("[function_calls]")
+    lines.append('[call:tool_name]{"argument": "value"}[/call]')
+    lines.append("[/function_calls]")
+    lines.append(
+        "Use double quotes for JSON keys and values. If you omit the block or include any extra text, the system will assume you are NOT calling a tool and your request will fail."
     )
     lines.append(
-        "The fenced block MUST use ```xml as the opening fence and ``` as the closing fence. Do not add text before or after it."
-    )
-    lines.append("```xml")
-    lines.append('<tool_call name="tool_name">{"argument": "value"}</tool_call>')
-    lines.append("```")
-    lines.append(
-        "Use double quotes for JSON keys and values. If you omit the fenced block or include any extra text, the system will assume you are NOT calling a tool and your request will fail."
-    )
-    lines.append(
-        "If multiple tool calls are required, include multiple <tool_call> entries inside the same fenced block. Without a tool call, reply normally and do NOT emit any ```xml fence."
+        "If multiple tool calls are required, include multiple [call:...]...[/call] entries inside the same [function_calls] block. Without a tool call, reply normally and do NOT emit any [function_calls] tag."
     )
 
     return "\n".join(lines)
@@ -757,8 +755,8 @@ async def _send_with_split(
 
 class StreamingOutputFilter:
     """
-    Simplified State Machine filter to suppress technical markers, tool calls, and system hints.
-    States: NORMAL, IN_XML, IN_TAG, IN_BLOCK, IN_HINT
+    State Machine filter to suppress technical markers, tool calls, and system hints.
+    Handles fragmentation where markers are split across multiple chunks.
     """
 
     def __init__(self):
@@ -767,12 +765,13 @@ class StreamingOutputFilter:
         self.current_role = ""
         self.block_buffer = ""
 
-        self.XML_START = "```xml"
-        self.XML_END = "```"
+        self.XML_START = "[function_calls]"
+        self.XML_END = "[/function_calls]"
         self.TAG_START = "<|im_start|>"
         self.TAG_END = "<|im_end|>"
         self.HINT_START = f"\n{XML_HINT_LINE_START}" if XML_HINT_LINE_START else ""
         self.HINT_END = XML_HINT_LINE_END
+        self.TOOL_START = "[call:"
 
         self.WATCH_PREFIXES = [self.XML_START, self.TAG_START, self.TAG_END]
         if self.HINT_START:
@@ -787,7 +786,7 @@ class StreamingOutputFilter:
                 xml_idx = self.buffer.find(self.XML_START)
                 tag_idx = self.buffer.find(self.TAG_START)
                 end_idx = self.buffer.find(self.TAG_END)
-                hint_idx = self.buffer.find(self.HINT_START)
+                hint_idx = self.buffer.find(self.HINT_START) if self.HINT_START else -1
 
                 indices = [
                     (i, t)
@@ -801,13 +800,13 @@ class StreamingOutputFilter:
                 ]
 
                 if not indices:
+                    # Guard against split start markers
                     keep_len = 0
                     for p in self.WATCH_PREFIXES:
                         for i in range(len(p) - 1, 0, -1):
                             if self.buffer.endswith(p[:i]):
                                 keep_len = max(keep_len, i)
                                 break
-
                     yield_len = len(self.buffer) - keep_len
                     if yield_len > 0:
                         output.append(self.buffer[:yield_len])
@@ -838,20 +837,24 @@ class StreamingOutputFilter:
                     self.buffer = self.buffer[end_idx + len(self.HINT_END) :]
                     self.state = "NORMAL"
                 else:
-                    self.buffer = ""
+                    # Keep end of buffer to avoid missing split HINT_END
+                    keep_len = len(self.HINT_END) - 1
+                    if len(self.buffer) > keep_len:
+                        self.buffer = self.buffer[-keep_len:]
                     break
 
             elif self.state == "IN_XML":
                 end_idx = self.buffer.find(self.XML_END)
                 if end_idx != -1:
-                    content = self.block_buffer + self.buffer[:end_idx]
-                    if "<tool_call" not in content.lower():
-                        output.append(f"{self.XML_START}{content}{self.XML_END}")
+                    self.block_buffer += self.buffer[:end_idx]
                     self.buffer = self.buffer[end_idx + len(self.XML_END) :]
                     self.state = "NORMAL"
                 else:
-                    self.block_buffer += self.buffer
-                    self.buffer = ""
+                    # Accumulate and keep potential split end marker
+                    keep_len = len(self.XML_END) - 1
+                    if len(self.buffer) > keep_len:
+                        self.block_buffer += self.buffer[:-keep_len]
+                        self.buffer = self.buffer[-keep_len:]
                     break
 
             elif self.state == "IN_TAG":
@@ -873,21 +876,24 @@ class StreamingOutputFilter:
                     self.state = "NORMAL"
                     self.current_role = ""
                 else:
+                    # Yield safe part and keep potential split TAG_END
+                    keep_len = len(self.TAG_END) - 1
                     if self.current_role != "tool":
-                        yield_len = len(self.buffer) - (len(self.TAG_END) - 1)
-                        if yield_len > 0:
-                            output.append(self.buffer[:yield_len])
-                            self.buffer = self.buffer[yield_len:]
+                        if len(self.buffer) > keep_len:
+                            output.append(self.buffer[:-keep_len])
+                            self.buffer = self.buffer[-keep_len:]
+                        break
                     else:
-                        self.buffer = ""
-                    break
+                        if len(self.buffer) > keep_len:
+                            self.buffer = self.buffer[-keep_len:]
+                        break
 
         return "".join(output)
 
     def flush(self) -> str:
         res = ""
         if self.state == "IN_XML":
-            if "<tool_call" not in self.block_buffer.lower():
+            if self.TOOL_START not in self.block_buffer.lower():
                 res = f"{self.XML_START}{self.block_buffer}"
         elif self.state == "IN_BLOCK" and self.current_role != "tool":
             res = self.buffer
