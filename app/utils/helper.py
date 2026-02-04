@@ -25,6 +25,9 @@ TOOL_CALL_RE = re.compile(
 )
 CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>")
 XML_HINT_STRIPPED = XML_WRAP_HINT.strip()
+_hint_lines = [line.strip() for line in XML_WRAP_HINT.split("\n") if line.strip()]
+XML_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
+XML_HINT_LINE_END = _hint_lines[-1] if _hint_lines else ""
 
 
 def add_tag(role: str, content: str, unclose: bool = False) -> str:
@@ -149,8 +152,17 @@ def strip_system_hints(text: str) -> str:
     """Remove system-level hint text from a given string."""
     if not text:
         return text
-    cleaned = strip_tagged_blocks(text)
-    cleaned = cleaned.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
+
+    # Remove the full hints first
+    cleaned = text.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
+
+    # Remove fragments using derived constants
+    if XML_HINT_LINE_START:
+        cleaned = re.sub(rf"\n?{re.escape(XML_HINT_LINE_START)}:?\s*", "", cleaned)
+    if XML_HINT_LINE_END:
+        cleaned = re.sub(rf"\s*{re.escape(XML_HINT_LINE_END)}\.?\n?", "", cleaned)
+
+    cleaned = strip_tagged_blocks(cleaned)
     cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
     return cleaned
 

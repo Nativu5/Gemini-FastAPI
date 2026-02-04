@@ -41,6 +41,8 @@ from ..models import (
 from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from ..utils import g_config
 from ..utils.helper import (
+    XML_HINT_LINE_END,
+    XML_HINT_LINE_START,
     XML_HINT_STRIPPED,
     XML_WRAP_HINT,
     estimate_tokens,
@@ -755,133 +757,146 @@ async def _send_with_split(
 
 class StreamingOutputFilter:
     """
-    Enhanced streaming filter that suppresses:
-    1. XML tool call blocks: ```xml ... ```
-    2. ChatML tool blocks: <|im_start|>tool\n...<|im_end|>
-    3. ChatML role headers: <|im_start|>role\n (only suppresses the header, keeps content)
-    4. Control tokens: <|im_start|>, <|im_end|>
-    5. System instructions/hints.
+    Simplified State Machine filter to suppress technical markers, tool calls, and system hints.
+    States: NORMAL, IN_XML, IN_TAG, IN_BLOCK, IN_HINT
     """
 
     def __init__(self):
         self.buffer = ""
-        self.in_xml_tool = False
-        self.in_tagged_block = False
-        self.in_role_header = False
+        self.state = "NORMAL"
         self.current_role = ""
+        self.block_buffer = ""
 
         self.XML_START = "```xml"
         self.XML_END = "```"
         self.TAG_START = "<|im_start|>"
         self.TAG_END = "<|im_end|>"
+        self.HINT_START = f"\n{XML_HINT_LINE_START}" if XML_HINT_LINE_START else ""
+        self.HINT_END = XML_HINT_LINE_END
+
+        self.WATCH_PREFIXES = [self.XML_START, self.TAG_START, self.TAG_END]
+        if self.HINT_START:
+            self.WATCH_PREFIXES.append(self.HINT_START)
 
     def process(self, chunk: str) -> str:
         self.buffer += chunk
-        to_yield = ""
+        output = []
 
         while self.buffer:
-            if self.in_xml_tool:
+            if self.state == "NORMAL":
+                xml_idx = self.buffer.find(self.XML_START)
+                tag_idx = self.buffer.find(self.TAG_START)
+                end_idx = self.buffer.find(self.TAG_END)
+                hint_idx = self.buffer.find(self.HINT_START)
+
+                indices = [
+                    (i, t)
+                    for i, t in [
+                        (xml_idx, "XML"),
+                        (tag_idx, "TAG"),
+                        (end_idx, "END"),
+                        (hint_idx, "HINT"),
+                    ]
+                    if i != -1
+                ]
+
+                if not indices:
+                    keep_len = 0
+                    for p in self.WATCH_PREFIXES:
+                        for i in range(len(p) - 1, 0, -1):
+                            if self.buffer.endswith(p[:i]):
+                                keep_len = max(keep_len, i)
+                                break
+
+                    yield_len = len(self.buffer) - keep_len
+                    if yield_len > 0:
+                        output.append(self.buffer[:yield_len])
+                        self.buffer = self.buffer[yield_len:]
+                    break
+
+                indices.sort()
+                idx, m_type = indices[0]
+                output.append(self.buffer[:idx])
+                self.buffer = self.buffer[idx:]
+
+                if m_type == "XML":
+                    self.state = "IN_XML"
+                    self.block_buffer = ""
+                    self.buffer = self.buffer[len(self.XML_START) :]
+                elif m_type == "TAG":
+                    self.state = "IN_TAG"
+                    self.buffer = self.buffer[len(self.TAG_START) :]
+                elif m_type == "END":
+                    self.buffer = self.buffer[len(self.TAG_END) :]
+                elif m_type == "HINT":
+                    self.state = "IN_HINT"
+                    self.buffer = self.buffer[len(self.HINT_START) :]
+
+            elif self.state == "IN_HINT":
+                end_idx = self.buffer.find(self.HINT_END)
+                if end_idx != -1:
+                    self.buffer = self.buffer[end_idx + len(self.HINT_END) :]
+                    self.state = "NORMAL"
+                else:
+                    self.buffer = ""
+                    break
+
+            elif self.state == "IN_XML":
                 end_idx = self.buffer.find(self.XML_END)
                 if end_idx != -1:
+                    content = self.block_buffer + self.buffer[:end_idx]
+                    if "<tool_call" not in content.lower():
+                        output.append(f"{self.XML_START}{content}{self.XML_END}")
                     self.buffer = self.buffer[end_idx + len(self.XML_END) :]
-                    self.in_xml_tool = False
+                    self.state = "NORMAL"
                 else:
+                    self.block_buffer += self.buffer
+                    self.buffer = ""
                     break
-            elif self.in_role_header:
+
+            elif self.state == "IN_TAG":
                 nl_idx = self.buffer.find("\n")
                 if nl_idx != -1:
-                    role_text = self.buffer[:nl_idx].strip().lower()
-                    self.current_role = role_text
+                    self.current_role = self.buffer[:nl_idx].strip().lower()
                     self.buffer = self.buffer[nl_idx + 1 :]
-                    self.in_role_header = False
-                    self.in_tagged_block = True
+                    self.state = "IN_BLOCK"
                 else:
                     break
-            elif self.in_tagged_block:
+
+            elif self.state == "IN_BLOCK":
                 end_idx = self.buffer.find(self.TAG_END)
                 if end_idx != -1:
                     content = self.buffer[:end_idx]
                     if self.current_role != "tool":
-                        to_yield += content
+                        output.append(content)
                     self.buffer = self.buffer[end_idx + len(self.TAG_END) :]
-                    self.in_tagged_block = False
+                    self.state = "NORMAL"
                     self.current_role = ""
                 else:
-                    if self.current_role == "tool":
-                        break
-                    else:
+                    if self.current_role != "tool":
                         yield_len = len(self.buffer) - (len(self.TAG_END) - 1)
                         if yield_len > 0:
-                            to_yield += self.buffer[:yield_len]
+                            output.append(self.buffer[:yield_len])
                             self.buffer = self.buffer[yield_len:]
-                        break
-            else:
-                # Outside any special block. Look for starts.
-                earliest_idx = -1
-                match_type = ""
-
-                xml_idx = self.buffer.find(self.XML_START)
-                if xml_idx != -1:
-                    earliest_idx = xml_idx
-                    match_type = "xml"
-
-                tag_s_idx = self.buffer.find(self.TAG_START)
-                if tag_s_idx != -1:
-                    if earliest_idx == -1 or tag_s_idx < earliest_idx:
-                        earliest_idx = tag_s_idx
-                        match_type = "tag_start"
-
-                tag_e_idx = self.buffer.find(self.TAG_END)
-                if tag_e_idx != -1:
-                    if earliest_idx == -1 or tag_e_idx < earliest_idx:
-                        earliest_idx = tag_e_idx
-                        match_type = "tag_end"
-
-                if earliest_idx != -1:
-                    # Yield text before the match
-                    to_yield += self.buffer[:earliest_idx]
-                    self.buffer = self.buffer[earliest_idx:]
-
-                    if match_type == "xml":
-                        self.in_xml_tool = True
-                        self.buffer = self.buffer[len(self.XML_START) :]
-                    elif match_type == "tag_start":
-                        self.in_role_header = True
-                        self.buffer = self.buffer[len(self.TAG_START) :]
-                    elif match_type == "tag_end":
-                        # Orphaned end tag, just skip it
-                        self.buffer = self.buffer[len(self.TAG_END) :]
-                    continue
-                else:
-                    # Check for prefixes
-                    prefixes = [self.XML_START, self.TAG_START, self.TAG_END]
-                    max_keep = 0
-                    for p in prefixes:
-                        for i in range(len(p) - 1, 0, -1):
-                            if self.buffer.endswith(p[:i]):
-                                max_keep = max(max_keep, i)
-                                break
-
-                    yield_len = len(self.buffer) - max_keep
-                    if yield_len > 0:
-                        to_yield += self.buffer[:yield_len]
-                        self.buffer = self.buffer[yield_len:]
+                    else:
+                        self.buffer = ""
                     break
 
-        # Final pass: filter out system hints from the text to be yielded
-        return strip_system_hints(to_yield)
+        return "".join(output)
 
     def flush(self) -> str:
-        # If we are stuck in a tool block or role header at the end,
-        # it usually means malformed output.
-        if self.in_xml_tool or (self.in_tagged_block and self.current_role == "tool"):
-            return ""
+        res = ""
+        if self.state == "IN_XML":
+            if "<tool_call" not in self.block_buffer.lower():
+                res = f"{self.XML_START}{self.block_buffer}"
+        elif self.state == "IN_BLOCK" and self.current_role != "tool":
+            res = self.buffer
+        elif self.state == "NORMAL":
+            res = self.buffer
 
-        final_text = self.buffer
         self.buffer = ""
-
-        # Filter out any orphaned/partial control tokens or hints
-        return strip_system_hints(final_text)
+        self.state = "NORMAL"
+        return strip_system_hints(res)
 
 
 # --- Response Builders & Streaming ---
