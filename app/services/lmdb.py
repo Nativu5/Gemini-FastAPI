@@ -14,7 +14,6 @@ from ..utils import g_config
 from ..utils.helper import (
     extract_tool_calls,
     remove_tool_call_blocks,
-    strip_system_hints,
 )
 from ..utils.singleton import Singleton
 
@@ -36,17 +35,8 @@ def _hash_message(message: Message) -> str:
         core_data["content"] = None
     elif isinstance(content, str):
         normalized = content.replace("\r\n", "\n")
-
         normalized = LMDBConversationStore.remove_think_tags(normalized)
-        normalized = strip_system_hints(normalized)
-
-        if message.tool_calls:
-            normalized = remove_tool_call_blocks(normalized)
-        else:
-            temp_text, _extracted = extract_tool_calls(normalized)
-            normalized = temp_text
-
-        normalized = normalized.strip()
+        normalized = remove_tool_call_blocks(normalized).strip()
         core_data["content"] = normalized if normalized else None
     elif isinstance(content, list):
         text_parts = []
@@ -60,7 +50,6 @@ def _hash_message(message: Message) -> str:
             if text_val:
                 text_val = text_val.replace("\r\n", "\n")
                 text_val = LMDBConversationStore.remove_think_tags(text_val)
-                text_val = strip_system_hints(text_val)
                 text_val = remove_tool_call_blocks(text_val).strip()
                 if text_val:
                     text_parts.append(text_val)

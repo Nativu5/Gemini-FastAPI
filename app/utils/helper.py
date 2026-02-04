@@ -16,7 +16,7 @@ from ..models import FunctionCall, Message, ToolCall
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 XML_WRAP_HINT = (
     "\nYou MUST wrap every tool call response inside a single fenced block exactly like:\n"
-    '```xml\n<tool_call name="tool_name">{"arg": "value"}</tool_call>\n```\n'
+    '```xml\n<tool_call name="tool_name">{"argument": "value"}</tool_call>\n```\n'
     "Do not surround the fence with any other text or whitespace; otherwise the call will be ignored.\n"
 )
 TOOL_BLOCK_RE = re.compile(r"```xml\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
