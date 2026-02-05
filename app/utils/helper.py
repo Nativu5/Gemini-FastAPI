@@ -14,7 +14,7 @@ from loguru import logger
 from ..models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
-XML_WRAP_HINT = (
+TOOL_WRAP_HINT = (
     "\nYou MUST wrap every tool call response inside a single [function_calls] block exactly like:\n"
     '[function_calls]\n[call:tool_name]{"argument": "value"}[/call]\n[/function_calls]\n'
     "Do not surround the block with any other text or whitespace; otherwise the call will be ignored.\n"
@@ -24,10 +24,10 @@ TOOL_BLOCK_RE = re.compile(
 )
 TOOL_CALL_RE = re.compile(r"\[call:([^]]+)]\s*(.*?)\s*\[/call]", re.DOTALL | re.IGNORECASE)
 CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>")
-XML_HINT_STRIPPED = XML_WRAP_HINT.strip()
-_hint_lines = [line.strip() for line in XML_WRAP_HINT.split("\n") if line.strip()]
-XML_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
-XML_HINT_LINE_END = _hint_lines[-1] if _hint_lines else ""
+TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
+_hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
+TOOL_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
+TOOL_HINT_LINE_END = _hint_lines[-1] if _hint_lines else ""
 
 
 def add_tag(role: str, content: str, unclose: bool = False) -> str:
@@ -154,13 +154,18 @@ def strip_system_hints(text: str) -> str:
         return text
 
     # Remove the full hints first
-    cleaned = text.replace(XML_WRAP_HINT, "").replace(XML_HINT_STRIPPED, "")
+    cleaned = text.replace(TOOL_WRAP_HINT, "").replace(TOOL_HINT_STRIPPED, "")
 
-    # Remove fragments using derived constants
-    if XML_HINT_LINE_START:
-        cleaned = re.sub(rf"\n?{re.escape(XML_HINT_LINE_START)}:?\s*", "", cleaned)
-    if XML_HINT_LINE_END:
-        cleaned = re.sub(rf"\s*{re.escape(XML_HINT_LINE_END)}\.?\n?", "", cleaned)
+    # Remove fragments or multi-line blocks using derived constants
+    if TOOL_HINT_LINE_START and TOOL_HINT_LINE_END:
+        # Match from the start line to the end line, inclusive, handling internal modifications
+        pattern = rf"\n?{re.escape(TOOL_HINT_LINE_START)}.*?{re.escape(TOOL_HINT_LINE_END)}\.?\n?"
+        cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
+
+    if TOOL_HINT_LINE_START:
+        cleaned = re.sub(rf"\n?{re.escape(TOOL_HINT_LINE_START)}:?\s*", "", cleaned)
+    if TOOL_HINT_LINE_END:
+        cleaned = re.sub(rf"\s*{re.escape(TOOL_HINT_LINE_END)}\.?\n?", "", cleaned)
 
     cleaned = strip_tagged_blocks(cleaned)
     cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
@@ -174,6 +179,9 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
     """
     if not text:
         return text, []
+
+    # Clean hints FIRST so they don't interfere with tool call regexes (e.g. example calls in hint)
+    cleaned = strip_system_hints(text)
 
     tool_calls: list[ToolCall] = []
 
@@ -220,7 +228,7 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         else:
             return match.group(0)
 
-    cleaned = TOOL_BLOCK_RE.sub(_replace_block, text)
+    cleaned = TOOL_BLOCK_RE.sub(_replace_block, cleaned)
 
     def _replace_orphan(match: re.Match[str]) -> str:
         if extract:
@@ -230,7 +238,7 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         return ""
 
     cleaned = TOOL_CALL_RE.sub(_replace_orphan, cleaned)
-    cleaned = strip_system_hints(cleaned)
+
     return cleaned, tool_calls
 
 

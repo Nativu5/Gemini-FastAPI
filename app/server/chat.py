@@ -41,10 +41,10 @@ from ..models import (
 from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from ..utils import g_config
 from ..utils.helper import (
-    XML_HINT_LINE_END,
-    XML_HINT_LINE_START,
-    XML_HINT_STRIPPED,
-    XML_WRAP_HINT,
+    TOOL_HINT_LINE_END,
+    TOOL_HINT_LINE_START,
+    TOOL_HINT_STRIPPED,
+    TOOL_WRAP_HINT,
     estimate_tokens,
     extract_image_dimensions,
     extract_tool_calls,
@@ -423,15 +423,15 @@ def _build_image_generation_instruction(
     return "\n\n".join(instructions)
 
 
-def _append_xml_hint_to_last_user_message(messages: list[Message]) -> None:
-    """Ensure the last user message carries the XML wrap hint."""
+def _append_tool_hint_to_last_user_message(messages: list[Message]) -> None:
+    """Ensure the last user message carries the tool wrap hint."""
     for msg in reversed(messages):
         if msg.role != "user" or msg.content is None:
             continue
 
         if isinstance(msg.content, str):
-            if XML_HINT_STRIPPED not in msg.content:
-                msg.content = f"{msg.content}\n{XML_WRAP_HINT}"
+            if TOOL_HINT_STRIPPED not in msg.content:
+                msg.content = f"{msg.content}\n{TOOL_WRAP_HINT}"
             return
 
         if isinstance(msg.content, list):
@@ -439,12 +439,12 @@ def _append_xml_hint_to_last_user_message(messages: list[Message]) -> None:
                 if getattr(part, "type", None) != "text":
                     continue
                 text_value = part.text or ""
-                if XML_HINT_STRIPPED in text_value:
+                if TOOL_HINT_STRIPPED in text_value:
                     return
-                part.text = f"{text_value}\n{XML_WRAP_HINT}"
+                part.text = f"{text_value}\n{TOOL_WRAP_HINT}"
                 return
 
-            messages_text = XML_WRAP_HINT.strip()
+            messages_text = TOOL_WRAP_HINT.strip()
             msg.content.append(ContentItem(type="text", text=messages_text))
             return
 
@@ -485,19 +485,20 @@ def _prepare_messages_for_model(
 
     if not instructions:
         if tools and tool_choice != "none":
-            _append_xml_hint_to_last_user_message(prepared)
+            _append_tool_hint_to_last_user_message(prepared)
         return prepared
 
     combined_instructions = "\n\n".join(instructions)
     if prepared and prepared[0].role == "system" and isinstance(prepared[0].content, str):
         existing = prepared[0].content or ""
-        separator = "\n\n" if existing else ""
-        prepared[0].content = f"{existing}{separator}{combined_instructions}"
+        if combined_instructions not in existing:
+            separator = "\n\n" if existing else ""
+            prepared[0].content = f"{existing}{separator}{combined_instructions}"
     else:
         prepared.insert(0, Message(role="system", content=combined_instructions))
 
     if tools and tool_choice != "none":
-        _append_xml_hint_to_last_user_message(prepared)
+        _append_tool_hint_to_last_user_message(prepared)
 
     return prepared
 
@@ -768,15 +769,15 @@ class StreamingOutputFilter:
         self.current_role = ""
         self.block_buffer = ""
 
-        self.XML_START = "[function_calls]"
-        self.XML_END = "[/function_calls]"
+        self.TOOL_START = "[function_calls]"
+        self.TOOL_END = "[/function_calls]"
         self.TAG_START = "<|im_start|>"
         self.TAG_END = "<|im_end|>"
-        self.HINT_START = f"\n{XML_HINT_LINE_START}" if XML_HINT_LINE_START else ""
-        self.HINT_END = XML_HINT_LINE_END
-        self.TOOL_START = "[call:"
+        self.HINT_START = f"\n{TOOL_HINT_LINE_START}" if TOOL_HINT_LINE_START else ""
+        self.HINT_END = TOOL_HINT_LINE_END
+        self.TOOL_PREFIX = "[call:"
 
-        self.WATCH_PREFIXES = [self.XML_START, self.TAG_START, self.TAG_END]
+        self.WATCH_PREFIXES = [self.TOOL_START, self.TAG_START, self.TAG_END]
         if self.HINT_START:
             self.WATCH_PREFIXES.append(self.HINT_START)
 
@@ -786,7 +787,7 @@ class StreamingOutputFilter:
 
         while self.buffer:
             if self.state == "NORMAL":
-                xml_idx = self.buffer.find(self.XML_START)
+                tool_idx = self.buffer.find(self.TOOL_START)
                 tag_idx = self.buffer.find(self.TAG_START)
                 end_idx = self.buffer.find(self.TAG_END)
                 hint_idx = self.buffer.find(self.HINT_START) if self.HINT_START else -1
@@ -794,7 +795,7 @@ class StreamingOutputFilter:
                 indices = [
                     (i, t)
                     for i, t in [
-                        (xml_idx, "XML"),
+                        (tool_idx, "TOOL"),
                         (tag_idx, "TAG"),
                         (end_idx, "END"),
                         (hint_idx, "HINT"),
@@ -821,10 +822,10 @@ class StreamingOutputFilter:
                 output.append(self.buffer[:idx])
                 self.buffer = self.buffer[idx:]
 
-                if m_type == "XML":
-                    self.state = "IN_XML"
+                if m_type == "TOOL":
+                    self.state = "IN_TOOL"
                     self.block_buffer = ""
-                    self.buffer = self.buffer[len(self.XML_START) :]
+                    self.buffer = self.buffer[len(self.TOOL_START) :]
                 elif m_type == "TAG":
                     self.state = "IN_TAG"
                     self.buffer = self.buffer[len(self.TAG_START) :]
@@ -846,15 +847,15 @@ class StreamingOutputFilter:
                         self.buffer = self.buffer[-keep_len:]
                     break
 
-            elif self.state == "IN_XML":
-                end_idx = self.buffer.find(self.XML_END)
+            elif self.state == "IN_TOOL":
+                end_idx = self.buffer.find(self.TOOL_END)
                 if end_idx != -1:
                     self.block_buffer += self.buffer[:end_idx]
-                    self.buffer = self.buffer[end_idx + len(self.XML_END) :]
+                    self.buffer = self.buffer[end_idx + len(self.TOOL_END) :]
                     self.state = "NORMAL"
                 else:
                     # Accumulate and keep potential split end marker
-                    keep_len = len(self.XML_END) - 1
+                    keep_len = len(self.TOOL_END) - 1
                     if len(self.buffer) > keep_len:
                         self.block_buffer += self.buffer[:-keep_len]
                         self.buffer = self.buffer[-keep_len:]
@@ -895,9 +896,9 @@ class StreamingOutputFilter:
 
     def flush(self) -> str:
         res = ""
-        if self.state == "IN_XML":
-            if self.TOOL_START not in self.block_buffer.lower():
-                res = f"{self.XML_START}{self.block_buffer}"
+        if self.state == "IN_TOOL":
+            if self.TOOL_PREFIX not in self.block_buffer.lower():
+                res = f"{self.TOOL_START}{self.block_buffer}"
         elif self.state == "IN_BLOCK" and self.current_role != "tool":
             res = self.buffer
         elif self.state == "NORMAL":
