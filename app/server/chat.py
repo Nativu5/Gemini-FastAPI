@@ -369,12 +369,12 @@ def _build_tool_prompt(
     lines.append(
         "When you decide to call a tool you MUST respond with nothing except a single [function_calls] block exactly like the template below."
     )
-    lines.append("Do not add text before or after it.")
+    lines.append("Do not add text before or after the block.")
     lines.append("[function_calls]")
     lines.append('[call:tool_name]{"argument": "value"}[/call]')
     lines.append("[/function_calls]")
     lines.append(
-        "Use double quotes for JSON keys and values. If you omit the block or include any extra text, the system will assume you are NOT calling a tool and your request will fail."
+        "Use double quotes for JSON keys and values. CRITICAL: The content inside [call:...]...[/call] MUST be a raw JSON object. Do not wrap it in ```json blocks or add any conversational text inside the tag."
     )
     lines.append(
         "To call multiple tools, list each [call:tool_name]...[/call] entry sequentially within a single [function_calls] block."

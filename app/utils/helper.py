@@ -2,6 +2,7 @@ import base64
 import hashlib
 import mimetypes
 import re
+import reprlib
 import struct
 import tempfile
 from pathlib import Path
@@ -17,7 +18,7 @@ VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
     "\nYou MUST wrap every tool call response inside a single [function_calls] block exactly like:\n"
     '[function_calls]\n[call:tool_name]{"argument": "value"}[/call]\n[/function_calls]\n'
-    "Do not surround the block with any other text or whitespace; otherwise the call will be ignored.\n"
+    "IMPORTANT: Arguments MUST be a valid JSON object. Do not include markdown code blocks (```json) or any conversational text inside the [call] tag.\n"
 )
 TOOL_BLOCK_RE = re.compile(
     r"\[function_calls]\s*(.*?)\s*\[/function_calls]", re.DOTALL | re.IGNORECASE
@@ -197,7 +198,22 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             parsed_args = orjson.loads(raw_args)
             arguments = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode("utf-8")
         except orjson.JSONDecodeError:
-            logger.warning(f"Failed to parse tool call arguments for '{name}'. Passing raw string.")
+            json_match = re.search(r"({.*})", raw_args, re.DOTALL)
+            if json_match:
+                try:
+                    potential_json = json_match.group(1)
+                    parsed_args = orjson.loads(potential_json)
+                    arguments = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode(
+                        "utf-8"
+                    )
+                except orjson.JSONDecodeError:
+                    logger.warning(
+                        f"Failed to parse extracted JSON arguments for '{name}': {reprlib.repr(json_match)}"
+                    )
+            else:
+                logger.warning(
+                    f"Failed to parse tool call arguments for '{name}'. Passing raw string: {reprlib.repr(raw_args)}"
+                )
 
         index = len(tool_calls)
         seed = f"{name}:{arguments}:{index}".encode("utf-8")
