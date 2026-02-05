@@ -41,15 +41,14 @@ from ..models import (
 from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from ..utils import g_config
 from ..utils.helper import (
-    CODE_BLOCK_HINT,
-    CODE_HINT_STRIPPED,
-    CONTROL_TOKEN_RE,
-    XML_HINT_STRIPPED,
-    XML_WRAP_HINT,
+    TOOL_HINT_LINE_END,
+    TOOL_HINT_LINE_START,
+    TOOL_HINT_STRIPPED,
+    TOOL_WRAP_HINT,
     estimate_tokens,
     extract_image_dimensions,
     extract_tool_calls,
-    strip_code_fence,
+    strip_system_hints,
     text_from_message,
 )
 from .middleware import get_image_store_dir, get_image_token, get_temp_dir, verify_api_key
@@ -225,10 +224,9 @@ def _process_llm_output(
 
     if structured_requirement:
         cleaned_for_json = LMDBConversationStore.remove_think_tags(visible_output)
-        json_text = strip_code_fence(cleaned_for_json or "")
-        if json_text:
+        if cleaned_for_json:
             try:
-                structured_payload = orjson.loads(json_text)
+                structured_payload = orjson.loads(cleaned_for_json)
                 canonical_output = orjson.dumps(structured_payload).decode("utf-8")
                 visible_output = canonical_output
                 storage_output = canonical_output
@@ -369,19 +367,20 @@ def _build_tool_prompt(
         )
 
     lines.append(
-        "When you decide to call a tool you MUST respond with nothing except a single fenced block exactly like the template below."
+        "When you decide to call a tool you MUST respond with nothing except a single [function_calls] block exactly like the template below."
+    )
+    lines.append("Do not add text before or after the block.")
+    lines.append("[function_calls]")
+    lines.append('[call:tool_name]{"argument": "value"}[/call]')
+    lines.append("[/function_calls]")
+    lines.append(
+        "Use double quotes for JSON keys and values. CRITICAL: The content inside [call:...]...[/call] MUST be a raw JSON object. Do not wrap it in ```json blocks or add any conversational text inside the tag."
     )
     lines.append(
-        "The fenced block MUST use ```xml as the opening fence and ``` as the closing fence. Do not add text before or after it."
-    )
-    lines.append("```xml")
-    lines.append('<tool_call name="tool_name">{"argument": "value"}</tool_call>')
-    lines.append("```")
-    lines.append(
-        "Use double quotes for JSON keys and values. If you omit the fenced block or include any extra text, the system will assume you are NOT calling a tool and your request will fail."
+        "To call multiple tools, list each [call:tool_name]...[/call] entry sequentially within a single [function_calls] block."
     )
     lines.append(
-        "If multiple tool calls are required, include multiple <tool_call> entries inside the same fenced block. Without a tool call, reply normally and do NOT emit any ```xml fence."
+        "If no tool call is needed, provide a normal response and DO NOT use the [function_calls] tag."
     )
 
     return "\n".join(lines)
@@ -424,15 +423,15 @@ def _build_image_generation_instruction(
     return "\n\n".join(instructions)
 
 
-def _append_xml_hint_to_last_user_message(messages: list[Message]) -> None:
-    """Ensure the last user message carries the XML wrap hint."""
+def _append_tool_hint_to_last_user_message(messages: list[Message]) -> None:
+    """Ensure the last user message carries the tool wrap hint."""
     for msg in reversed(messages):
         if msg.role != "user" or msg.content is None:
             continue
 
         if isinstance(msg.content, str):
-            if XML_HINT_STRIPPED not in msg.content:
-                msg.content = f"{msg.content}\n{XML_WRAP_HINT}"
+            if TOOL_HINT_STRIPPED not in msg.content:
+                msg.content = f"{msg.content}\n{TOOL_WRAP_HINT}"
             return
 
         if isinstance(msg.content, list):
@@ -440,35 +439,14 @@ def _append_xml_hint_to_last_user_message(messages: list[Message]) -> None:
                 if getattr(part, "type", None) != "text":
                     continue
                 text_value = part.text or ""
-                if XML_HINT_STRIPPED in text_value:
+                if TOOL_HINT_STRIPPED in text_value:
                     return
-                part.text = f"{text_value}\n{XML_WRAP_HINT}"
+                part.text = f"{text_value}\n{TOOL_WRAP_HINT}"
                 return
 
-            messages_text = XML_WRAP_HINT.strip()
+            messages_text = TOOL_WRAP_HINT.strip()
             msg.content.append(ContentItem(type="text", text=messages_text))
             return
-
-
-def _conversation_has_code_hint(messages: list[Message]) -> bool:
-    """Return True if any system message already includes the code block hint."""
-    for msg in messages:
-        if msg.role != "system" or msg.content is None:
-            continue
-
-        if isinstance(msg.content, str):
-            if CODE_HINT_STRIPPED in msg.content:
-                return True
-            continue
-
-        if isinstance(msg.content, list):
-            for part in msg.content:
-                if getattr(part, "type", None) != "text":
-                    continue
-                if part.text and CODE_HINT_STRIPPED in part.text:
-                    return True
-
-    return False
 
 
 def _prepare_messages_for_model(
@@ -505,25 +483,22 @@ def _prepare_messages_for_model(
                 f"Applied {len(extra_instructions)} extra instructions for tool/structured output."
             )
 
-        if not _conversation_has_code_hint(prepared):
-            instructions.append(CODE_BLOCK_HINT)
-            logger.debug("Injected default code block hint for Gemini conversation.")
-
     if not instructions:
         if tools and tool_choice != "none":
-            _append_xml_hint_to_last_user_message(prepared)
+            _append_tool_hint_to_last_user_message(prepared)
         return prepared
 
     combined_instructions = "\n\n".join(instructions)
     if prepared and prepared[0].role == "system" and isinstance(prepared[0].content, str):
         existing = prepared[0].content or ""
-        separator = "\n\n" if existing else ""
-        prepared[0].content = f"{existing}{separator}{combined_instructions}"
+        if combined_instructions not in existing:
+            separator = "\n\n" if existing else ""
+            prepared[0].content = f"{existing}{separator}{combined_instructions}"
     else:
         prepared.insert(0, Message(role="system", content=combined_instructions))
 
     if tools and tool_choice != "none":
-        _append_xml_hint_to_last_user_message(prepared)
+        _append_tool_hint_to_last_user_message(prepared)
 
     return prepared
 
@@ -784,147 +759,154 @@ async def _send_with_split(
 
 class StreamingOutputFilter:
     """
-    Enhanced streaming filter that suppresses:
-    1. XML tool call blocks: ```xml ... ```
-    2. ChatML tool blocks: <|im_start|>tool\n...<|im_end|>
-    3. ChatML role headers: <|im_start|>role\n (only suppresses the header, keeps content)
-    4. Control tokens: <|im_start|>, <|im_end|>
-    5. System instructions/hints: XML_WRAP_HINT, CODE_BLOCK_HINT, etc.
+    State Machine filter to suppress technical markers, tool calls, and system hints.
+    Handles fragmentation where markers are split across multiple chunks.
     """
 
     def __init__(self):
         self.buffer = ""
-        self.in_xml_tool = False
-        self.in_tagged_block = False
-        self.in_role_header = False
+        self.state = "NORMAL"
         self.current_role = ""
+        self.block_buffer = ""
 
-        self.XML_START = "```xml"
-        self.XML_END = "```"
+        self.TOOL_START = "[function_calls]"
+        self.TOOL_END = "[/function_calls]"
         self.TAG_START = "<|im_start|>"
         self.TAG_END = "<|im_end|>"
-        self.SYSTEM_HINTS = [
-            XML_WRAP_HINT,
-            XML_HINT_STRIPPED,
-            CODE_BLOCK_HINT,
-            CODE_HINT_STRIPPED,
-        ]
+        self.HINT_START = f"\n{TOOL_HINT_LINE_START}" if TOOL_HINT_LINE_START else ""
+        self.HINT_END = TOOL_HINT_LINE_END
+        self.TOOL_PREFIX = "[call:"
+
+        self.WATCH_PREFIXES = [self.TOOL_START, self.TAG_START, self.TAG_END]
+        if self.HINT_START:
+            self.WATCH_PREFIXES.append(self.HINT_START)
 
     def process(self, chunk: str) -> str:
         self.buffer += chunk
-        to_yield = ""
+        output = []
 
         while self.buffer:
-            if self.in_xml_tool:
-                end_idx = self.buffer.find(self.XML_END)
-                if end_idx != -1:
-                    self.buffer = self.buffer[end_idx + len(self.XML_END) :]
-                    self.in_xml_tool = False
-                else:
+            if self.state == "NORMAL":
+                tool_idx = self.buffer.find(self.TOOL_START)
+                tag_idx = self.buffer.find(self.TAG_START)
+                end_idx = self.buffer.find(self.TAG_END)
+                hint_idx = self.buffer.find(self.HINT_START) if self.HINT_START else -1
+
+                indices = [
+                    (i, t)
+                    for i, t in [
+                        (tool_idx, "TOOL"),
+                        (tag_idx, "TAG"),
+                        (end_idx, "END"),
+                        (hint_idx, "HINT"),
+                    ]
+                    if i != -1
+                ]
+
+                if not indices:
+                    # Guard against split start markers
+                    keep_len = 0
+                    for p in self.WATCH_PREFIXES:
+                        for i in range(len(p) - 1, 0, -1):
+                            if self.buffer.endswith(p[:i]):
+                                keep_len = max(keep_len, i)
+                                break
+                    yield_len = len(self.buffer) - keep_len
+                    if yield_len > 0:
+                        output.append(self.buffer[:yield_len])
+                        self.buffer = self.buffer[yield_len:]
                     break
-            elif self.in_role_header:
+
+                indices.sort()
+                idx, m_type = indices[0]
+                output.append(self.buffer[:idx])
+                self.buffer = self.buffer[idx:]
+
+                if m_type == "TOOL":
+                    self.state = "IN_TOOL"
+                    self.block_buffer = ""
+                    self.buffer = self.buffer[len(self.TOOL_START) :]
+                elif m_type == "TAG":
+                    self.state = "IN_TAG"
+                    self.buffer = self.buffer[len(self.TAG_START) :]
+                elif m_type == "END":
+                    self.buffer = self.buffer[len(self.TAG_END) :]
+                elif m_type == "HINT":
+                    self.state = "IN_HINT"
+                    self.buffer = self.buffer[len(self.HINT_START) :]
+
+            elif self.state == "IN_HINT":
+                end_idx = self.buffer.find(self.HINT_END)
+                if end_idx != -1:
+                    self.buffer = self.buffer[end_idx + len(self.HINT_END) :]
+                    self.state = "NORMAL"
+                else:
+                    # Keep end of buffer to avoid missing split HINT_END
+                    keep_len = len(self.HINT_END) - 1
+                    if len(self.buffer) > keep_len:
+                        self.buffer = self.buffer[-keep_len:]
+                    break
+
+            elif self.state == "IN_TOOL":
+                end_idx = self.buffer.find(self.TOOL_END)
+                if end_idx != -1:
+                    self.block_buffer += self.buffer[:end_idx]
+                    self.buffer = self.buffer[end_idx + len(self.TOOL_END) :]
+                    self.state = "NORMAL"
+                else:
+                    # Accumulate and keep potential split end marker
+                    keep_len = len(self.TOOL_END) - 1
+                    if len(self.buffer) > keep_len:
+                        self.block_buffer += self.buffer[:-keep_len]
+                        self.buffer = self.buffer[-keep_len:]
+                    break
+
+            elif self.state == "IN_TAG":
                 nl_idx = self.buffer.find("\n")
                 if nl_idx != -1:
-                    role_text = self.buffer[:nl_idx].strip().lower()
-                    self.current_role = role_text
+                    self.current_role = self.buffer[:nl_idx].strip().lower()
                     self.buffer = self.buffer[nl_idx + 1 :]
-                    self.in_role_header = False
-                    self.in_tagged_block = True
+                    self.state = "IN_BLOCK"
                 else:
                     break
-            elif self.in_tagged_block:
+
+            elif self.state == "IN_BLOCK":
                 end_idx = self.buffer.find(self.TAG_END)
                 if end_idx != -1:
                     content = self.buffer[:end_idx]
                     if self.current_role != "tool":
-                        to_yield += content
+                        output.append(content)
                     self.buffer = self.buffer[end_idx + len(self.TAG_END) :]
-                    self.in_tagged_block = False
+                    self.state = "NORMAL"
                     self.current_role = ""
                 else:
-                    if self.current_role == "tool":
+                    # Yield safe part and keep potential split TAG_END
+                    keep_len = len(self.TAG_END) - 1
+                    if self.current_role != "tool":
+                        if len(self.buffer) > keep_len:
+                            output.append(self.buffer[:-keep_len])
+                            self.buffer = self.buffer[-keep_len:]
                         break
                     else:
-                        yield_len = len(self.buffer) - (len(self.TAG_END) - 1)
-                        if yield_len > 0:
-                            to_yield += self.buffer[:yield_len]
-                            self.buffer = self.buffer[yield_len:]
+                        if len(self.buffer) > keep_len:
+                            self.buffer = self.buffer[-keep_len:]
                         break
-            else:
-                # Outside any special block. Look for starts.
-                earliest_idx = -1
-                match_type = ""
 
-                xml_idx = self.buffer.find(self.XML_START)
-                if xml_idx != -1:
-                    earliest_idx = xml_idx
-                    match_type = "xml"
-
-                tag_s_idx = self.buffer.find(self.TAG_START)
-                if tag_s_idx != -1:
-                    if earliest_idx == -1 or tag_s_idx < earliest_idx:
-                        earliest_idx = tag_s_idx
-                        match_type = "tag_start"
-
-                tag_e_idx = self.buffer.find(self.TAG_END)
-                if tag_e_idx != -1:
-                    if earliest_idx == -1 or tag_e_idx < earliest_idx:
-                        earliest_idx = tag_e_idx
-                        match_type = "tag_end"
-
-                if earliest_idx != -1:
-                    # Yield text before the match
-                    to_yield += self.buffer[:earliest_idx]
-                    self.buffer = self.buffer[earliest_idx:]
-
-                    if match_type == "xml":
-                        self.in_xml_tool = True
-                        self.buffer = self.buffer[len(self.XML_START) :]
-                    elif match_type == "tag_start":
-                        self.in_role_header = True
-                        self.buffer = self.buffer[len(self.TAG_START) :]
-                    elif match_type == "tag_end":
-                        # Orphaned end tag, just skip it
-                        self.buffer = self.buffer[len(self.TAG_END) :]
-                    continue
-                else:
-                    # Check for prefixes
-                    prefixes = [self.XML_START, self.TAG_START, self.TAG_END]
-                    max_keep = 0
-                    for p in prefixes:
-                        for i in range(len(p) - 1, 0, -1):
-                            if self.buffer.endswith(p[:i]):
-                                max_keep = max(max_keep, i)
-                                break
-
-                    yield_len = len(self.buffer) - max_keep
-                    if yield_len > 0:
-                        to_yield += self.buffer[:yield_len]
-                        self.buffer = self.buffer[yield_len:]
-                    break
-
-        # Final pass: filter out system hints from the text to be yielded
-        for hint in self.SYSTEM_HINTS:
-            if hint in to_yield:
-                to_yield = to_yield.replace(hint, "")
-
-        return to_yield
+        return "".join(output)
 
     def flush(self) -> str:
-        # If we are stuck in a tool block or role header at the end,
-        # it usually means malformed output.
-        if self.in_xml_tool or (self.in_tagged_block and self.current_role == "tool"):
-            return ""
+        res = ""
+        if self.state == "IN_TOOL":
+            if self.TOOL_PREFIX not in self.block_buffer.lower():
+                res = f"{self.TOOL_START}{self.block_buffer}"
+        elif self.state == "IN_BLOCK" and self.current_role != "tool":
+            res = self.buffer
+        elif self.state == "NORMAL":
+            res = self.buffer
 
-        final_text = self.buffer
         self.buffer = ""
-
-        # Filter out any orphaned/partial control tokens or hints
-        final_text = CONTROL_TOKEN_RE.sub("", final_text)
-        for hint in self.SYSTEM_HINTS:
-            final_text = final_text.replace(hint, "")
-
-        return final_text.strip()
+        self.state = "NORMAL"
+        return strip_system_hints(res)
 
 
 # --- Response Builders & Streaming ---
@@ -1326,7 +1308,10 @@ async def create_chat_completion(
 
     # This ensures that server-injected system instructions are part of the history
     msgs = _prepare_messages_for_model(
-        request.messages, request.tools, request.tool_choice, extra_instr
+        request.messages,
+        request.tools,
+        request.tool_choice,
+        extra_instr,
     )
 
     session, client, remain = await _find_reusable_session(db, pool, model, msgs)
@@ -1338,7 +1323,11 @@ async def create_chat_completion(
         # For reused sessions, we only need to process the remaining messages.
         # We don't re-inject system defaults to avoid duplicating instructions already in history.
         input_msgs = _prepare_messages_for_model(
-            remain, request.tools, request.tool_choice, extra_instr, False
+            remain,
+            request.tools,
+            request.tool_choice,
+            extra_instr,
+            False,
         )
         if len(input_msgs) == 1:
             m_input, files = await GeminiClientWrapper.process_message(
@@ -1492,7 +1481,10 @@ async def create_response(
     )
 
     messages = _prepare_messages_for_model(
-        conv_messages, standard_tools or None, model_tool_choice, extra_instr or None
+        conv_messages,
+        standard_tools or None,
+        model_tool_choice,
+        extra_instr or None,
     )
     pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
@@ -1502,7 +1494,13 @@ async def create_response(
 
     session, client, remain = await _find_reusable_session(db, pool, model, messages)
     if session:
-        msgs = _prepare_messages_for_model(remain, request.tools, request.tool_choice, None, False)
+        msgs = _prepare_messages_for_model(
+            remain,
+            request.tools,
+            request.tool_choice,
+            None,
+            False,
+        )
         if not msgs:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
         m_input, files = (

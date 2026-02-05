@@ -16,7 +16,7 @@ from ..utils.helper import (
 )
 
 HTML_ESCAPE_RE = re.compile(r"&(?:lt|gt|amp|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);")
-MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=[-\\`*_{}\[\]()#+.!<>])")
+ESC_SYMBOLS_RE = re.compile(r"\\(?=[\\\[\]{}()<>`*_#~+.:!&^$|-])")
 CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`\n]+?`)", re.DOTALL)
 FILE_PATH_PATTERN = re.compile(
     r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
@@ -117,9 +117,7 @@ class GeminiClientWrapper(GeminiClient):
         if message.role == "tool":
             tool_name = message.name or "unknown"
             combined_content = "\n".join(text_fragments).strip() or "{}"
-            text_fragments = [
-                f'<tool_response name="{tool_name}">{combined_content}</tool_response>'
-            ]
+            text_fragments = [f"[response:{tool_name}]{combined_content}[/response]"]
 
         if message.tool_calls:
             tool_blocks: list[str] = []
@@ -132,12 +130,10 @@ class GeminiClientWrapper(GeminiClient):
                     )
                 except orjson.JSONDecodeError:
                     pass
-                tool_blocks.append(
-                    f'<tool_call name="{call.function.name}">{args_text}</tool_call>'
-                )
+                tool_blocks.append(f"[call:{call.function.name}]{args_text}[/call]")
 
             if tool_blocks:
-                tool_section = "```xml\n" + "".join(tool_blocks) + "\n```"
+                tool_section = "[function_calls]\n" + "".join(tool_blocks) + "\n[/function_calls]"
                 text_fragments.append(tool_section)
 
         model_input = "\n".join(fragment for fragment in text_fragments if fragment is not None)
@@ -189,22 +185,22 @@ class GeminiClientWrapper(GeminiClient):
                 parts.append(HTML_ESCAPE_RE.sub(lambda m: html.unescape(m.group(0)), tail))
             return "".join(parts)
 
-        def _unescape_markdown(text_content: str) -> str:
+        def _unescape_symbols(text_content: str) -> str:
             parts: list[str] = []
             last_index = 0
             for match in CODE_FENCE_RE.finditer(text_content):
                 non_code = text_content[last_index : match.start()]
                 if non_code:
-                    parts.append(MARKDOWN_ESCAPE_RE.sub("", non_code))
+                    parts.append(ESC_SYMBOLS_RE.sub("", non_code))
                 parts.append(match.group(0))
                 last_index = match.end()
             tail = text_content[last_index:]
             if tail:
-                parts.append(MARKDOWN_ESCAPE_RE.sub("", tail))
+                parts.append(ESC_SYMBOLS_RE.sub("", tail))
             return "".join(parts)
 
         text = _unescape_html(text)
-        text = _unescape_markdown(text)
+        text = _unescape_symbols(text)
 
         def extract_file_path_from_display_text(text_content: str) -> str | None:
             match = re.match(FILE_PATH_PATTERN, text_content)
