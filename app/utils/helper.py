@@ -200,15 +200,15 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         except orjson.JSONDecodeError:
             json_match = re.search(r"({.*})", raw_args, re.DOTALL)
             if json_match:
+                potential_json = json_match.group(1)
                 try:
-                    potential_json = json_match.group(1)
                     parsed_args = orjson.loads(potential_json)
                     arguments = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode(
                         "utf-8"
                     )
                 except orjson.JSONDecodeError:
                     logger.warning(
-                        f"Failed to parse extracted JSON arguments for '{name}': {reprlib.repr(json_match)}"
+                        f"Failed to parse extracted JSON arguments for '{name}': {reprlib.repr(potential_json)}"
                     )
             else:
                 logger.warning(
