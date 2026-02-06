@@ -383,6 +383,9 @@ def _build_tool_prompt(
     lines.append(
         "If no tool call is needed, provide a normal response and NEVER use the [function_calls] tag."
     )
+    lines.append(
+        "After you call a tool, the system will provide the output in a `[function_responses]` block with the same tool name."
+    )
 
     return "\n".join(lines)
 
@@ -462,11 +465,13 @@ def _prepare_messages_for_model(
             msg.name = tool_id_to_name.get(msg.tool_call_id)
 
     instructions: list[str] = []
+    tool_prompt_injected = False
     if inject_system_defaults:
         if tools:
             tool_prompt = _build_tool_prompt(tools, tool_choice)
             if tool_prompt:
                 instructions.append(tool_prompt)
+                tool_prompt_injected = True
 
         if extra_instructions:
             instructions.extend(instr for instr in extra_instructions if instr)
@@ -475,7 +480,7 @@ def _prepare_messages_for_model(
             )
 
     if not instructions:
-        if tools and tool_choice != "none":
+        if tools and tool_choice != "none" and not tool_prompt_injected:
             _append_tool_hint_to_last_user_message(prepared)
         return prepared
 
@@ -488,7 +493,7 @@ def _prepare_messages_for_model(
     else:
         prepared.insert(0, Message(role="system", content=combined_instructions))
 
-    if tools and tool_choice != "none":
+    if tools and tool_choice != "none" and not tool_prompt_injected:
         _append_tool_hint_to_last_user_message(prepared)
 
     return prepared
@@ -762,13 +767,20 @@ class StreamingOutputFilter:
 
         self.TOOL_START = "[function_calls]"
         self.TOOL_END = "[/function_calls]"
+        self.RESPONSE_START = "[function_responses]"
+        self.RESPONSE_END = "[/function_responses]"
         self.TAG_START = "<|im_start|>"
         self.TAG_END = "<|im_end|>"
         self.HINT_START = f"\n{TOOL_HINT_LINE_START}" if TOOL_HINT_LINE_START else ""
         self.HINT_END = TOOL_HINT_LINE_END
         self.TOOL_PREFIX = "[call:"
 
-        self.WATCH_PREFIXES = [self.TOOL_START, self.TAG_START, self.TAG_END]
+        self.WATCH_PREFIXES = [
+            self.TOOL_START,
+            self.RESPONSE_START,
+            self.TAG_START,
+            self.TAG_END,
+        ]
         if self.HINT_START:
             self.WATCH_PREFIXES.append(self.HINT_START)
 
@@ -779,6 +791,7 @@ class StreamingOutputFilter:
         while self.buffer:
             if self.state == "NORMAL":
                 tool_idx = self.buffer.find(self.TOOL_START)
+                resp_idx = self.buffer.find(self.RESPONSE_START)
                 tag_idx = self.buffer.find(self.TAG_START)
                 end_idx = self.buffer.find(self.TAG_END)
                 hint_idx = self.buffer.find(self.HINT_START) if self.HINT_START else -1
@@ -787,6 +800,7 @@ class StreamingOutputFilter:
                     (i, t)
                     for i, t in [
                         (tool_idx, "TOOL"),
+                        (resp_idx, "RESP"),
                         (tag_idx, "TAG"),
                         (end_idx, "END"),
                         (hint_idx, "HINT"),
@@ -817,6 +831,9 @@ class StreamingOutputFilter:
                     self.state = "IN_TOOL"
                     self.block_buffer = ""
                     self.buffer = self.buffer[len(self.TOOL_START) :]
+                elif m_type == "RESP":
+                    self.state = "IN_RESP"
+                    self.buffer = self.buffer[len(self.RESPONSE_START) :]
                 elif m_type == "TAG":
                     self.state = "IN_TAG"
                     self.buffer = self.buffer[len(self.TAG_START) :]
@@ -834,6 +851,18 @@ class StreamingOutputFilter:
                 else:
                     # Keep end of buffer to avoid missing split HINT_END
                     keep_len = len(self.HINT_END) - 1
+                    if len(self.buffer) > keep_len:
+                        self.buffer = self.buffer[-keep_len:]
+                    break
+
+            elif self.state == "IN_RESP":
+                end_idx = self.buffer.find(self.RESPONSE_END)
+                if end_idx != -1:
+                    self.buffer = self.buffer[end_idx + len(self.RESPONSE_END) :]
+                    self.state = "NORMAL"
+                else:
+                    # Keep end of buffer to avoid missing split RESPONSE_END
+                    keep_len = len(self.RESPONSE_END) - 1
                     if len(self.buffer) > keep_len:
                         self.buffer = self.buffer[-keep_len:]
                     break
@@ -892,6 +921,8 @@ class StreamingOutputFilter:
                 res = f"{self.TOOL_START}{self.block_buffer}"
         elif self.state == "IN_BLOCK" and self.current_role != "tool":
             res = self.buffer
+        elif self.state in ("IN_RESP", "IN_HINT"):
+            res = ""
         elif self.state == "NORMAL":
             res = self.buffer
 

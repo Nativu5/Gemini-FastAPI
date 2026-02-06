@@ -117,7 +117,9 @@ class GeminiClientWrapper(GeminiClient):
         if message.role == "tool":
             tool_name = message.name or "unknown"
             combined_content = "\n".join(text_fragments).strip() or "{}"
-            text_fragments = [f"[response:{tool_name}]{combined_content}[/response]"]
+            text_fragments = [
+                f"[function_responses]\n[response:{tool_name}]{combined_content}[/response]\n[/function_responses]"
+            ]
 
         if message.tool_calls:
             tool_blocks: list[str] = []

@@ -28,6 +28,12 @@ TOOL_BLOCK_RE = re.compile(
     r"\[function_calls]\s*(.*?)\s*\[/function_calls]", re.DOTALL | re.IGNORECASE
 )
 TOOL_CALL_RE = re.compile(r"\[call:([^]]+)]\s*(.*?)\s*\[/call]", re.DOTALL | re.IGNORECASE)
+RESPONSE_BLOCK_RE = re.compile(
+    r"\[function_responses]\s*(.*?)\s*\[/function_responses]", re.DOTALL | re.IGNORECASE
+)
+RESPONSE_ITEM_RE = re.compile(
+    r"\[response:([^]]+)]\s*(.*?)\s*\[/response]", re.DOTALL | re.IGNORECASE
+)
 CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>")
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
@@ -248,8 +254,6 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         else:
             return match.group(0)
 
-    cleaned = TOOL_BLOCK_RE.sub(_replace_block, cleaned)
-
     def _replace_orphan(match: re.Match[str]) -> str:
         if extract:
             name = (match.group(1) or "").strip()
@@ -257,7 +261,11 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             _create_tool_call(name, raw_args)
         return ""
 
+    cleaned = TOOL_BLOCK_RE.sub(_replace_block, cleaned)
     cleaned = TOOL_CALL_RE.sub(_replace_orphan, cleaned)
+
+    cleaned = RESPONSE_BLOCK_RE.sub("", cleaned)
+    cleaned = RESPONSE_ITEM_RE.sub("", cleaned)
 
     return cleaned, tool_calls
 

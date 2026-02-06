@@ -22,7 +22,7 @@ gemini:
       secure_1psid: "YOUR_SECURE_1PSID_HERE"
       secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
       proxy: null          # Optional proxy URL (null/empty means direct connection)
-  timeout: 120             # Init timeout in seconds
+  timeout: 300             # Init timeout in seconds
   auto_refresh: true       # Auto-refresh session cookies
   refresh_interval: 540    # Refresh interval in seconds
   verbose: false           # Enable verbose logging for Gemini requests
