@@ -336,7 +336,7 @@ def _build_tool_prompt(
         return ""
 
     lines: list[str] = [
-        "You can invoke the following developer tools. Call a tool only when it is required and follow the JSON schema exactly when providing arguments."
+        "SYSTEM INTERFACE: You have access to the following technical tools. You MUST invoke them when necessary to fulfill the request, strictly adhering to the provided JSON schemas."
     ]
 
     for tool in tools:
@@ -367,20 +367,21 @@ def _build_tool_prompt(
         )
 
     lines.append(
-        "When you decide to call a tool you MUST respond with nothing except a single [function_calls] block exactly like the template below."
+        "When you decide to call tools, you MUST respond ONLY with a single [function_calls] block using this EXACT syntax:"
     )
-    lines.append("Do not add text before or after the block.")
     lines.append("[function_calls]")
-    lines.append('[call:tool_name]{"argument": "value"}[/call]')
+    lines.append("[call:tool_name]")
+    lines.append('{"argument": "value"}')
+    lines.append("[/call]")
     lines.append("[/function_calls]")
     lines.append(
-        "Use double quotes for JSON keys and values. CRITICAL: The content inside [call:...]...[/call] MUST be a raw JSON object. Do not wrap it in ```json blocks or add any conversational text inside the tag."
+        "CRITICAL: Every [call:...] MUST have a raw JSON object followed by a mandatory [/call] closing tag. DO NOT use markdown blocks or add text inside the block."
     )
     lines.append(
-        "To call multiple tools, list each [call:tool_name]...[/call] entry sequentially within a single [function_calls] block."
+        "If multiple tools are needed, list them sequentially within the same [function_calls] block."
     )
     lines.append(
-        "If no tool call is needed, provide a normal response and DO NOT use the [function_calls] tag."
+        "If no tool call is needed, provide a normal response and NEVER use the [function_calls] tag."
     )
 
     return "\n".join(lines)
@@ -398,26 +399,16 @@ def _build_image_generation_instruction(
         return None
 
     instructions: list[str] = [
-        "Image generation is enabled. When the user requests an image, you must return an actual generated image, not a text description.",
-        "For new image requests, generate at least one new image matching the description.",
-        "If the user provides an image and asks for edits or variations, return a newly generated image with the requested changes.",
-        "Avoid all text replies unless a short caption is explicitly requested. Do not explain, apologize, or describe image creation steps.",
-        "Never send placeholder text like 'Here is your image' or any other response without an actual image attachment.",
+        "IMAGE GENERATION ENABLED: When an image is requested, you MUST return a real generated image directly.",
+        "1. For new requests, generate new images matching the description immediately.",
+        "2. For edits to existing images, apply changes and return a new generated version.",
+        "3. CRITICAL: Provide ZERO text explanation, prologue, or apologies. Do not describe the creation process.",
+        "4. NEVER send placeholder text or descriptions like 'Generating image...' without an actual image attachment.",
     ]
-
-    if primary:
-        if primary.model:
-            instructions.append(
-                f"Where styles differ, favor the `{primary.model}` image model when rendering the scene."
-            )
-        if primary.output_format:
-            instructions.append(
-                f"Encode the image using the `{primary.output_format}` format whenever possible."
-            )
 
     if has_forced_choice:
         instructions.append(
-            "Image generation was explicitly requested. You must return at least one generated image. Any response without an image will be treated as a failure."
+            "Image generation was explicitly requested. You MUST return at least one generated image. Any response without an image will be treated as a failure."
         )
 
     return "\n\n".join(instructions)

@@ -16,9 +16,13 @@ from ..models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
-    "\nYou MUST wrap every tool call response inside a single [function_calls] block exactly like:\n"
-    '[function_calls]\n[call:tool_name]{"argument": "value"}[/call]\n[/function_calls]\n'
-    "IMPORTANT: Arguments MUST be a valid JSON object. Do not include markdown code blocks (```json) or any conversational text inside the [call] tag.\n"
+    "\nWhen you decide to call tools, you MUST respond ONLY with a single [function_calls] block using this EXACT syntax:\n"
+    "[function_calls]\n"
+    "[call:tool_name]\n"
+    '{"argument": "value"}\n'
+    "[/call]\n"
+    "[/function_calls]\n"
+    "CRITICAL: Every [call:...] MUST have a raw JSON object followed by a mandatory [/call] closing tag. DO NOT use markdown blocks or add text inside the block.\n"
 )
 TOOL_BLOCK_RE = re.compile(
     r"\[function_calls]\s*(.*?)\s*\[/function_calls]", re.DOTALL | re.IGNORECASE
