@@ -384,7 +384,7 @@ def _build_tool_prompt(
         "If no tool call is needed, provide a normal response and NEVER use the [function_calls] tag."
     )
     lines.append(
-        "Note: Tool results are returned in a `[function_responses]` block."
+        "Note: Tool results are returned in a [function_responses] block."
     )
 
     return "\n".join(lines)
