@@ -1067,16 +1067,14 @@ def _create_real_streaming_response(
         for image in images:
             try:
                 image_store = get_image_store_dir()
-                _, _, _, filename, file_hash = await _image_to_base64(image, image_store)
-                if file_hash in seen_hashes:
+                _, _, _, fname, fhash = await _image_to_base64(image, image_store)
+                if fhash in seen_hashes:
                     # Duplicate content, delete the file and skip
-                    (image_store / filename).unlink(missing_ok=True)
+                    (image_store / fname).unlink(missing_ok=True)
                     continue
-                seen_hashes.add(file_hash)
+                seen_hashes.add(fhash)
 
-                img_url = (
-                    f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
-                )
+                img_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
                 image_markdown += f"\n\n{img_url}"
             except Exception as exc:
                 logger.warning(f"Failed to process image in OpenAI stream: {exc}")
@@ -1228,28 +1226,25 @@ def _create_responses_real_streaming_response(
         seen_hashes = set()
         for image in images:
             try:
-                image_base64, width, height, filename, file_hash = await _image_to_base64(
-                    image, image_store
-                )
-                if file_hash in seen_hashes:
-                    (image_store / filename).unlink(missing_ok=True)
+                b64, w, h, fname, fhash = await _image_to_base64(image, image_store)
+                if fhash in seen_hashes:
+                    (image_store / fname).unlink(missing_ok=True)
                     continue
-                seen_hashes.add(file_hash)
+                seen_hashes.add(fhash)
 
-                img_format = (
-                    filename.rsplit(".", 1)[-1]
-                    if "." in filename
-                    else ("png" if isinstance(image, GeneratedImage) else "jpeg")
-                )
-                image_url = (
-                    f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
-                )
+                if "." in fname:
+                    img_id, img_format = fname.rsplit(".", 1)
+                else:
+                    img_id = fname
+                    img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
+
+                image_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
                 image_call_items.append(
                     ResponseImageGenerationCall(
-                        id=filename.rsplit(".", 1)[0],
-                        result=image_base64,
+                        id=img_id,
+                        result=b64,
                         output_format=img_format,
-                        size=f"{width}x{height}" if width and height else None,
+                        size=f"{w}x{h}" if w and h else None,
                     )
                 )
                 response_contents.append(ResponseOutputContent(type="output_text", text=image_url))
@@ -1433,15 +1428,13 @@ async def create_chat_completion(
     seen_hashes = set()
     for image in images:
         try:
-            _, _, _, filename, file_hash = await _image_to_base64(image, image_store)
-            if file_hash in seen_hashes:
-                (image_store / filename).unlink(missing_ok=True)
+            _, _, _, fname, fhash = await _image_to_base64(image, image_store)
+            if fhash in seen_hashes:
+                (image_store / fname).unlink(missing_ok=True)
                 continue
-            seen_hashes.add(file_hash)
+            seen_hashes.add(fhash)
 
-            img_url = (
-                f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
-            )
+            img_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
             image_markdown += f"\n\n{img_url}"
         except Exception as exc:
             logger.warning(f"Failed to process image in OpenAI response: {exc}")
@@ -1613,6 +1606,12 @@ async def create_response(
                 continue
             seen_hashes.add(fhash)
 
+            if "." in fname:
+                img_id, img_format = fname.rsplit(".", 1)
+            else:
+                img_id = fname
+                img_format = "png" if isinstance(img, GeneratedImage) else "jpeg"
+
             contents.append(
                 ResponseOutputContent(
                     type="output_text",
@@ -1621,11 +1620,9 @@ async def create_response(
             )
             img_calls.append(
                 ResponseImageGenerationCall(
-                    id=fname.rsplit(".", 1)[0],
+                    id=img_id,
                     result=b64,
-                    output_format=fname.rsplit(".", 1)[-1]
-                    if "." in fname
-                    else ("png" if isinstance(img, GeneratedImage) else "jpeg"),
+                    output_format=img_format,
                     size=f"{w}x{h}" if w and h else None,
                 )
             )
