@@ -152,14 +152,13 @@ class GeminiClientWrapper(GeminiClient):
     async def process_conversation(
         messages: list[Message], tempdir: Path | None = None
     ) -> tuple[str, list[Path | str]]:
-        need_tag = any(m.role != "user" for m in messages)
         conversation: list[str] = []
         files: list[Path | str] = []
 
         i = 0
         while i < len(messages):
             msg = messages[i]
-            if msg.role == "tool" and need_tag:
+            if msg.role == "tool":
                 # Group consecutive tool messages
                 tool_blocks: list[str] = []
                 while i < len(messages) and messages[i].role == "tool":
@@ -177,14 +176,13 @@ class GeminiClientWrapper(GeminiClient):
                 conversation.append(add_tag("tool", wrapped_content))
             else:
                 input_part, files_part = await GeminiClientWrapper.process_message(
-                    msg, tempdir, tagged=need_tag
+                    msg, tempdir, tagged=True
                 )
                 conversation.append(input_part)
                 files.extend(files_part)
                 i += 1
 
-        if need_tag:
-            conversation.append(add_tag("assistant", "", unclose=True))
+        conversation.append(add_tag("assistant", "", unclose=True))
         return "\n".join(conversation), files
 
     @staticmethod
