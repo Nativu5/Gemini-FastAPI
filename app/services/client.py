@@ -75,7 +75,7 @@ class GeminiClientWrapper(GeminiClient):
 
     @staticmethod
     async def process_message(
-        message: Message, tempdir: Path | None = None, tagged: bool = True
+        message: Message, tempdir: Path | None = None, tagged: bool = True, wrap_tool: bool = True
     ) -> tuple[str, list[Path | str]]:
         """
         Process a single Message object into a format suitable for the Gemini API.
@@ -117,9 +117,11 @@ class GeminiClientWrapper(GeminiClient):
         if message.role == "tool":
             tool_name = message.name or "unknown"
             combined_content = "\n".join(text_fragments).strip() or "{}"
-            text_fragments = [
-                f"[function_responses]\n[response:{tool_name}]\n{combined_content}\n[/response]\n[/function_responses]"
-            ]
+            res_block = f"[response:{tool_name}]\n{combined_content}\n[/response]"
+            if wrap_tool:
+                text_fragments = [f"[function_responses]\n{res_block}\n[/function_responses]"]
+            else:
+                text_fragments = [res_block]
 
         if message.tool_calls:
             tool_blocks: list[str] = []
@@ -153,12 +155,34 @@ class GeminiClientWrapper(GeminiClient):
         need_tag = any(m.role != "user" for m in messages)
         conversation: list[str] = []
         files: list[Path | str] = []
-        for msg in messages:
-            input_part, files_part = await GeminiClientWrapper.process_message(
-                msg, tempdir, tagged=need_tag
-            )
-            conversation.append(input_part)
-            files.extend(files_part)
+
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            if msg.role == "tool" and need_tag:
+                # Group consecutive tool messages
+                tool_blocks: list[str] = []
+                while i < len(messages) and messages[i].role == "tool":
+                    part, part_files = await GeminiClientWrapper.process_message(
+                        messages[i], tempdir, tagged=False, wrap_tool=False
+                    )
+                    tool_blocks.append(part)
+                    files.extend(part_files)
+                    i += 1
+
+                combined_tool_content = "\n".join(tool_blocks)
+                wrapped_content = (
+                    f"[function_responses]\n{combined_tool_content}\n[/function_responses]"
+                )
+                conversation.append(add_tag("tool", wrapped_content))
+            else:
+                input_part, files_part = await GeminiClientWrapper.process_message(
+                    msg, tempdir, tagged=need_tag
+                )
+                conversation.append(input_part)
+                files.extend(files_part)
+                i += 1
+
         if need_tag:
             conversation.append(add_tag("assistant", "", unclose=True))
         return "\n".join(conversation), files

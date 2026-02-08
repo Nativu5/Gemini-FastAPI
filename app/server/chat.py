@@ -1359,12 +1359,7 @@ async def create_chat_completion(
             extra_instr,
             False,
         )
-        if len(input_msgs) == 1:
-            m_input, files = await GeminiClientWrapper.process_message(
-                input_msgs[0], tmp_dir, tagged=False
-            )
-        else:
-            m_input, files = await GeminiClientWrapper.process_conversation(input_msgs, tmp_dir)
+        m_input, files = await GeminiClientWrapper.process_conversation(input_msgs, tmp_dir)
 
         logger.debug(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(input_msgs)} prepared messages."
@@ -1531,11 +1526,7 @@ async def create_response(
         )
         if not msgs:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
-        m_input, files = (
-            await GeminiClientWrapper.process_message(msgs[0], tmp_dir, tagged=False)
-            if len(msgs) == 1
-            else await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
-        )
+        m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
         logger.debug(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(msgs)} prepared messages."
         )
