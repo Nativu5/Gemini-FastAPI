@@ -362,3 +362,16 @@ def extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
             idx += segment_length - 2
 
     return None, None
+
+
+def detect_image_extension(data: bytes) -> str | None:
+    """Detect image extension from magic bytes."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8"):
+        return ".jpg"
+    if data.startswith(b"GIF8"):
+        return ".gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return ".webp"
+    return None

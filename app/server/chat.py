@@ -45,6 +45,7 @@ from ..utils.helper import (
     TOOL_HINT_LINE_START,
     TOOL_HINT_STRIPPED,
     TOOL_WRAP_HINT,
+    detect_image_extension,
     estimate_tokens,
     extract_image_dimensions,
     extract_tool_calls,
@@ -91,11 +92,21 @@ async def _image_to_base64(
         raise ValueError("Failed to save generated image")
 
     original_path = Path(saved_path)
-    random_name = f"img_{uuid.uuid4().hex}{original_path.suffix}"
+    data = original_path.read_bytes()
+    suffix = original_path.suffix
+
+    if not suffix:
+        detected_ext = detect_image_extension(data)
+        if detected_ext:
+            suffix = detected_ext
+        else:
+            # Fallback if detection fails
+            suffix = ".png" if isinstance(image, GeneratedImage) else ".jpg"
+
+    random_name = f"img_{uuid.uuid4().hex}{suffix}"
     new_path = temp_dir / random_name
     original_path.rename(new_path)
 
-    data = new_path.read_bytes()
     width, height = extract_image_dimensions(data)
     filename = random_name
     file_hash = hashlib.sha256(data).hexdigest()
@@ -383,9 +394,7 @@ def _build_tool_prompt(
     lines.append(
         "If no tool call is needed, provide a normal response and NEVER use the [function_calls] tag."
     )
-    lines.append(
-        "Note: Tool results are returned in a [function_responses] block."
-    )
+    lines.append("Note: Tool results are returned in a [function_responses] block.")
 
     return "\n".join(lines)
 
@@ -1227,7 +1236,11 @@ def _create_responses_real_streaming_response(
                     continue
                 seen_hashes.add(file_hash)
 
-                img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
+                img_format = (
+                    filename.rsplit(".", 1)[-1]
+                    if "." in filename
+                    else ("png" if isinstance(image, GeneratedImage) else "jpeg")
+                )
                 image_url = (
                     f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
                 )
@@ -1610,7 +1623,9 @@ async def create_response(
                 ResponseImageGenerationCall(
                     id=fname.rsplit(".", 1)[0],
                     result=b64,
-                    output_format="png" if isinstance(img, GeneratedImage) else "jpeg",
+                    output_format=fname.rsplit(".", 1)[-1]
+                    if "." in fname
+                    else ("png" if isinstance(img, GeneratedImage) else "jpeg"),
                     size=f"{w}x{h}" if w and h else None,
                 )
             )
