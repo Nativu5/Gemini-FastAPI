@@ -1,4 +1,3 @@
-import html
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -15,9 +14,6 @@ from ..utils.helper import (
     save_url_to_tempfile,
 )
 
-HTML_ESCAPE_RE = re.compile(r"&(?:lt|gt|amp|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);")
-ESC_SYMBOLS_RE = re.compile(r"\\(?=[\\\[\]{}()<>`*_#~+.:!&^$|-])")
-CODE_FENCE_RE = re.compile(r"(```.*?```|`[^`\n]+?`)", re.DOTALL)
 FILE_PATH_PATTERN = re.compile(
     r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
     re.IGNORECASE,
@@ -194,37 +190,6 @@ class GeminiClientWrapper(GeminiClient):
             text += response.text
         else:
             text += str(response)
-
-        def _unescape_html(text_content: str) -> str:
-            parts: list[str] = []
-            last_index = 0
-            for match in CODE_FENCE_RE.finditer(text_content):
-                non_code = text_content[last_index : match.start()]
-                if non_code:
-                    parts.append(HTML_ESCAPE_RE.sub(lambda m: html.unescape(m.group(0)), non_code))
-                parts.append(match.group(0))
-                last_index = match.end()
-            tail = text_content[last_index:]
-            if tail:
-                parts.append(HTML_ESCAPE_RE.sub(lambda m: html.unescape(m.group(0)), tail))
-            return "".join(parts)
-
-        def _unescape_symbols(text_content: str) -> str:
-            parts: list[str] = []
-            last_index = 0
-            for match in CODE_FENCE_RE.finditer(text_content):
-                non_code = text_content[last_index : match.start()]
-                if non_code:
-                    parts.append(ESC_SYMBOLS_RE.sub("", non_code))
-                parts.append(match.group(0))
-                last_index = match.end()
-            tail = text_content[last_index:]
-            if tail:
-                parts.append(ESC_SYMBOLS_RE.sub("", tail))
-            return "".join(parts)
-
-        text = _unescape_html(text)
-        text = _unescape_symbols(text)
 
         def extract_file_path_from_display_text(text_content: str) -> str | None:
             match = re.match(FILE_PATH_PATTERN, text_content)
