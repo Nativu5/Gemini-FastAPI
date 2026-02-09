@@ -1,5 +1,6 @@
 import hashlib
 import re
+import string
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -18,8 +19,19 @@ from ..utils.helper import (
 )
 from ..utils.singleton import Singleton
 
+_VOLATILE_SYMBOLS = string.whitespace + string.punctuation
 
-def _normalize_text(text: str | None) -> str | None:
+
+def _fuzzy_normalize(text: str | None) -> str | None:
+    """
+    Lowercase and remove all whitespace and punctuation.
+    """
+    if text is None:
+        return None
+    return text.lower().translate(str.maketrans("", "", _VOLATILE_SYMBOLS))
+
+
+def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
     """
     Perform semantic normalization for hashing.
     """
@@ -34,10 +46,13 @@ def _normalize_text(text: str | None) -> str | None:
     text = LMDBConversationStore.remove_think_tags(text)
     text = remove_tool_call_blocks(text)
 
+    if fuzzy:
+        return _fuzzy_normalize(text)
+
     return text if text else None
 
 
-def _hash_message(message: Message) -> str:
+def _hash_message(message: Message, fuzzy: bool = False) -> str:
     """
     Generate a stable, canonical hash for a single message.
     """
@@ -51,7 +66,7 @@ def _hash_message(message: Message) -> str:
     if content is None:
         core_data["content"] = None
     elif isinstance(content, str):
-        core_data["content"] = _normalize_text(content)
+        core_data["content"] = _normalize_text(content, fuzzy=fuzzy)
     elif isinstance(content, list):
         text_parts = []
         for item in content:
@@ -62,7 +77,7 @@ def _hash_message(message: Message) -> str:
                 text_val = item.get("text")
 
             if text_val:
-                normalized_part = _normalize_text(text_val)
+                normalized_part = _normalize_text(text_val, fuzzy=fuzzy)
                 if normalized_part:
                     text_parts.append(normalized_part)
             elif isinstance(item, (ContentItem, dict)):
@@ -109,13 +124,15 @@ def _hash_message(message: Message) -> str:
     return hashlib.sha256(message_bytes).hexdigest()
 
 
-def _hash_conversation(client_id: str, model: str, messages: List[Message]) -> str:
+def _hash_conversation(
+    client_id: str, model: str, messages: List[Message], fuzzy: bool = False
+) -> str:
     """Generate a hash for a list of messages and model name, tied to a specific client_id."""
     combined_hash = hashlib.sha256()
     combined_hash.update((client_id or "").encode("utf-8"))
     combined_hash.update((model or "").encode("utf-8"))
     for message in messages:
-        message_hash = _hash_message(message)
+        message_hash = _hash_message(message, fuzzy=fuzzy)
         combined_hash.update(message_hash.encode("utf-8"))
     return combined_hash.hexdigest()
 
@@ -124,6 +141,7 @@ class LMDBConversationStore(metaclass=Singleton):
     """LMDB-based storage for Message lists with hash-based key-value operations."""
 
     HASH_LOOKUP_PREFIX = "hash:"
+    FUZZY_LOOKUP_PREFIX = "fuzzy:"
 
     def __init__(
         self,
@@ -215,6 +233,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
         # Generate hash for the message list
         message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
+        fuzzy_hash = _hash_conversation(conv.client_id, conv.model, conv.messages, fuzzy=True)
         storage_key = custom_key or message_hash
 
         now = datetime.now()
@@ -230,6 +249,11 @@ class LMDBConversationStore(metaclass=Singleton):
 
                 txn.put(
                     f"{self.HASH_LOOKUP_PREFIX}{message_hash}".encode("utf-8"),
+                    storage_key.encode("utf-8"),
+                )
+
+                txn.put(
+                    f"{self.FUZZY_LOOKUP_PREFIX}{fuzzy_hash}".encode("utf-8"),
                     storage_key.encode("utf-8"),
                 )
 
@@ -287,6 +311,11 @@ class LMDBConversationStore(metaclass=Singleton):
                 )
                 return conv
 
+        # --- Find with fuzzy matching ---
+        if conv := self._find_by_message_list(model, messages, fuzzy=True):
+            logger.debug(f"Session found for '{model}' with fuzzy matching.")
+            return conv
+
         logger.debug(f"No session found for '{model}' with {len(messages)} messages.")
         return None
 
@@ -294,11 +323,13 @@ class LMDBConversationStore(metaclass=Singleton):
         self,
         model: str,
         messages: List[Message],
+        fuzzy: bool = False,
     ) -> Optional[ConversationInStore]:
         """Internal find implementation based on a message list."""
+        prefix = self.FUZZY_LOOKUP_PREFIX if fuzzy else self.HASH_LOOKUP_PREFIX
         for c in g_config.gemini.clients:
-            message_hash = _hash_conversation(c.id, model, messages)
-            key = f"{self.HASH_LOOKUP_PREFIX}{message_hash}"
+            message_hash = _hash_conversation(c.id, model, messages, fuzzy=fuzzy)
+            key = f"{prefix}{message_hash}"
             try:
                 with self._get_transaction(write=False) as txn:
                     if mapped := txn.get(key.encode("utf-8")):  # type: ignore
@@ -350,6 +381,9 @@ class LMDBConversationStore(metaclass=Singleton):
                 storage_data = orjson.loads(data)  # type: ignore
                 conv = ConversationInStore.model_validate(storage_data)
                 message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
+                fuzzy_hash = _hash_conversation(
+                    conv.client_id, conv.model, conv.messages, fuzzy=True
+                )
 
                 # Delete main data
                 txn.delete(key.encode("utf-8"))
@@ -357,6 +391,9 @@ class LMDBConversationStore(metaclass=Singleton):
                 # Clean up hash mapping if it exists
                 if message_hash and key != message_hash:
                     txn.delete(f"{self.HASH_LOOKUP_PREFIX}{message_hash}".encode("utf-8"))
+
+                # Always clean up fuzzy mapping
+                txn.delete(f"{self.FUZZY_LOOKUP_PREFIX}{fuzzy_hash}".encode("utf-8"))
 
                 logger.debug(f"Deleted messages with key: {key[:12]}")
                 return conv
@@ -386,7 +423,9 @@ class LMDBConversationStore(metaclass=Singleton):
                 for key, _ in cursor:
                     key_str = key.decode("utf-8")
                     # Skip internal hash mappings
-                    if key_str.startswith(self.HASH_LOOKUP_PREFIX):
+                    if key_str.startswith(self.HASH_LOOKUP_PREFIX) or key_str.startswith(
+                        self.FUZZY_LOOKUP_PREFIX
+                    ):
                         continue
 
                     if not prefix or key_str.startswith(prefix):
@@ -459,8 +498,14 @@ class LMDBConversationStore(metaclass=Singleton):
                         continue
 
                     message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
-                    if message_hash and key_str != message_hash:
-                        txn.delete(f"{self.HASH_LOOKUP_PREFIX}{message_hash}".encode("utf-8"))
+                    if message_hash:
+                        if key_str != message_hash:
+                            txn.delete(f"{self.HASH_LOOKUP_PREFIX}{message_hash}".encode("utf-8"))
+
+                        fuzzy_hash = _hash_conversation(
+                            conv.client_id, conv.model, conv.messages, fuzzy=True
+                        )
+                        txn.delete(f"{self.FUZZY_LOOKUP_PREFIX}{fuzzy_hash}".encode("utf-8"))
                     removed += 1
         except Exception as exc:
             logger.error(f"Failed to delete expired conversations: {exc}")
