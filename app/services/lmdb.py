@@ -1,5 +1,6 @@
 import hashlib
 import re
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,63 +19,70 @@ from ..utils.helper import (
 from ..utils.singleton import Singleton
 
 
+def _normalize_text(text: str | None) -> str | None:
+    """
+    Perform semantic normalization for hashing.
+    """
+    if text is None:
+        return None
+
+    # Unicode normalization
+    text = unicodedata.normalize("NFC", text)
+
+    # Basic cleaning
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = LMDBConversationStore.remove_think_tags(text)
+    text = remove_tool_call_blocks(text)
+
+    return text if text else None
+
+
 def _hash_message(message: Message) -> str:
     """
     Generate a stable, canonical hash for a single message.
-    Strips system hints, thoughts, and tool call blocks to ensure
-    identical logical content produces the same hash regardless of format.
     """
-    core_data = {
+    core_data: dict[str, Any] = {
         "role": message.role,
-        "name": message.name,
-        "tool_call_id": message.tool_call_id,
+        "name": message.name or None,
+        "tool_call_id": message.tool_call_id or None,
     }
 
     content = message.content
-    if not content:
+    if content is None:
         core_data["content"] = None
     elif isinstance(content, str):
-        normalized = content.replace("\r\n", "\n")
-        normalized = LMDBConversationStore.remove_think_tags(normalized)
-        normalized = remove_tool_call_blocks(normalized).strip()
-        core_data["content"] = normalized if normalized else None
+        core_data["content"] = _normalize_text(content)
     elif isinstance(content, list):
         text_parts = []
         for item in content:
             text_val = ""
             if isinstance(item, ContentItem) and item.type == "text":
-                text_val = item.text or ""
+                text_val = item.text
             elif isinstance(item, dict) and item.get("type") == "text":
-                text_val = item.get("text") or ""
+                text_val = item.get("text")
 
             if text_val:
-                text_val = text_val.replace("\r\n", "\n")
-                text_val = LMDBConversationStore.remove_think_tags(text_val)
-                text_val = remove_tool_call_blocks(text_val).strip()
-                if text_val:
-                    text_parts.append(text_val)
-            elif isinstance(item, ContentItem) and item.type in ("image_url", "file"):
-                # For non-text items, include their unique markers to distinguish them
-                if item.type == "image_url":
-                    text_parts.append(
-                        f"[image_url:{item.image_url.get('url') if item.image_url else ''}]"
+                normalized_part = _normalize_text(text_val)
+                if normalized_part:
+                    text_parts.append(normalized_part)
+            elif isinstance(item, (ContentItem, dict)):
+                item_type = item.type if isinstance(item, ContentItem) else item.get("type")
+                if item_type == "image_url":
+                    url = (
+                        item.image_url.get("url")
+                        if isinstance(item, ContentItem) and item.image_url
+                        else item.get("image_url", {}).get("url")
                     )
-                elif item.type == "file":
-                    text_parts.append(
-                        f"[file:{item.file.get('url') or item.file.get('filename') if item.file else ''}]"
-                    )
-            else:
-                # Fallback for other dict-based content parts
-                part_type = item.get("type") if isinstance(item, dict) else None
-                if part_type == "image_url":
-                    url = item.get("image_url", {}).get("url")
                     text_parts.append(f"[image_url:{url}]")
-                elif part_type == "file":
-                    url = item.get("file", {}).get("url") or item.get("file", {}).get("filename")
+                elif item_type == "file":
+                    url = (
+                        item.file.get("url") or item.file.get("filename")
+                        if isinstance(item, ContentItem) and item.file
+                        else item.get("file", {}).get("url") or item.get("file", {}).get("filename")
+                    )
                     text_parts.append(f"[file:{url}]")
 
-        combined_text = "\n".join(text_parts).replace("\r\n", "\n").strip()
-        core_data["content"] = combined_text if combined_text else None
+        core_data["content"] = "\n".join(text_parts) if text_parts else None
 
     if message.tool_calls:
         calls_data = []
@@ -98,8 +106,7 @@ def _hash_message(message: Message) -> str:
         core_data["tool_calls"] = None
 
     message_bytes = orjson.dumps(core_data, option=orjson.OPT_SORT_KEYS)
-    digest = hashlib.sha256(message_bytes).hexdigest()
-    return digest
+    return hashlib.sha256(message_bytes).hexdigest()
 
 
 def _hash_conversation(client_id: str, model: str, messages: List[Message]) -> str:
