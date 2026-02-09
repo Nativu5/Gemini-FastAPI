@@ -466,7 +466,9 @@ class LMDBConversationStore(metaclass=Singleton):
 
                 for key_bytes, value_bytes in cursor:
                     key_str = key_bytes.decode("utf-8")
-                    if key_str.startswith(self.HASH_LOOKUP_PREFIX):
+                    if key_str.startswith(self.HASH_LOOKUP_PREFIX) or key_str.startswith(
+                        self.FUZZY_LOOKUP_PREFIX
+                    ):
                         continue
 
                     try:
