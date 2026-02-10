@@ -19,8 +19,7 @@ from ..utils.helper import (
 )
 from ..utils.singleton import Singleton
 
-_VOLATILE_SYMBOLS = string.whitespace + string.punctuation
-_VOLATILE_TRANS_TABLE = str.maketrans("", "", _VOLATILE_SYMBOLS)
+_VOLATILE_TRANS_TABLE = str.maketrans("", "", string.whitespace + string.punctuation)
 
 
 def _fuzzy_normalize(text: str | None) -> str | None:
