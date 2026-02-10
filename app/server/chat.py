@@ -776,39 +776,44 @@ class StreamingOutputFilter:
 
         self.TOOL_START = "[function_calls]"
         self.TOOL_END = "[/function_calls]"
+        self.ORPHAN_START = "[call:"
+        self.ORPHAN_END = "[/call]"
         self.RESPONSE_START = "[function_responses]"
         self.RESPONSE_END = "[/function_responses]"
         self.TAG_START = "<|im_start|>"
         self.TAG_END = "<|im_end|>"
         self.HINT_START = f"\n{TOOL_HINT_LINE_START}" if TOOL_HINT_LINE_START else ""
         self.HINT_END = TOOL_HINT_LINE_END
-        self.TOOL_PREFIX = "[call:"
 
-        self.WATCH_PREFIXES = [
+        self.WATCH_MARKERS = [
             self.TOOL_START,
+            self.ORPHAN_START,
             self.RESPONSE_START,
             self.TAG_START,
             self.TAG_END,
         ]
         if self.HINT_START:
-            self.WATCH_PREFIXES.append(self.HINT_START)
+            self.WATCH_MARKERS.append(self.HINT_START)
 
     def process(self, chunk: str) -> str:
         self.buffer += chunk
         output = []
 
         while self.buffer:
+            buf_low = self.buffer.lower()
             if self.state == "NORMAL":
-                tool_idx = self.buffer.find(self.TOOL_START)
-                resp_idx = self.buffer.find(self.RESPONSE_START)
-                tag_idx = self.buffer.find(self.TAG_START)
-                end_idx = self.buffer.find(self.TAG_END)
-                hint_idx = self.buffer.find(self.HINT_START) if self.HINT_START else -1
+                tool_idx = buf_low.find(self.TOOL_START)
+                orphan_idx = buf_low.find(self.ORPHAN_START)
+                resp_idx = buf_low.find(self.RESPONSE_START)
+                tag_idx = buf_low.find(self.TAG_START)
+                end_idx = buf_low.find(self.TAG_END)
+                hint_idx = buf_low.find(self.HINT_START) if self.HINT_START else -1
 
                 indices = [
                     (i, t)
                     for i, t in [
                         (tool_idx, "TOOL"),
+                        (orphan_idx, "ORPHAN"),
                         (resp_idx, "RESP"),
                         (tag_idx, "TAG"),
                         (end_idx, "END"),
@@ -818,11 +823,12 @@ class StreamingOutputFilter:
                 ]
 
                 if not indices:
-                    # Guard against split start markers
+                    # Guard against split markers (case-insensitive)
                     keep_len = 0
-                    for p in self.WATCH_PREFIXES:
-                        for i in range(len(p) - 1, 0, -1):
-                            if self.buffer.endswith(p[:i]):
+                    for marker in self.WATCH_MARKERS:
+                        m_low = marker.lower()
+                        for i in range(len(m_low) - 1, 0, -1):
+                            if buf_low.endswith(m_low[:i]):
                                 keep_len = max(keep_len, i)
                                 break
                     yield_len = len(self.buffer) - keep_len
@@ -840,6 +846,10 @@ class StreamingOutputFilter:
                     self.state = "IN_TOOL"
                     self.block_buffer = ""
                     self.buffer = self.buffer[len(self.TOOL_START) :]
+                elif m_type == "ORPHAN":
+                    self.state = "IN_ORPHAN"
+                    self.block_buffer = ""
+                    self.buffer = self.buffer[len(self.ORPHAN_START) :]
                 elif m_type == "RESP":
                     self.state = "IN_RESP"
                     self.buffer = self.buffer[len(self.RESPONSE_START) :]
@@ -853,38 +863,48 @@ class StreamingOutputFilter:
                     self.buffer = self.buffer[len(self.HINT_START) :]
 
             elif self.state == "IN_HINT":
-                end_idx = self.buffer.find(self.HINT_END)
+                end_idx = buf_low.find(self.HINT_END.lower())
                 if end_idx != -1:
                     self.buffer = self.buffer[end_idx + len(self.HINT_END) :]
                     self.state = "NORMAL"
                 else:
-                    # Keep end of buffer to avoid missing split HINT_END
                     keep_len = len(self.HINT_END) - 1
                     if len(self.buffer) > keep_len:
                         self.buffer = self.buffer[-keep_len:]
                     break
 
             elif self.state == "IN_RESP":
-                end_idx = self.buffer.find(self.RESPONSE_END)
+                end_idx = buf_low.find(self.RESPONSE_END.lower())
                 if end_idx != -1:
                     self.buffer = self.buffer[end_idx + len(self.RESPONSE_END) :]
                     self.state = "NORMAL"
                 else:
-                    # Keep end of buffer to avoid missing split RESPONSE_END
                     keep_len = len(self.RESPONSE_END) - 1
                     if len(self.buffer) > keep_len:
                         self.buffer = self.buffer[-keep_len:]
                     break
 
             elif self.state == "IN_TOOL":
-                end_idx = self.buffer.find(self.TOOL_END)
+                end_idx = buf_low.find(self.TOOL_END.lower())
                 if end_idx != -1:
                     self.block_buffer += self.buffer[:end_idx]
                     self.buffer = self.buffer[end_idx + len(self.TOOL_END) :]
                     self.state = "NORMAL"
                 else:
-                    # Accumulate and keep potential split end marker
                     keep_len = len(self.TOOL_END) - 1
+                    if len(self.buffer) > keep_len:
+                        self.block_buffer += self.buffer[:-keep_len]
+                        self.buffer = self.buffer[-keep_len:]
+                    break
+
+            elif self.state == "IN_ORPHAN":
+                end_idx = buf_low.find(self.ORPHAN_END.lower())
+                if end_idx != -1:
+                    self.block_buffer += self.buffer[:end_idx]
+                    self.buffer = self.buffer[end_idx + len(self.ORPHAN_END) :]
+                    self.state = "NORMAL"
+                else:
+                    keep_len = len(self.ORPHAN_END) - 1
                     if len(self.buffer) > keep_len:
                         self.block_buffer += self.buffer[:-keep_len]
                         self.buffer = self.buffer[-keep_len:]
@@ -900,7 +920,7 @@ class StreamingOutputFilter:
                     break
 
             elif self.state == "IN_BLOCK":
-                end_idx = self.buffer.find(self.TAG_END)
+                end_idx = buf_low.find(self.TAG_END.lower())
                 if end_idx != -1:
                     content = self.buffer[:end_idx]
                     if self.current_role != "tool":
@@ -909,7 +929,6 @@ class StreamingOutputFilter:
                     self.state = "NORMAL"
                     self.current_role = ""
                 else:
-                    # Yield safe part and keep potential split TAG_END
                     keep_len = len(self.TAG_END) - 1
                     if self.current_role != "tool":
                         if len(self.buffer) > keep_len:
@@ -926,8 +945,10 @@ class StreamingOutputFilter:
     def flush(self) -> str:
         res = ""
         if self.state == "IN_TOOL":
-            if self.TOOL_PREFIX not in self.block_buffer.lower():
+            if self.ORPHAN_START.lower() not in self.block_buffer.lower():
                 res = f"{self.TOOL_START}{self.block_buffer}"
+        elif self.state == "IN_ORPHAN":
+            res = f"{self.ORPHAN_START}{self.block_buffer}"
         elif self.state == "IN_BLOCK" and self.current_role != "tool":
             res = self.buffer
         elif self.state in ("IN_RESP", "IN_HINT"):
