@@ -20,6 +20,7 @@ from ..utils.helper import (
 from ..utils.singleton import Singleton
 
 _VOLATILE_SYMBOLS = string.whitespace + string.punctuation
+_VOLATILE_TRANS_TABLE = str.maketrans("", "", _VOLATILE_SYMBOLS)
 
 
 def _fuzzy_normalize(text: str | None) -> str | None:
@@ -28,7 +29,7 @@ def _fuzzy_normalize(text: str | None) -> str | None:
     """
     if text is None:
         return None
-    return text.lower().translate(str.maketrans("", "", _VOLATILE_SYMBOLS))
+    return text.lower().translate(_VOLATILE_TRANS_TABLE)
 
 
 def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
