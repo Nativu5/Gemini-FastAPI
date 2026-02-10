@@ -41,6 +41,7 @@ class GeminiClientPool(metaclass=Singleton):
                 try:
                     await client.init(
                         timeout=g_config.gemini.timeout,
+                        watchdog_timeout=g_config.gemini.watchdog_timeout,
                         auto_refresh=g_config.gemini.auto_refresh,
                         verbose=g_config.gemini.verbose,
                         refresh_interval=g_config.gemini.refresh_interval,
@@ -93,6 +94,7 @@ class GeminiClientPool(metaclass=Singleton):
             try:
                 await client.init(
                     timeout=g_config.gemini.timeout,
+                    watchdog_timeout=g_config.gemini.watchdog_timeout,
                     auto_refresh=g_config.gemini.auto_refresh,
                     verbose=g_config.gemini.verbose,
                     refresh_interval=g_config.gemini.refresh_interval,

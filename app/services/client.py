@@ -38,6 +38,7 @@ class GeminiClientWrapper(GeminiClient):
     async def init(
         self,
         timeout: float = cast(float, _UNSET),
+        watchdog_timeout: float = cast(float, _UNSET),
         auto_close: bool = False,
         close_delay: float = 300,
         auto_refresh: bool = cast(bool, _UNSET),
@@ -49,6 +50,7 @@ class GeminiClientWrapper(GeminiClient):
         """
         config = g_config.gemini
         timeout = cast(float, _resolve(timeout, config.timeout))
+        watchdog_timeout = cast(float, _resolve(watchdog_timeout, config.watchdog_timeout))
         auto_refresh = cast(bool, _resolve(auto_refresh, config.auto_refresh))
         refresh_interval = cast(float, _resolve(refresh_interval, config.refresh_interval))
         verbose = cast(bool, _resolve(verbose, config.verbose))
@@ -56,6 +58,7 @@ class GeminiClientWrapper(GeminiClient):
         try:
             await super().init(
                 timeout=timeout,
+                watchdog_timeout=watchdog_timeout,
                 auto_close=auto_close,
                 close_delay=close_delay,
                 auto_refresh=auto_refresh,
