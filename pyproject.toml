@@ -5,7 +5,7 @@ description = "FastAPI Server built on Gemini Web API"
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
-    "fastapi>=0.128.6",
+    "fastapi>=0.128.7",
     "gemini-webapi>=1.19.1",
     "lmdb>=1.7.5",
     "loguru>=0.7.3",
