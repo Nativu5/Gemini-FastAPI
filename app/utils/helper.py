@@ -191,7 +191,6 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
     if not text:
         return text, []
 
-    # Clean hints FIRST so they don't interfere with tool call regexes (e.g. example calls in hint)
     cleaned = strip_system_hints(text)
 
     tool_calls: list[ToolCall] = []
@@ -237,33 +236,24 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             )
         )
 
-    def _replace_block(match: re.Match[str]) -> str:
-        block_content = match.group(1)
-        if not block_content:
-            return match.group(0)
+    all_calls = []
+    for match in TOOL_CALL_RE.finditer(cleaned):
+        all_calls.append(
+            {
+                "start": match.start(),
+                "name": (match.group(1) or "").strip(),
+                "args": (match.group(2) or "").strip(),
+            }
+        )
 
-        is_tool_block = bool(TOOL_CALL_RE.search(block_content))
+    all_calls.sort(key=lambda x: x["start"])
 
-        if is_tool_block:
-            if extract:
-                for call_match in TOOL_CALL_RE.finditer(block_content):
-                    name = (call_match.group(1) or "").strip()
-                    raw_args = (call_match.group(2) or "").strip()
-                    _create_tool_call(name, raw_args)
-            return ""
-        else:
-            return match.group(0)
+    if extract:
+        for call in all_calls:
+            _create_tool_call(call["name"], call["args"])
 
-    def _replace_orphan(match: re.Match[str]) -> str:
-        if extract:
-            name = (match.group(1) or "").strip()
-            raw_args = (match.group(2) or "").strip()
-            _create_tool_call(name, raw_args)
-        return ""
-
-    cleaned = TOOL_BLOCK_RE.sub(_replace_block, cleaned)
-    cleaned = TOOL_CALL_RE.sub(_replace_orphan, cleaned)
-
+    cleaned = TOOL_BLOCK_RE.sub("", cleaned)
+    cleaned = TOOL_CALL_RE.sub("", cleaned)
     cleaned = RESPONSE_BLOCK_RE.sub("", cleaned)
     cleaned = RESPONSE_ITEM_RE.sub("", cleaned)
 
