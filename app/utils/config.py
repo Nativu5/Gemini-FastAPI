@@ -83,11 +83,15 @@ class GeminiConfig(BaseModel):
         default="append",
         description="Strategy for loading models: 'append' merges custom with default, 'overwrite' uses only custom",
     )
-    timeout: int = Field(default=300, ge=1, description="Init timeout")
-    watchdog_timeout: int = Field(default=60, ge=1, description="Watchdog timeout")
+    timeout: int = Field(default=300, ge=30, description="Init timeout")
+    watchdog_timeout: int = Field(
+        default=60, ge=10, le=75, description="Watchdog timeout in seconds (Not more than 75s)"
+    )
     auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini cookies")
     refresh_interval: int = Field(
-        default=540, ge=1, description="Interval in seconds to refresh Gemini cookies"
+        default=540,
+        ge=60,
+        description="Interval in seconds to refresh Gemini cookies (Not less than 60s)",
     )
     verbose: bool = Field(False, description="Enable verbose logging for Gemini API requests")
     max_chars_per_request: int = Field(

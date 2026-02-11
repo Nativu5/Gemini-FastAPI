@@ -947,11 +947,9 @@ class StreamingOutputFilter:
         if self.state == "IN_TOOL":
             if self.ORPHAN_START.lower() not in self.block_buffer.lower():
                 res = f"{self.TOOL_START}{self.block_buffer}"
-        elif self.state == "IN_ORPHAN":
-            res = f"{self.ORPHAN_START}{self.block_buffer}"
         elif self.state == "IN_BLOCK" and self.current_role != "tool":
             res = self.buffer
-        elif self.state in ("IN_RESP", "IN_HINT"):
+        elif self.state in ("IN_ORPHAN", "IN_RESP", "IN_HINT"):
             res = ""
         elif self.state == "NORMAL":
             res = self.buffer
