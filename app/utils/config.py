@@ -83,7 +83,7 @@ class GeminiConfig(BaseModel):
         default="append",
         description="Strategy for loading models: 'append' merges custom with default, 'overwrite' uses only custom",
     )
-    timeout: int = Field(default=300, ge=30, description="Init timeout")
+    timeout: int = Field(default=300, ge=30, description="Init timeout in seconds")
     watchdog_timeout: int = Field(
         default=60, ge=10, le=75, description="Watchdog timeout in seconds (Not more than 75s)"
     )

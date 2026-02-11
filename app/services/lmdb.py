@@ -370,7 +370,9 @@ class LMDBConversationStore(metaclass=Singleton):
                 return conv
 
         if conv := self._find_by_message_list(model, messages, fuzzy=True):
-            logger.debug(f"Session found for '{model}' with fuzzy matching.")
+            logger.debug(
+                f"Session found for '{model}' with {len(messages)} fuzzy matching messages."
+            )
             return conv
 
         logger.debug(f"No session found for '{model}' with {len(messages)} messages.")
@@ -396,6 +398,8 @@ class LMDBConversationStore(metaclass=Singleton):
         prefix = self.FUZZY_LOOKUP_PREFIX if fuzzy else self.HASH_LOOKUP_PREFIX
         target_len = len(messages)
 
+        target_hashes = [_hash_message(m, fuzzy=fuzzy) for m in messages]
+
         for c in g_config.gemini.clients:
             message_hash = _hash_conversation(c.id, model, messages, fuzzy=fuzzy)
             key = f"{prefix}{message_hash}"
@@ -403,25 +407,22 @@ class LMDBConversationStore(metaclass=Singleton):
                 with self._get_transaction(write=False) as txn:
                     if mapped := txn.get(key.encode("utf-8")):
                         candidate_keys = self._decode_index_value(mapped)
-                        # Try candidates from newest to oldest
                         for ck in reversed(candidate_keys):
                             if conv := self.get(ck):
                                 if len(conv.messages) != target_len:
                                     continue
 
-                                if fuzzy:
-                                    # For fuzzy matching, verify each message hash individually
-                                    # to prevent semantic collisions (e.g., "1.2" vs "12")
-                                    match_found = True
-                                    for i in range(target_len):
-                                        if _hash_message(
-                                            conv.messages[i], fuzzy=True
-                                        ) != _hash_message(messages[i], fuzzy=True):
-                                            match_found = False
-                                            break
-                                    if not match_found:
-                                        continue
-                                return conv
+                                match_found = True
+                                for i in range(target_len):
+                                    if (
+                                        _hash_message(conv.messages[i], fuzzy=fuzzy)
+                                        != target_hashes[i]
+                                    ):
+                                        match_found = False
+                                        break
+
+                                if match_found:
+                                    return conv
             except lmdb.Error as e:
                 logger.error(
                     f"LMDB error while searching for hash {message_hash} and client {c.id}: {e}"
