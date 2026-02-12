@@ -1,7 +1,6 @@
 import hashlib
 import re
 import string
-import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,6 +14,7 @@ from ..models import ContentItem, ConversationInStore, Message
 from ..utils import g_config
 from ..utils.helper import (
     extract_tool_calls,
+    normalize_llm_text,
     remove_tool_call_blocks,
 )
 from ..utils.singleton import Singleton
@@ -39,11 +39,8 @@ def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
     if text is None:
         return None
 
-    # Unicode normalization to NFC
-    text = unicodedata.normalize("NFC", text)
+    text = normalize_llm_text(text)
 
-    # Basic cleaning
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = LMDBConversationStore.remove_think_tags(text)
     text = remove_tool_call_blocks(text)
 

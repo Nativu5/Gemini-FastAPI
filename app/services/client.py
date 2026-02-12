@@ -10,13 +10,10 @@ from ..models import Message
 from ..utils import g_config
 from ..utils.helper import (
     add_tag,
+    normalize_llm_text,
     save_file_to_tempfile,
     save_url_to_tempfile,
 )
-
-COMMONMARK_UNESCAPE_RE = re.compile(
-    r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])"
-)  # See: https://spec.commonmark.org/current/#backslash-escapes
 
 FILE_PATH_PATTERN = re.compile(
     r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
@@ -89,12 +86,12 @@ class GeminiClientWrapper(GeminiClient):
 
         if isinstance(message.content, str):
             if message.content or message.role == "tool":
-                text_fragments.append(message.content or "{}")
+                text_fragments.append(message.content or "")
         elif isinstance(message.content, list):
             for item in message.content:
                 if item.type == "text":
                     if item.text or message.role == "tool":
-                        text_fragments.append(item.text or "{}")
+                        text_fragments.append(item.text or "")
                 elif item.type == "image_url":
                     if not item.image_url:
                         raise ValueError("Image URL cannot be empty")
@@ -113,14 +110,19 @@ class GeminiClientWrapper(GeminiClient):
                     else:
                         raise ValueError("File must contain 'file_data' or 'url' key")
         elif message.content is None and message.role == "tool":
-            text_fragments.append("{}")
+            text_fragments.append("")
         elif message.content is not None:
             raise ValueError("Unsupported message content type.")
 
         if message.role == "tool":
             tool_name = message.name or "unknown"
-            combined_content = "\n".join(text_fragments).strip() or "{}"
-            res_block = f"[response:{tool_name}]\n{combined_content}\n[/response]"
+            combined_content = "\n".join(text_fragments).strip()
+            res_block = (
+                f"[response:{tool_name}]\n"
+                f"@results\n\n"
+                f"<<<RESULT>>>\n{combined_content}\n<<<END:RESULT>>>\n\n"
+                f"[/response]"
+            )
             if wrap_tool:
                 text_fragments = [f"[function_responses]\n{res_block}\n[/function_responses]"]
             else:
@@ -130,17 +132,22 @@ class GeminiClientWrapper(GeminiClient):
             tool_blocks: list[str] = []
             for call in message.tool_calls:
                 args_text = call.function.arguments.strip()
+                formatted_args = "\n@args\n"
                 try:
                     parsed_args = orjson.loads(args_text)
-                    args_text = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode(
-                        "utf-8"
-                    )
+                    if isinstance(parsed_args, dict):
+                        for k, v in parsed_args.items():
+                            val_str = v if isinstance(v, str) else orjson.dumps(v).decode("utf-8")
+                            formatted_args += f"\n<<<ARG:{k}>>>\n{val_str}\n<<<END:{k}>>>\n"
+                    else:
+                        formatted_args += args_text
                 except orjson.JSONDecodeError:
-                    pass
-                tool_blocks.append(f"[call:{call.function.name}]{args_text}[/call]")
+                    formatted_args += args_text
+
+                tool_blocks.append(f"[call:{call.function.name}]{formatted_args}\n[/call]")
 
             if tool_blocks:
-                tool_section = "[function_calls]\n" + "".join(tool_blocks) + "\n[/function_calls]"
+                tool_section = "[function_calls]\n" + "\n".join(tool_blocks) + "\n[/function_calls]"
                 text_fragments.append(tool_section)
 
         model_input = "\n".join(fragment for fragment in text_fragments if fragment is not None)
@@ -198,7 +205,7 @@ class GeminiClientWrapper(GeminiClient):
         else:
             text += str(response)
 
-        text = COMMONMARK_UNESCAPE_RE.sub(r"\1", text)
+        text = normalize_llm_text(text)
 
         def extract_file_path_from_display_text(text_content: str) -> str | None:
             match = re.match(FILE_PATH_PATTERN, text_content)

@@ -1,10 +1,12 @@
 import base64
 import hashlib
+import html
 import mimetypes
 import re
 import reprlib
 import struct
 import tempfile
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,22 +21,39 @@ TOOL_WRAP_HINT = (
     "\nWhen you decide to call tools, you MUST respond ONLY with a single [function_calls] block using this EXACT syntax:\n"
     "[function_calls]\n"
     "[call:tool_name]\n"
-    '{"argument": "value"}\n'
+    "@args\n"
+    "\n<<<ARG:arg_name>>>\n"
+    "value\n"
+    "<<<END:arg_name>>>\n"
     "[/call]\n"
     "[/function_calls]\n"
-    "CRITICAL: Every [call:...] MUST have a raw JSON object followed by a mandatory [/call] closing tag. DO NOT use markdown blocks or add text inside the block.\n"
+    "CRITICAL: Arguments MUST use <<<ARG:name>>>...<<<END:name>>> tags. Content inside tags can be any format.\n"
 )
 TOOL_BLOCK_RE = re.compile(
-    r"\[function_calls]\s*(.*?)\s*\[/function_calls]", re.DOTALL | re.IGNORECASE
+    r"\\?\[function_calls\\?]\s*(.*?)\s*\\?\[/function_calls\\?]", re.DOTALL | re.IGNORECASE
 )
-TOOL_CALL_RE = re.compile(r"\[call:([^]]+)]\s*(.*?)\s*\[/call]", re.DOTALL | re.IGNORECASE)
+TOOL_CALL_RE = re.compile(
+    r"\\?\[call:([^]\\]+)\\?]\s*(.*?)\s*\\?\[/call\\?]", re.DOTALL | re.IGNORECASE
+)
 RESPONSE_BLOCK_RE = re.compile(
-    r"\[function_responses]\s*(.*?)\s*\[/function_responses]", re.DOTALL | re.IGNORECASE
+    r"\\?\[function_responses\\?]\s*(.*?)\s*\\?\[/function_responses\\?]",
+    re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_ITEM_RE = re.compile(
-    r"\[response:([^]]+)]\s*(.*?)\s*\[/response]", re.DOTALL | re.IGNORECASE
+    r"\\?\[response:([^]\\]+)\\?]\s*(.*?)\s*\\?\[/response\\?]", re.DOTALL | re.IGNORECASE
 )
-CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>")
+TAGGED_ARG_RE = re.compile(
+    r"(?:\\?<){3}ARG:([^>\\]+)(?:\\?>){3}\s*(.*?)\s*(?:\\?<){3}END:\1(?:\\?>){3}",
+    re.DOTALL | re.IGNORECASE,
+)
+TAGGED_RESULT_RE = re.compile(
+    r"(?:\\?<){3}RESULT(?:\\?>){3}\s*(.*?)\s*(?:\\?<){3}END:RESULT(?:\\?>){3}",
+    re.DOTALL | re.IGNORECASE,
+)
+CONTROL_TOKEN_RE = re.compile(r"\\?<\|im_(?:start|end)\|\\?>")
+COMMONMARK_UNESCAPE_RE = re.compile(
+    r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])"
+)  # See: https://spec.commonmark.org/current/#backslash-escapes
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
 TOOL_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
@@ -48,6 +67,26 @@ def add_tag(role: str, content: str, unclose: bool = False) -> str:
         return content
 
     return f"<|im_start|>{role}\n{content}" + ("\n<|im_end|>" if not unclose else "")
+
+
+def normalize_llm_text(s: str) -> str:
+    """
+    Safely normalize LLM-generated text for both display and hashing.
+    Includes: HTML unescaping, NFC normalization, and line ending standardization.
+    """
+    if not s:
+        return ""
+
+    s = html.unescape(s)
+    s = unicodedata.normalize("NFC", s)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+
+    return s
+
+
+def unescape_llm_text(s: str) -> str:
+    r"""Unescape characters escaped by Gemini Web's post-processing."""
+    return COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
 
 
 def estimate_tokens(text: str | None) -> int:
@@ -202,27 +241,23 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             logger.warning("Encountered tool_call without a function name.")
             return
 
-        arguments = raw_args
-        try:
-            parsed_args = orjson.loads(raw_args)
-            arguments = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode("utf-8")
-        except orjson.JSONDecodeError:
-            json_match = re.search(r"({.*})", raw_args, re.DOTALL)
-            if json_match:
-                potential_json = json_match.group(1)
-                try:
-                    parsed_args = orjson.loads(potential_json)
-                    arguments = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode(
-                        "utf-8"
-                    )
-                except orjson.JSONDecodeError:
-                    logger.warning(
-                        f"Failed to parse extracted JSON arguments for '{name}': {reprlib.repr(potential_json)}"
-                    )
+        name = unescape_llm_text(name.strip())
+        raw_args = unescape_llm_text(raw_args)
+
+        arg_matches = TAGGED_ARG_RE.findall(raw_args)
+        if arg_matches:
+            args_dict = {arg_name.strip(): arg_value.strip() for arg_name, arg_value in arg_matches}
+            arguments = orjson.dumps(args_dict).decode("utf-8")
+            logger.debug(f"Successfully parsed {len(args_dict)} tagged arguments for tool: {name}")
+        else:
+            cleaned_raw = raw_args.replace("@args", "").strip()
+            if not cleaned_raw:
+                logger.debug(f"Tool '{name}' called without arguments.")
             else:
                 logger.warning(
-                    f"Failed to parse tool call arguments for '{name}'. Passing raw string: {reprlib.repr(raw_args)}"
+                    f"Malformed arguments for tool '{name}'. Text found but no valid tags: {reprlib.repr(cleaned_raw)}"
                 )
+            arguments = "{}"
 
         index = len(tool_calls)
         seed = f"{name}:{arguments}:{index}".encode("utf-8")
@@ -241,7 +276,7 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         all_calls.append(
             {
                 "start": match.start(),
-                "name": (match.group(1) or "").strip(),
+                "name": unescape_llm_text((match.group(1) or "").strip()),
                 "args": (match.group(2) or "").strip(),
             }
         )
@@ -256,6 +291,8 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
     cleaned = TOOL_CALL_RE.sub("", cleaned)
     cleaned = RESPONSE_BLOCK_RE.sub("", cleaned)
     cleaned = RESPONSE_ITEM_RE.sub("", cleaned)
+    cleaned = TAGGED_ARG_RE.sub("", cleaned)
+    cleaned = TAGGED_RESULT_RE.sub("", cleaned)
 
     return cleaned, tool_calls
 
