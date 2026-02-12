@@ -14,6 +14,10 @@ from ..utils.helper import (
     save_url_to_tempfile,
 )
 
+COMMONMARK_UNESCAPE_RE = re.compile(
+    r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])"
+)  # See: https://spec.commonmark.org/current/#backslash-escapes
+
 FILE_PATH_PATTERN = re.compile(
     r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
     re.IGNORECASE,
@@ -193,6 +197,8 @@ class GeminiClientWrapper(GeminiClient):
             text += response.text
         else:
             text += str(response)
+
+        text = COMMONMARK_UNESCAPE_RE.sub(r"\1", text)
 
         def extract_file_path_from_display_text(text_content: str) -> str | None:
             match = re.match(FILE_PATH_PATTERN, text_content)

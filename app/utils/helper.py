@@ -34,9 +34,6 @@ RESPONSE_BLOCK_RE = re.compile(
 RESPONSE_ITEM_RE = re.compile(
     r"\[response:([^]]+)]\s*(.*?)\s*\[/response]", re.DOTALL | re.IGNORECASE
 )
-COMMONMARK_UNESCAPE_RE = re.compile(
-    r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])"
-)  # See: https://spec.commonmark.org/current/#backslash-escapes
 CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>")
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
@@ -195,11 +192,8 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         return text, []
 
     cleaned = strip_system_hints(text)
-    tool_calls: list[ToolCall] = []
 
-    def _unescape_markdown(s: str) -> str:
-        """Restores characters escaped for Markdown rendering."""
-        return COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
+    tool_calls: list[ToolCall] = []
 
     def _create_tool_call(name: str, raw_args: str) -> None:
         if not extract:
@@ -208,33 +202,20 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             logger.warning("Encountered tool_call without a function name.")
             return
 
-        prev_name = ""
-        while name != prev_name:
-            prev_name = name
-            name = _unescape_markdown(name)
-
-        def _try_parse_json(s: str) -> dict | None:
-            try:
-                return orjson.loads(s)
-            except orjson.JSONDecodeError:
-                try:
-                    return orjson.loads(_unescape_markdown(s))
-                except orjson.JSONDecodeError:
-                    return None
-
         arguments = raw_args
-        parsed_args = _try_parse_json(raw_args)
-
-        if parsed_args is None:
+        try:
+            parsed_args = orjson.loads(raw_args)
+            arguments = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+        except orjson.JSONDecodeError:
             json_match = re.search(r"({.*})", raw_args, re.DOTALL)
             if json_match:
                 potential_json = json_match.group(1)
-                parsed_args = _try_parse_json(potential_json)
-                if parsed_args is not None:
+                try:
+                    parsed_args = orjson.loads(potential_json)
                     arguments = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode(
                         "utf-8"
                     )
-                else:
+                except orjson.JSONDecodeError:
                     logger.warning(
                         f"Failed to parse extracted JSON arguments for '{name}': {reprlib.repr(potential_json)}"
                     )
@@ -242,8 +223,6 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
                 logger.warning(
                     f"Failed to parse tool call arguments for '{name}'. Passing raw string: {reprlib.repr(raw_args)}"
                 )
-        else:
-            arguments = orjson.dumps(parsed_args, option=orjson.OPT_SORT_KEYS).decode("utf-8")
 
         index = len(tool_calls)
         seed = f"{name}:{arguments}:{index}".encode("utf-8")
