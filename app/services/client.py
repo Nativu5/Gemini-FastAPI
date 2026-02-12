@@ -1,4 +1,3 @@
-import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,13 +14,6 @@ from ..utils.helper import (
     save_url_to_tempfile,
 )
 
-FILE_PATH_PATTERN = re.compile(
-    r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
-    re.IGNORECASE,
-)
-GOOGLE_SEARCH_LINK_PATTERN = re.compile(
-    r"`?\[`?(.+?)`?`?]\((https://www\.google\.com/search\?q=)([^)]*)\)`?"
-)
 _UNSET = object()
 
 
@@ -199,27 +191,4 @@ class GeminiClientWrapper(GeminiClient):
         else:
             text += str(response)
 
-        text = normalize_llm_text(text)
-
-        def extract_file_path_from_display_text(text_content: str) -> str | None:
-            match = re.match(FILE_PATH_PATTERN, text_content)
-            if match:
-                return match.group(1)
-            return None
-
-        def replacer(match: re.Match) -> str:
-            display_text = str(match.group(1)).strip()
-            google_search_prefix = match.group(2)
-            query_part = match.group(3)
-
-            file_path = extract_file_path_from_display_text(display_text)
-
-            if file_path:
-                # If it's a file path, transform it into a self-referencing Markdown link
-                return f"[`{file_path}`]({file_path})"
-            else:
-                # Otherwise, reconstruct the original Google search link with the display_text
-                original_google_search_url = f"{google_search_prefix}{query_part}"
-                return f"[`{display_text}`]({original_google_search_url})"
-
-        return re.sub(GOOGLE_SEARCH_LINK_PATTERN, replacer, text)
+        return normalize_llm_text(text)

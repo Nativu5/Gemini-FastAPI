@@ -52,6 +52,16 @@ CONTROL_TOKEN_RE = re.compile(r"\\?<\|im\\?_(?:start|end)\|\\?>", re.IGNORECASE)
 CHATML_START_RE = re.compile(r"\\?<\|im\\?_start\|\\?>\s*(\w+)\s*\n?", re.IGNORECASE)
 CHATML_END_RE = re.compile(r"\\?<\|im\\?_end\|\\?>", re.IGNORECASE)
 COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
+FILE_PATH_PATTERN = re.compile(
+    r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
+    re.IGNORECASE,
+)
+GOOGLE_SEARCH_LINK_PATTERN = re.compile(
+    r"`?\[`?(.+?)`?`?]\((https://www\.google\.com/search\?q=)([^)]*)\)`?"
+)
+CONFLICT_START_RE = re.compile(r"<(?:\s*<){6,}")
+CONFLICT_SEP_RE = re.compile(r"=(?:\s*=){6,}")
+CONFLICT_END_RE = re.compile(r">(?:\s*>){6,}")
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
 TOOL_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
@@ -82,9 +92,26 @@ def normalize_llm_text(s: str) -> str:
     return s
 
 
+def _strip_google_search_links(match: re.Match) -> str:
+    """Extract local Markdown link from Google Search links if applicable."""
+    display_text = str(match.group(1)).strip()
+    if FILE_PATH_PATTERN.match(display_text):
+        return f"[`{display_text}`]({display_text})"
+    return match.group(0)
+
+
 def unescape_llm_text(s: str) -> str:
-    """Unescape characters escaped by Gemini Web's post-processing."""
-    return COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
+    """Unescape and mend text fragments broken by Gemini Web's post-processing."""
+    if not s:
+        return ""
+
+    s = COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
+
+    s = CONFLICT_START_RE.sub("<<<<<<<", s)
+    s = CONFLICT_SEP_RE.sub("=======", s)
+    s = CONFLICT_END_RE.sub(">>>>>>>", s)
+
+    return GOOGLE_SEARCH_LINK_PATTERN.sub(_strip_google_search_links, s)
 
 
 def estimate_tokens(text: str | None) -> int:
@@ -235,11 +262,11 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         if arg_matches:
             args_dict = {arg_name.strip(): arg_value.strip() for arg_name, arg_value in arg_matches}
             arguments = orjson.dumps(args_dict).decode("utf-8")
-            logger.debug(f"Successfully parsed {len(args_dict)} tagged arguments for tool: {name}")
+            logger.debug(f"Successfully parsed {len(args_dict)} arguments for tool: {name}")
         else:
             cleaned_raw = raw_args.strip()
             if not cleaned_raw:
-                logger.debug(f"Tool '{name}' called without arguments.")
+                logger.debug(f"Successfully parsed 0 arguments for tool: {name}")
             else:
                 logger.warning(
                     f"Malformed arguments for tool '{name}'. Text found but no valid tags: {reprlib.repr(cleaned_raw)}"
