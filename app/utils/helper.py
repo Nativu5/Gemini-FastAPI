@@ -100,18 +100,78 @@ def _strip_google_search_links(match: re.Match) -> str:
     return match.group(0)
 
 
+def _remove_injected_fences(s: str) -> str:
+    """
+    Strip anonymous Markdown code fences often injected by LLMs around
+    responses or tool calls, while preserving named blocks and all internal content.
+    """
+    if not s:
+        return ""
+
+    lines = s.splitlines()
+    out = []
+    in_fence = False
+    fence_len = 0
+    is_anonymous = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            count = 0
+            for char in stripped:
+                if char == "`":
+                    count += 1
+                else:
+                    break
+
+            lang = stripped[count:].strip()
+
+            if not in_fence:
+                in_fence = True
+                fence_len = count
+                is_anonymous = not lang
+                if not is_anonymous:
+                    out.append(line)
+                continue
+
+            if count >= fence_len:
+                if is_anonymous and lang:
+                    out.append(line)
+                    continue
+
+                if not is_anonymous:
+                    out.append(line)
+                in_fence = False
+                is_anonymous = False
+                fence_len = 0
+                continue
+
+        out.append(line)
+
+    return "\n".join(out)
+
+
 def unescape_llm_text(s: str) -> str:
-    """Unescape and mend text fragments broken by Gemini Web's post-processing."""
+    """
+    Standardize and repair LLM-generated text fragments.
+
+    Sequence:
+    1. Reverse CommonMark escapes.
+    2. Restore git conflict markers broken by web processing.
+    3. Strip injected anonymous code fences.
+    4. Process and normalize Google Search links.
+    """
     if not s:
         return ""
 
     s = COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
-
     s = CONFLICT_START_RE.sub("<<<<<<<", s)
     s = CONFLICT_SEP_RE.sub("=======", s)
     s = CONFLICT_END_RE.sub(">>>>>>>", s)
+    s = _remove_injected_fences(s)
+    s = GOOGLE_SEARCH_LINK_PATTERN.sub(_strip_google_search_links, s)
 
-    return GOOGLE_SEARCH_LINK_PATTERN.sub(_strip_google_search_links, s)
+    return s
 
 
 def estimate_tokens(text: str | None) -> int:
