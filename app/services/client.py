@@ -78,8 +78,8 @@ class GeminiClientWrapper(GeminiClient):
         message: Message, tempdir: Path | None = None, tagged: bool = True, wrap_tool: bool = True
     ) -> tuple[str, list[Path | str]]:
         """
-        Process a single Message object into a format suitable for the Gemini API.
-        Extracts text fragments, handles images and files, and appends tool call blocks if present.
+        Process a Message into Gemini API format using the PascalCase technical protocol.
+        Extracts text, handles files, and appends ToolCalls/ToolResults blocks.
         """
         files: list[Path | str] = []
         text_fragments: list[str] = []
@@ -118,13 +118,13 @@ class GeminiClientWrapper(GeminiClient):
             tool_name = message.name or "unknown"
             combined_content = "\n".join(text_fragments).strip()
             res_block = (
-                f"[response:{tool_name}]\n"
-                f"@results\n\n"
-                f"<<<RESULT>>>\n{combined_content}\n<<<END:RESULT>>>\n\n"
-                f"[/response]"
+                f"[Result:{tool_name}]\n"
+                f"@results\n"
+                f"<<<ToolResult>>>\n{combined_content}\n<<<EndToolResult>>>\n"
+                f"[/Result]"
             )
             if wrap_tool:
-                text_fragments = [f"[function_responses]\n{res_block}\n[/function_responses]"]
+                text_fragments = [f"[ToolResults]\n{res_block}\n[/ToolResults]"]
             else:
                 text_fragments = [res_block]
 
@@ -132,22 +132,24 @@ class GeminiClientWrapper(GeminiClient):
             tool_blocks: list[str] = []
             for call in message.tool_calls:
                 args_text = call.function.arguments.strip()
-                formatted_args = "\n@args\n"
+                formatted_args = "@args\n"
                 try:
                     parsed_args = orjson.loads(args_text)
                     if isinstance(parsed_args, dict):
                         for k, v in parsed_args.items():
                             val_str = v if isinstance(v, str) else orjson.dumps(v).decode("utf-8")
-                            formatted_args += f"\n<<<ARG:{k}>>>\n{val_str}\n<<<END:{k}>>>\n"
+                            formatted_args += (
+                                f"<<<CallParameter:{k}>>>\n{val_str}\n<<<EndCallParameter>>>\n"
+                            )
                     else:
                         formatted_args += args_text
                 except orjson.JSONDecodeError:
                     formatted_args += args_text
 
-                tool_blocks.append(f"[call:{call.function.name}]{formatted_args}\n[/call]")
+                tool_blocks.append(f"[Call:{call.function.name}]\n{formatted_args}[/Call]")
 
             if tool_blocks:
-                tool_section = "[function_calls]\n" + "\n".join(tool_blocks) + "\n[/function_calls]"
+                tool_section = "[ToolCalls]\n" + "\n".join(tool_blocks) + "\n[/ToolCalls]"
                 text_fragments.append(tool_section)
 
         model_input = "\n".join(fragment for fragment in text_fragments if fragment is not None)

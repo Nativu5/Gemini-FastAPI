@@ -33,9 +33,7 @@ def _fuzzy_normalize(text: str | None) -> str | None:
 
 
 def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
-    """
-    Perform semantic normalization for hashing.
-    """
+    """Perform safe semantic normalization for hashing using helper utilities."""
     if text is None:
         return None
 

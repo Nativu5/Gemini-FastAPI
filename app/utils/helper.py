@@ -18,42 +18,43 @@ from ..models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
-    "\nWhen you decide to call tools, you MUST respond ONLY with a single [function_calls] block using this EXACT syntax:\n"
-    "[function_calls]\n"
-    "[call:tool_name]\n"
+    "\nWhen you decide to call tools, you MUST respond ONLY with a single [ToolCalls] block using this EXACT syntax:\n"
+    "[ToolCalls]\n"
+    "[Call:tool_name]\n"
     "@args\n"
-    "\n<<<ARG:arg_name>>>\n"
+    "<<<CallParameter:arg_name>>>\n"
     "value\n"
-    "<<<END:arg_name>>>\n"
-    "[/call]\n"
-    "[/function_calls]\n"
-    "CRITICAL: Arguments MUST use <<<ARG:name>>>...<<<END:name>>> tags. Content inside tags can be any format.\n"
+    "<<<EndCallParameter>>>\n"
+    "[/Call]\n"
+    "[/ToolCalls]\n"
+    "CRITICAL: Every argument MUST be enclosed in <<<CallParameter:arg_name>>>...<<<EndCallParameter>>>. Output as RAW text. Content inside tags can be any format.\n"
 )
 TOOL_BLOCK_RE = re.compile(
-    r"\\?\[function_calls\\?]\s*(.*?)\s*\\?\[/function_calls\\?]", re.DOTALL | re.IGNORECASE
+    r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[/ToolCalls\\?]", re.DOTALL | re.IGNORECASE
 )
 TOOL_CALL_RE = re.compile(
-    r"\\?\[call:([^]\\]+)\\?]\s*(.*?)\s*\\?\[/call\\?]", re.DOTALL | re.IGNORECASE
+    r"\\?\[Call\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/Call\\?]", re.DOTALL | re.IGNORECASE
 )
 RESPONSE_BLOCK_RE = re.compile(
-    r"\\?\[function_responses\\?]\s*(.*?)\s*\\?\[/function_responses\\?]",
+    r"\\?\[ToolResults\\?]\s*(.*?)\s*\\?\[/ToolResults\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_ITEM_RE = re.compile(
-    r"\\?\[response:([^]\\]+)\\?]\s*(.*?)\s*\\?\[/response\\?]", re.DOTALL | re.IGNORECASE
+    r"\\?\[Result\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/Result\\?]",
+    re.DOTALL | re.IGNORECASE,
 )
 TAGGED_ARG_RE = re.compile(
-    r"(?:\\?<){3}ARG:([^>\\]+)(?:\\?>){3}\s*(.*?)\s*(?:\\?<){3}END:\1(?:\\?>){3}",
+    r"(?:\\?<){3}CallParameter\\?:((?:[^>\\]|\\.)+)(?:\\?>){3}\s*(.*?)\s*(?:\\?<){3}EndCallParameter(?:\\?>){3}",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_RESULT_RE = re.compile(
-    r"(?:\\?<){3}RESULT(?:\\?>){3}\s*(.*?)\s*(?:\\?<){3}END:RESULT(?:\\?>){3}",
+    r"(?:\\?<){3}ToolResult(?:\\?>){3}\s*(.*?)\s*(?:\\?<){3}EndToolResult(?:\\?>){3}",
     re.DOTALL | re.IGNORECASE,
 )
-CONTROL_TOKEN_RE = re.compile(r"\\?<\|im_(?:start|end)\|\\?>")
-COMMONMARK_UNESCAPE_RE = re.compile(
-    r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])"
-)  # See: https://spec.commonmark.org/current/#backslash-escapes
+CONTROL_TOKEN_RE = re.compile(r"\\?<\|im\\?_(?:start|end)\|\\?>", re.IGNORECASE)
+CHATML_START_RE = re.compile(r"\\?<\|im\\?_start\|\\?>\s*(\w+)\s*\n?", re.IGNORECASE)
+CHATML_END_RE = re.compile(r"\\?<\|im\\?_end\|\\?>", re.IGNORECASE)
+COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
 TOOL_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
@@ -61,7 +62,7 @@ TOOL_HINT_LINE_END = _hint_lines[-1] if _hint_lines else ""
 
 
 def add_tag(role: str, content: str, unclose: bool = False) -> str:
-    """Surround content with role tags"""
+    """Surround content with ChatML role tags."""
     if role not in VALID_TAG_ROLES:
         logger.warning(f"Unknown role: {role}, returning content without tags")
         return content
@@ -85,12 +86,12 @@ def normalize_llm_text(s: str) -> str:
 
 
 def unescape_llm_text(s: str) -> str:
-    r"""Unescape characters escaped by Gemini Web's post-processing."""
+    """Unescape characters escaped by Gemini Web's post-processing (e.g., \\_ to _)."""
     return COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
 
 
 def estimate_tokens(text: str | None) -> int:
-    """Estimate the number of tokens heuristically based on character count"""
+    """Estimate the number of tokens heuristically based on character count."""
     if not text:
         return 0
     return int(len(text) / 3)
@@ -99,6 +100,7 @@ def estimate_tokens(text: str | None) -> int:
 async def save_file_to_tempfile(
     file_in_base64: str, file_name: str = "", tempdir: Path | None = None
 ) -> Path:
+    """Decode base64 file data and save to a temporary file."""
     data = base64.b64decode(file_in_base64)
     suffix = Path(file_name).suffix if file_name else ".bin"
 
@@ -110,6 +112,7 @@ async def save_file_to_tempfile(
 
 
 async def save_url_to_tempfile(url: str, tempdir: Path | None = None) -> Path:
+    """Download content from a URL and save to a temporary file."""
     data: bytes | None = None
     suffix: str | None = None
     if url.startswith("data:image/"):
@@ -148,67 +151,48 @@ async def save_url_to_tempfile(url: str, tempdir: Path | None = None) -> Path:
 
 
 def strip_tagged_blocks(text: str) -> str:
-    """Remove <|im_start|>role ... <|im_end|> sections.
-    - tool blocks are removed entirely (including content).
-    - other roles: remove markers and role, keep inner content.
+    """
+    Remove ChatML role blocks (<|im_start|>role...<|im_end|>).
+    Role 'tool' blocks are removed entirely; others have markers stripped but content preserved.
+    Handles both raw and escaped markers consistently.
     """
     if not text:
         return text
 
-    result: list[str] = []
+    result = []
     idx = 0
-    length = len(text)
-    start_marker = "<|im_start|>"
-    end_marker = "<|im_end|>"
-
-    while idx < length:
-        start = text.find(start_marker, idx)
-        if start == -1:
+    while idx < len(text):
+        match_start = CHATML_START_RE.search(text, idx)
+        if not match_start:
             result.append(text[idx:])
             break
 
-        result.append(text[idx:start])
+        result.append(text[idx : match_start.start()])
+        role = match_start.group(1).lower()
+        content_start = match_start.end()
 
-        role_start = start + len(start_marker)
-        newline = text.find("\n", role_start)
-        if newline == -1:
-            result.append(text[start:])
+        match_end = CHATML_END_RE.search(text, content_start)
+        if not match_end:
+            if role != "tool":
+                result.append(text[content_start:])
             break
 
-        role = text[role_start:newline].strip().lower()
+        if role != "tool":
+            result.append(text[content_start : match_end.start()])
 
-        end = text.find(end_marker, newline + 1)
-        if end == -1:
-            if role == "tool":
-                break
-            else:
-                result.append(text[newline + 1 :])
-                break
-
-        block_end = end + len(end_marker)
-
-        if role == "tool":
-            idx = block_end
-            continue
-
-        content = text[newline + 1 : end]
-        result.append(content)
-        idx = block_end
+        idx = match_end.end()
 
     return "".join(result)
 
 
 def strip_system_hints(text: str) -> str:
-    """Remove system-level hint text from a given string."""
+    """Remove system hints, ChatML tags, and technical protocol markers from text."""
     if not text:
         return text
 
-    # Remove the full hints first
     cleaned = text.replace(TOOL_WRAP_HINT, "").replace(TOOL_HINT_STRIPPED, "")
 
-    # Remove fragments or multi-line blocks using derived constants
     if TOOL_HINT_LINE_START and TOOL_HINT_LINE_END:
-        # Match from the start line to the end line, inclusive, handling internal modifications
         pattern = rf"\n?{re.escape(TOOL_HINT_LINE_START)}.*?{re.escape(TOOL_HINT_LINE_END)}\.?\n?"
         cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
 
@@ -218,19 +202,25 @@ def strip_system_hints(text: str) -> str:
         cleaned = re.sub(rf"\s*{re.escape(TOOL_HINT_LINE_END)}\.?\n?", "", cleaned)
 
     cleaned = strip_tagged_blocks(cleaned)
+
     cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
+    cleaned = TOOL_BLOCK_RE.sub("", cleaned)
+    cleaned = TOOL_CALL_RE.sub("", cleaned)
+    cleaned = RESPONSE_BLOCK_RE.sub("", cleaned)
+    cleaned = RESPONSE_ITEM_RE.sub("", cleaned)
+    cleaned = TAGGED_ARG_RE.sub("", cleaned)
+    cleaned = TAGGED_RESULT_RE.sub("", cleaned)
+
     return cleaned
 
 
 def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[ToolCall]]:
     """
-    Unified engine for stripping tool call blocks and extracting tool metadata.
-    If extract=True, parses JSON arguments and assigns deterministic call IDs.
+    Extract tool metadata and return text stripped of technical markers.
+    Arguments are parsed into JSON and assigned deterministic call IDs.
     """
     if not text:
         return text, []
-
-    cleaned = strip_system_hints(text)
 
     tool_calls: list[ToolCall] = []
 
@@ -271,45 +261,27 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             )
         )
 
-    all_calls = []
-    for match in TOOL_CALL_RE.finditer(cleaned):
-        all_calls.append(
-            {
-                "start": match.start(),
-                "name": unescape_llm_text((match.group(1) or "").strip()),
-                "args": (match.group(2) or "").strip(),
-            }
-        )
+    for match in TOOL_CALL_RE.finditer(text):
+        _create_tool_call(match.group(1), match.group(2))
 
-    all_calls.sort(key=lambda x: x["start"])
-
-    if extract:
-        for call in all_calls:
-            _create_tool_call(call["name"], call["args"])
-
-    cleaned = TOOL_BLOCK_RE.sub("", cleaned)
-    cleaned = TOOL_CALL_RE.sub("", cleaned)
-    cleaned = RESPONSE_BLOCK_RE.sub("", cleaned)
-    cleaned = RESPONSE_ITEM_RE.sub("", cleaned)
-    cleaned = TAGGED_ARG_RE.sub("", cleaned)
-    cleaned = TAGGED_RESULT_RE.sub("", cleaned)
+    cleaned = strip_system_hints(text)
 
     return cleaned, tool_calls
 
 
 def remove_tool_call_blocks(text: str) -> str:
-    """Strip tool call code blocks from text."""
+    """Strip tool call blocks from text for display."""
     cleaned, _ = _process_tools_internal(text, extract=False)
     return cleaned
 
 
 def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
-    """Extract tool call definitions and return cleaned text."""
+    """Extract tool calls and return cleaned text."""
     return _process_tools_internal(text, extract=True)
 
 
 def text_from_message(message: Message) -> str:
-    """Return text content from a message for token estimation."""
+    """Concatenate text and tool arguments from a message for token estimation."""
     base_text = ""
     if isinstance(message.content, str):
         base_text = message.content
@@ -329,7 +301,6 @@ def text_from_message(message: Message) -> str:
 
 def extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
     """Return image dimensions (width, height) if PNG or JPEG headers are present."""
-    # PNG: dimensions stored in bytes 16..24 of the IHDR chunk
     if len(data) >= 24 and data.startswith(b"\x89PNG\r\n\x1a\n"):
         try:
             width, height = struct.unpack(">II", data[16:24])
@@ -337,7 +308,6 @@ def extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
         except struct.error:
             return None, None
 
-    # JPEG: dimensions stored in SOF segment; iterate through markers to locate it
     if len(data) >= 4 and data[0:2] == b"\xff\xd8":
         idx = 2
         length = len(data)
@@ -357,7 +327,6 @@ def extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
             0xCF,
         }
         while idx < length:
-            # Find marker alignment (markers are prefixed with 0xFF bytes)
             if data[idx] != 0xFF:
                 idx += 1
                 continue
@@ -380,7 +349,6 @@ def extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
 
             if marker in sof_markers:
                 if idx + 4 < length:
-                    # Skip precision byte at idx, then read height/width (big-endian)
                     height = (data[idx + 1] << 8) + data[idx + 2]
                     width = (data[idx + 3] << 8) + data[idx + 4]
                     return int(width), int(height)

@@ -342,7 +342,7 @@ def _build_tool_prompt(
     tools: list[Tool],
     tool_choice: str | ToolChoiceFunction | None,
 ) -> str:
-    """Generate a system prompt chunk describing available tools."""
+    """Generate a system prompt describing available tools and the PascalCase protocol."""
     if not tools:
         return ""
 
@@ -378,29 +378,27 @@ def _build_tool_prompt(
         )
 
     lines.append(
-        "When you decide to call tools, you MUST respond ONLY with a single [function_calls] block using this EXACT syntax:"
+        "When you decide to call tools, you MUST respond ONLY with a single [ToolCalls] block using this EXACT syntax:"
     )
-    lines.append("[function_calls]")
-    lines.append("[call:tool_name]")
+    lines.append("[ToolCalls]")
+    lines.append("[Call:tool_name]")
     lines.append("@args")
-    lines.append("")
-    lines.append("<<<ARG:arg_name>>>")
+    lines.append("<<<CallParameter:arg_name>>>")
     lines.append("value")
-    lines.append("<<<END:arg_name>>>")
-    lines.append("")
-    lines.append("[/call]")
-    lines.append("[/function_calls]")
+    lines.append("<<<EndCallParameter>>>")
+    lines.append("[/Call]")
+    lines.append("[/ToolCalls]")
     lines.append(
-        "CRITICAL: Arguments MUST use <<<ARG:name>>>...<<<END:name>>> tags. Content inside tags can be any format."
+        "CRITICAL: Every argument MUST be enclosed in <<<CallParameter:arg_name>>>...<<<EndCallParameter>>>. Output as RAW text. Content inside tags can be any format."
     )
     lines.append(
-        "If multiple tools are needed, list them sequentially within the same [function_calls] block."
+        "If multiple tools are needed, list them sequentially within the same [ToolCalls] block."
     )
     lines.append(
-        "If no tool call is needed, provide a normal response and NEVER use the [function_calls] tag."
+        "If no tool call is needed, provide a normal response and NEVER use the [ToolCalls] tag."
     )
     lines.append(
-        "Note: Tool results are returned in a [function_responses] block using @results and <<<RESULT>>> tags."
+        "Note: Tool results are returned in a [ToolResults] block using @results and <<<ToolResult>>> tags."
     )
 
     return "\n".join(lines)
@@ -771,8 +769,8 @@ async def _send_with_split(
 
 class StreamingOutputFilter:
     """
-    State Machine filter to suppress technical markers, tool calls, and system hints.
-    Handles fragmentation where markers are split across multiple chunks.
+    Filter to suppress technical protocol markers, tool calls, and system hints from the stream.
+    Uses a state machine to handle fragmentation where markers are split across multiple chunks.
     """
 
     def __init__(self):
@@ -783,28 +781,32 @@ class StreamingOutputFilter:
 
         self.STATE_MARKERS = {
             "TOOL": {
-                "starts": ["[function_calls]", "\\[function_calls\\]"],
-                "ends": ["[/function_calls]", "\\[/function_calls\\]"],
+                "starts": ["[ToolCalls]", "\\[ToolCalls\\]"],
+                "ends": ["[/ToolCalls]", "\\[/ToolCalls\\]"],
             },
             "ORPHAN": {
-                "starts": ["[call:", "\\[call:"],
-                "ends": ["[/call]", "\\[/call\\]"],
+                "starts": ["[Call:", "\\[Call:", "\\[Call\\:"],
+                "ends": ["[/Call]", "\\[/Call\\]"],
             },
             "RESP": {
-                "starts": ["[function_responses]", "\\[function_responses\\]"],
-                "ends": ["[/function_responses]", "\\[/function_responses\\]"],
+                "starts": ["[ToolResults]", "\\[ToolResults\\]"],
+                "ends": ["[/ToolResults]", "\\[/ToolResults\\]"],
             },
             "ARG": {
-                "starts": ["<<<ARG:", "\\<\\<\\<ARG:"],
-                "ends": ["<<<END:", "\\<\\<\\<END:"],
+                "starts": [
+                    "<<<CallParameter:",
+                    "\\<\\<\\<CallParameter:",
+                    "\\<\\<\\<CallParameter\\:",
+                ],
+                "ends": ["<<<EndCallParameter>>>", "\\<\\<\\<EndCallParameter\\>\\>\\>"],
             },
             "RESULT": {
-                "starts": ["<<<RESULT>>>", "\\<\\<\\<RESULT\\>\\>\\>"],
-                "ends": ["<<<END:RESULT>>>", "\\<\\<\\<END:RESULT\\>\\>\\>"],
+                "starts": ["<<<ToolResult>>>", "\\<\\<\\<ToolResult\\>\\>\\>"],
+                "ends": ["<<<EndToolResult>>>", "\\<\\<\\<EndToolResult\\>\\>\\>"],
             },
             "TAG": {
-                "starts": ["<|im_start|>", "\\<|im_start|\\>"],
-                "ends": ["<|im_end|>", "\\<|im_end|\\>"],
+                "starts": ["<|im_start|>", "\\<|im\\_start|\\>"],
+                "ends": ["<|im_end|>", "\\<|im\\_end|\\>"],
             },
         }
 
@@ -815,10 +817,20 @@ class StreamingOutputFilter:
                 "ends": [TOOL_HINT_LINE_END],
             }
 
+        self.ORPHAN_ENDS = [
+            "<|im_end|>",
+            "\\<|im\\_end|\\>",
+            "[/Call]",
+            "\\[/Call\\]",
+            "[/ToolCalls]",
+            "\\[/ToolCalls\\]",
+        ]
+
         self.WATCH_MARKERS = []
         for cfg in self.STATE_MARKERS.values():
             self.WATCH_MARKERS.extend(cfg["starts"])
             self.WATCH_MARKERS.extend(cfg.get("ends", []))
+        self.WATCH_MARKERS.extend(self.ORPHAN_ENDS)
 
     def process(self, chunk: str) -> str:
         self.buffer += chunk
@@ -834,8 +846,12 @@ class StreamingOutputFilter:
                         if idx != -1:
                             indices.append((idx, m_type, len(p)))
 
+                for p in self.ORPHAN_ENDS:
+                    idx = buf_low.find(p.lower())
+                    if idx != -1:
+                        indices.append((idx, "SKIP", len(p)))
+
                 if not indices:
-                    # Guard against split markers (case-insensitive)
                     keep_len = 0
                     for marker in self.WATCH_MARKERS:
                         m_low = marker.lower()
@@ -853,6 +869,10 @@ class StreamingOutputFilter:
                 idx, m_type, m_len = indices[0]
                 output.append(self.buffer[:idx])
                 self.buffer = self.buffer[idx:]
+
+                if m_type == "SKIP":
+                    self.buffer = self.buffer[m_len:]
+                    continue
 
                 self.state = f"IN_{m_type}"
                 if m_type in ("TOOL", "ORPHAN"):
@@ -886,17 +906,12 @@ class StreamingOutputFilter:
                         found_idx, found_len = idx, len(p)
 
                 if found_idx != -1:
-                    bracket_idx = self.buffer.find(">", found_idx + found_len)
-                    if bracket_idx != -1:
-                        end_pos = bracket_idx + 1
-                        while end_pos < len(self.buffer) and self.buffer[end_pos] == ">":
-                            end_pos += 1
-
-                        self.buffer = self.buffer[end_pos:]
-                        self.state = "NORMAL"
-                    else:
-                        break
+                    self.buffer = self.buffer[found_idx + found_len :]
+                    self.state = "NORMAL"
                 else:
+                    max_end_len = max(len(p) for p in cfg["ends"])
+                    if len(self.buffer) > max_end_len:
+                        self.buffer = self.buffer[-max_end_len:]
                     break
 
             elif self.state == "IN_RESULT":
@@ -911,6 +926,9 @@ class StreamingOutputFilter:
                     self.buffer = self.buffer[found_idx + found_len :]
                     self.state = "NORMAL"
                 else:
+                    max_end_len = max(len(p) for p in cfg["ends"])
+                    if len(self.buffer) > max_end_len:
+                        self.buffer = self.buffer[-max_end_len:]
                     break
 
             elif self.state == "IN_RESP":
@@ -940,6 +958,10 @@ class StreamingOutputFilter:
                     self.buffer = self.buffer[found_idx + found_len :]
                     self.state = "NORMAL"
                 else:
+                    max_end_len = max(len(p) for p in cfg["ends"])
+                    if len(self.buffer) > max_end_len:
+                        self.block_buffer += self.buffer[:-max_end_len]
+                        self.buffer = self.buffer[-max_end_len:]
                     break
 
             elif self.state == "IN_ORPHAN":
@@ -955,6 +977,10 @@ class StreamingOutputFilter:
                     self.buffer = self.buffer[found_idx + found_len :]
                     self.state = "NORMAL"
                 else:
+                    max_end_len = max(len(p) for p in cfg["ends"])
+                    if len(self.buffer) > max_end_len:
+                        self.block_buffer += self.buffer[:-max_end_len]
+                        self.buffer = self.buffer[-max_end_len:]
                     break
 
             elif self.state == "IN_TAG":
@@ -996,16 +1022,12 @@ class StreamingOutputFilter:
         return "".join(output)
 
     def flush(self) -> str:
+        """Release remaining buffer content and perform final cleanup at stream end."""
         res = ""
-        if self.state == "IN_TOOL":
-            orphan_starts = self.STATE_MARKERS["ORPHAN"]["starts"]
-            is_orphan = any(p.lower() in self.block_buffer.lower() for p in orphan_starts)
-            if not is_orphan:
-                res = f"{self.STATE_MARKERS['TOOL']['starts'][0]}{self.block_buffer}"
+        if self.state in ("IN_TOOL", "IN_ORPHAN", "IN_RESP", "IN_HINT", "IN_ARG", "IN_RESULT"):
+            res = ""
         elif self.state == "IN_BLOCK" and self.current_role != "tool":
             res = self.buffer
-        elif self.state in ("IN_ORPHAN", "IN_RESP", "IN_HINT", "IN_ARG", "IN_RESULT"):
-            res = ""
         elif self.state == "NORMAL":
             res = self.buffer
 
