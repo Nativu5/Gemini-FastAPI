@@ -382,14 +382,11 @@ def _build_tool_prompt(
     )
     lines.append("[ToolCalls]")
     lines.append("[Call:tool_name]")
-    lines.append("@args")
-    lines.append("<<<CallParameter:arg_name>>>")
-    lines.append("value")
-    lines.append("<<<EndCallParameter>>>")
+    lines.append("[CallParameter:arg_name]value[/CallParameter]")
     lines.append("[/Call]")
     lines.append("[/ToolCalls]")
     lines.append(
-        "CRITICAL: Every argument MUST be enclosed in <<<CallParameter:arg_name>>>...<<<EndCallParameter>>>. Output as RAW text. Content inside tags can be any format."
+        "CRITICAL: Every argument MUST be enclosed in [CallParameter:arg_name]...[/CallParameter]. Output as RAW text. Content inside tags can be any format."
     )
     lines.append(
         "If multiple tools are needed, list them sequentially within the same [ToolCalls] block."
@@ -398,7 +395,7 @@ def _build_tool_prompt(
         "If no tool call is needed, provide a normal response and NEVER use the [ToolCalls] tag."
     )
     lines.append(
-        "Note: Tool results are returned in a [ToolResults] block using @results and <<<ToolResult>>> tags."
+        "Note: Tool results are returned in a [ToolResults] block using [ToolResult] tags."
     )
 
     return "\n".join(lines)
@@ -793,16 +790,12 @@ class StreamingOutputFilter:
                 "ends": ["[/ToolResults]", "\\[/ToolResults\\]"],
             },
             "ARG": {
-                "starts": [
-                    "<<<CallParameter:",
-                    "\\<\\<\\<CallParameter:",
-                    "\\<\\<\\<CallParameter\\:",
-                ],
-                "ends": ["<<<EndCallParameter>>>", "\\<\\<\\<EndCallParameter\\>\\>\\>"],
+                "starts": ["[CallParameter:", "\\[CallParameter:", "\\[CallParameter\\:"],
+                "ends": ["[/CallParameter]", "\\[/CallParameter\\]"],
             },
             "RESULT": {
-                "starts": ["<<<ToolResult>>>", "\\<\\<\\<ToolResult\\>\\>\\>"],
-                "ends": ["<<<EndToolResult>>>", "\\<\\<\\<EndToolResult\\>\\>\\>"],
+                "starts": ["[ToolResult]", "\\[ToolResult\\]"],
+                "ends": ["[/ToolResult]", "\\[/ToolResult\\]"],
             },
             "TAG": {
                 "starts": ["<|im_start|>", "\\<|im\\_start|\\>"],
@@ -824,6 +817,10 @@ class StreamingOutputFilter:
             "\\[/Call\\]",
             "[/ToolCalls]",
             "\\[/ToolCalls\\]",
+            "[/CallParameter]",
+            "\\[/CallParameter\\]",
+            "[/ToolResult]",
+            "\\[/ToolResult\\]",
         ]
 
         self.WATCH_MARKERS = []

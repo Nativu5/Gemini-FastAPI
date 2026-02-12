@@ -118,10 +118,7 @@ class GeminiClientWrapper(GeminiClient):
             tool_name = message.name or "unknown"
             combined_content = "\n".join(text_fragments).strip()
             res_block = (
-                f"[Result:{tool_name}]\n"
-                f"@results\n"
-                f"<<<ToolResult>>>\n{combined_content}\n<<<EndToolResult>>>\n"
-                f"[/Result]"
+                f"[Result:{tool_name}]\n[ToolResult]\n{combined_content}\n[/ToolResult]\n[/Result]"
             )
             if wrap_tool:
                 text_fragments = [f"[ToolResults]\n{res_block}\n[/ToolResults]"]
@@ -138,9 +135,7 @@ class GeminiClientWrapper(GeminiClient):
                     if isinstance(parsed_args, dict):
                         for k, v in parsed_args.items():
                             val_str = v if isinstance(v, str) else orjson.dumps(v).decode("utf-8")
-                            formatted_args += (
-                                f"<<<CallParameter:{k}>>>\n{val_str}\n<<<EndCallParameter>>>\n"
-                            )
+                            formatted_args += f"[CallParameter:{k}]{val_str}[/CallParameter]\n"
                     else:
                         formatted_args += args_text
                 except orjson.JSONDecodeError:
@@ -171,7 +166,6 @@ class GeminiClientWrapper(GeminiClient):
         while i < len(messages):
             msg = messages[i]
             if msg.role == "tool":
-                # Group consecutive tool messages
                 tool_blocks: list[str] = []
                 while i < len(messages) and messages[i].role == "tool":
                     part, part_files = await GeminiClientWrapper.process_message(
@@ -182,9 +176,7 @@ class GeminiClientWrapper(GeminiClient):
                     i += 1
 
                 combined_tool_content = "\n".join(tool_blocks)
-                wrapped_content = (
-                    f"[function_responses]\n{combined_tool_content}\n[/function_responses]"
-                )
+                wrapped_content = f"[ToolResults]\n{combined_tool_content}\n[/ToolResults]"
                 conversation.append(add_tag("tool", wrapped_content))
             else:
                 input_part, files_part = await GeminiClientWrapper.process_message(

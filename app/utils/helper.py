@@ -21,13 +21,10 @@ TOOL_WRAP_HINT = (
     "\nWhen you decide to call tools, you MUST respond ONLY with a single [ToolCalls] block using this EXACT syntax:\n"
     "[ToolCalls]\n"
     "[Call:tool_name]\n"
-    "@args\n"
-    "<<<CallParameter:arg_name>>>\n"
-    "value\n"
-    "<<<EndCallParameter>>>\n"
+    "[CallParameter:arg_name]value[/CallParameter]\n"
     "[/Call]\n"
     "[/ToolCalls]\n"
-    "CRITICAL: Every argument MUST be enclosed in <<<CallParameter:arg_name>>>...<<<EndCallParameter>>>. Output as RAW text. Content inside tags can be any format.\n"
+    "CRITICAL: Every argument MUST be enclosed in [CallParameter:arg_name]...[/CallParameter]. Output as RAW text. Content inside tags can be any format.\n"
 )
 TOOL_BLOCK_RE = re.compile(
     r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[/ToolCalls\\?]", re.DOTALL | re.IGNORECASE
@@ -44,11 +41,11 @@ RESPONSE_ITEM_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_ARG_RE = re.compile(
-    r"(?:\\?<){3}CallParameter\\?:((?:[^>\\]|\\.)+)(?:\\?>){3}\s*(.*?)\s*(?:\\?<){3}EndCallParameter(?:\\?>){3}",
+    r"\\?\[CallParameter\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/CallParameter\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_RESULT_RE = re.compile(
-    r"(?:\\?<){3}ToolResult(?:\\?>){3}\s*(.*?)\s*(?:\\?<){3}EndToolResult(?:\\?>){3}",
+    r"\\?\[ToolResult\\?]\s*(.*?)\s*\\?\[/ToolResult\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 CONTROL_TOKEN_RE = re.compile(r"\\?<\|im\\?_(?:start|end)\|\\?>", re.IGNORECASE)
@@ -86,7 +83,7 @@ def normalize_llm_text(s: str) -> str:
 
 
 def unescape_llm_text(s: str) -> str:
-    """Unescape characters escaped by Gemini Web's post-processing (e.g., \\_ to _)."""
+    """Unescape characters escaped by Gemini Web's post-processing."""
     return COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
 
 
@@ -240,7 +237,7 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             arguments = orjson.dumps(args_dict).decode("utf-8")
             logger.debug(f"Successfully parsed {len(args_dict)} tagged arguments for tool: {name}")
         else:
-            cleaned_raw = raw_args.replace("@args", "").strip()
+            cleaned_raw = raw_args.strip()
             if not cleaned_raw:
                 logger.debug(f"Tool '{name}' called without arguments.")
             else:
