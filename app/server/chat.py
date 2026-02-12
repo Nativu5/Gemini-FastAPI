@@ -49,6 +49,7 @@ from ..utils.helper import (
     estimate_tokens,
     extract_image_dimensions,
     extract_tool_calls,
+    remove_tool_call_blocks,
     strip_system_hints,
     text_from_message,
 )
@@ -221,7 +222,7 @@ def _process_llm_output(
     structured_requirement: StructuredOutputRequirement | None,
 ) -> tuple[str, str, list[Any]]:
     """
-    Common post-processing logic for Gemini output.
+    Post-process Gemini output to extract tool calls and prepare clean text for display and storage.
     Returns: (visible_text, storage_output, tool_calls)
     """
     visible_with_think, tool_calls = extract_tool_calls(raw_output_with_think)
@@ -230,7 +231,7 @@ def _process_llm_output(
 
     visible_output = visible_with_think.strip()
 
-    storage_output, _ = extract_tool_calls(raw_output_clean)
+    storage_output = remove_tool_call_blocks(raw_output_clean)
     storage_output = storage_output.strip()
 
     if structured_requirement:
