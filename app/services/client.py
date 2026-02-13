@@ -121,7 +121,7 @@ class GeminiClientWrapper(GeminiClient):
             tool_blocks: list[str] = []
             for call in message.tool_calls:
                 args_text = call.function.arguments.strip()
-                formatted_args = "@args\n"
+                formatted_args = ""
                 try:
                     parsed_args = orjson.loads(args_text)
                     if isinstance(parsed_args, dict):
