@@ -120,20 +120,25 @@ class GeminiClientWrapper(GeminiClient):
         if message.tool_calls:
             tool_blocks: list[str] = []
             for call in message.tool_calls:
-                args_text = call.function.arguments.strip()
-                formatted_args = ""
-                try:
-                    parsed_args = orjson.loads(args_text)
-                    if isinstance(parsed_args, dict):
-                        for k, v in parsed_args.items():
-                            val_str = v if isinstance(v, str) else orjson.dumps(v).decode("utf-8")
-                            formatted_args += f"[CallParameter:{k}]{val_str}[/CallParameter]\n"
-                    else:
-                        formatted_args += args_text
-                except orjson.JSONDecodeError:
-                    formatted_args += args_text
+                params_text = call.function.arguments.strip()
+                formatted_params = ""
+                if params_text:
+                    try:
+                        parsed_params = orjson.loads(params_text)
+                        if isinstance(parsed_params, dict):
+                            for k, v in parsed_params.items():
+                                val_str = (
+                                    v if isinstance(v, str) else orjson.dumps(v).decode("utf-8")
+                                )
+                                formatted_params += (
+                                    f"[CallParameter:{k}]\n```\n{val_str}\n```\n[/CallParameter]\n"
+                                )
+                        else:
+                            formatted_params += f"```\n{params_text}\n```\n"
+                    except orjson.JSONDecodeError:
+                        formatted_params += f"```\n{params_text}\n```\n"
 
-                tool_blocks.append(f"[Call:{call.function.name}]\n{formatted_args}[/Call]")
+                tool_blocks.append(f"[Call:{call.function.name}]\n{formatted_params}[/Call]")
 
             if tool_blocks:
                 tool_section = "[ToolCalls]\n" + "\n".join(tool_blocks) + "\n[/ToolCalls]"
