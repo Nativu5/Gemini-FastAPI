@@ -134,7 +134,7 @@ def _strip_param_fences(s: str) -> str:
     return s[n:-n].strip()
 
 
-def unescape_llm_text(s: str) -> str:
+def _repair_param_value(s: str) -> str:
     """
     Standardize and repair LLM-generated text fragments (unescaping, link normalization)
     to ensure compatibility with specialized clients like Roo Code.
@@ -271,8 +271,8 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             logger.warning("Encountered tool_call without a function name.")
             return
 
-        name = unescape_llm_text(name.strip())
-        raw_args = unescape_llm_text(raw_args)
+        name = _repair_param_value(name.strip())
+        raw_args = _repair_param_value(raw_args)
 
         arg_matches = TAGGED_ARG_RE.findall(raw_args)
         if arg_matches:
