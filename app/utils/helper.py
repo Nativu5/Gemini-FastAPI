@@ -61,6 +61,7 @@ GOOGLE_SEARCH_LINK_PATTERN = re.compile(
 )
 CONFLICT_START_RE = re.compile(r"<(?:\s*<){6,}")
 CONFLICT_SEP_RE = re.compile(r"=(?:\s*=){6,}")
+CONFLICT_SEP_DASH_RE = re.compile(r"[-—](?:\s*[-—]){6,}")
 CONFLICT_END_RE = re.compile(r">(?:\s*>){6,}")
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
@@ -167,6 +168,7 @@ def unescape_llm_text(s: str) -> str:
     s = COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
     s = CONFLICT_START_RE.sub("<<<<<<<", s)
     s = CONFLICT_SEP_RE.sub("=======", s)
+    s = CONFLICT_SEP_DASH_RE.sub("-------", s)
     s = CONFLICT_END_RE.sub(">>>>>>>", s)
     s = _remove_injected_fences(s)
     s = GOOGLE_SEARCH_LINK_PATTERN.sub(_strip_google_search_links, s)
