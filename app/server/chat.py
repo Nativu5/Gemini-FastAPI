@@ -760,32 +760,28 @@ class StreamingOutputFilter:
 
         self.STATE_MARKERS = {
             "TOOL": {
-                "starts": ["[tool_calls]", "\\[tool\\_calls\\]"],
-                "ends": ["[/tool_calls]", "\\[\\/tool\\_calls\\]"],
+                "starts": ["[ToolCalls]", "\\[ToolCalls\\]"],
+                "ends": ["[/ToolCalls]", "\\[/ToolCalls\\]"],
             },
             "ORPHAN": {
-                "starts": ["[call:", "\\[call\\:"],
-                "ends": ["[/call]", "\\[\\/call\\]"],
+                "starts": ["[Call:", "\\[Call:", "\\[Call\\:"],
+                "ends": ["[/Call]", "\\[/Call\\]"],
             },
             "RESP": {
-                "starts": ["[tool_results]", "\\[tool\\_results\\]"],
-                "ends": ["[/tool_results]", "\\[\\/tool\\_results\\]"],
+                "starts": ["[ToolResults]", "\\[ToolResults\\]"],
+                "ends": ["[/ToolResults]", "\\[/ToolResults\\]"],
             },
             "ARG": {
-                "starts": ["[call_parameter:", "\\[call\\_parameter\\:"],
-                "ends": ["[/call_parameter]", "\\[\\/call\\_parameter\\]"],
+                "starts": ["[CallParameter:", "\\[CallParameter:", "\\[CallParameter\\:"],
+                "ends": ["[/CallParameter]", "\\[/CallParameter\\]"],
             },
             "RESULT": {
-                "starts": ["[tool_result]", "\\[tool\\_result\\]"],
-                "ends": ["[/tool_result]", "\\[\\/tool\\_result\\]"],
-            },
-            "ITEM": {
-                "starts": ["[result:", "\\[result\\:"],
-                "ends": ["[/result]", "\\[\\/result\\]"],
+                "starts": ["[ToolResult]", "\\[ToolResult\\]"],
+                "ends": ["[/ToolResult]", "\\[/ToolResult\\]"],
             },
             "TAG": {
-                "starts": ["<|im_start|>", "\\<\\|im\\_start\\|\\>"],
-                "ends": ["<|im_end|>", "\\<\\|im\\_end\\|\\>"],
+                "starts": ["<|im_start|>", "\\<|im\\_start|\\>"],
+                "ends": ["<|im_end|>", "\\<|im\\_end|\\>"],
             },
         }
 
@@ -798,19 +794,15 @@ class StreamingOutputFilter:
 
         self.ORPHAN_ENDS = [
             "<|im_end|>",
-            "\\<\\|im\\_end\\|\\>",
-            "[/call]",
-            "\\[\\/call\\]",
-            "[/tool_calls]",
-            "\\[\\/tool\\_calls\\]",
-            "[/call_parameter]",
-            "\\[\\/call\\_parameter\\]",
-            "[/tool_result]",
-            "\\[\\/tool\\_result\\]",
-            "[/tool_results]",
-            "\\[\\/tool\\_results\\]",
-            "[/result]",
-            "\\[\\/result\\]",
+            "\\<|im\\_end|\\>",
+            "[/Call]",
+            "\\[/Call\\]",
+            "[/ToolCalls]",
+            "\\[/ToolCalls\\]",
+            "[/CallParameter]",
+            "\\[/CallParameter\\]",
+            "[/ToolResult]",
+            "\\[/ToolResult\\]",
         ]
 
         self.WATCH_MARKERS = []
