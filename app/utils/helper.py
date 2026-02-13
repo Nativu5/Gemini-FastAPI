@@ -154,28 +154,29 @@ def _remove_injected_fences(s: str) -> str:
 
 def unescape_llm_text(s: str) -> str:
     """
-    Standardize and repair LLM-generated text fragments.
-    These patches are specifically designed for complex clients like Roo Code to ensure
-    compatibility with their specialized tool protocols (e.g., apply_diff) which may be
-    mangled by Gemini Web's interface or browser auto-formatting.
+    Standardize and repair LLM-generated text fragments for specialized client protocols.
+    Designed to ensure compatibility with clients like Roo Code by fixing
+    mangled conflict markers, escaping issues, and injected Markdown formatting.
 
     Sequence:
-    1. Restore git conflict markers and DOUBLE any leading backslash to protect it.
-    2. Reverse CommonMark escapes (consuming one level of doubled backslashes).
-    3. Strip injected anonymous code fences.
+    1. Normalize git conflict markers (handles mangled spacing and keyword standardization).
+    2. Reverse CommonMark escapes (removes leading backslashes from structural markers).
+    3. Strip injected anonymous Markdown code fences.
     4. Process and normalize Google Search links.
     """
     if not s:
         return ""
 
-    s = CONFLICT_START_RE.sub(
-        lambda m: (m.group(1) or "") + "<<<<<<<" + (" SEARCH" if m.group(2) else ""), s
-    )
-    s = CONFLICT_SEP_RE.sub(lambda m: (m.group(1) or "") + "=======", s)
-    s = CONFLICT_SEP_DASH_RE.sub(lambda m: (m.group(1) or "") + "-------", s)
-    s = CONFLICT_END_RE.sub(
-        lambda m: (m.group(1) or "") + ">>>>>>>" + (" REPLACE" if m.group(2) else ""), s
-    )
+    if any(c in s for c in ("<", "=", ">", "-", "—")):
+        s = CONFLICT_START_RE.sub(
+            lambda m: (m.group(1) or "") + "<<<<<<<" + (" SEARCH" if m.group(2) else ""), s
+        )
+        s = CONFLICT_SEP_RE.sub(lambda m: (m.group(1) or "") + "=======", s)
+        s = CONFLICT_SEP_DASH_RE.sub(lambda m: (m.group(1) or "") + "-------", s)
+        s = CONFLICT_END_RE.sub(
+            lambda m: (m.group(1) or "") + ">>>>>>>" + (" REPLACE" if m.group(2) else ""), s
+        )
+
     s = COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
     s = _remove_injected_fences(s)
     s = GOOGLE_SEARCH_LINK_PATTERN.sub(_strip_google_search_links, s)
