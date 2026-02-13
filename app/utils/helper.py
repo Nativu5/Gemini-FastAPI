@@ -414,6 +414,7 @@ def extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
             0xC5,
             0xC6,
             0xC7,
+            0xC9,
             0xCA,
             0xCB,
             0xCD,
