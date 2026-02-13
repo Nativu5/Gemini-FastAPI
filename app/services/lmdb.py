@@ -99,17 +99,17 @@ def _hash_message(message: Message, fuzzy: bool = False) -> str:
     if message.tool_calls:
         calls_data = []
         for tc in message.tool_calls:
-            args = tc.function.arguments or "{}"
+            params = tc.function.arguments or "{}"
             try:
-                parsed = orjson.loads(args)
-                canon_args = orjson.dumps(parsed, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+                parsed = orjson.loads(params)
+                canon_params = orjson.dumps(parsed, option=orjson.OPT_SORT_KEYS).decode("utf-8")
             except orjson.JSONDecodeError:
-                canon_args = args
+                canon_params = params
 
             calls_data.append(
                 {
                     "name": tc.function.name,
-                    "arguments": canon_args,
+                    "arguments": canon_params,
                 }
             )
         calls_data.sort(key=lambda x: (x["name"], x["arguments"]))
@@ -149,7 +149,7 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         Initialize LMDB store.
 
-        Args:
+        Params:
             db_path: Path to LMDB database directory
             max_db_size: Maximum database size in bytes (default: 256 MB)
             retention_days: Number of days to retain conversations (default: 14, 0 disables cleanup)
@@ -194,7 +194,7 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         Context manager for LMDB transactions.
 
-        Args:
+        Params:
             write: Whether the transaction should be writable.
         """
         if not self._env:
@@ -265,7 +265,7 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         Store a conversation model in LMDB.
 
-        Args:
+        Params:
             conv: Conversation model to store
             custom_key: Optional custom key, if not provided, hash will be used
 
@@ -313,7 +313,7 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         Retrieve conversation data by key.
 
-        Args:
+        Params:
             key: Storage key (hash or custom key)
 
         Returns:
@@ -342,7 +342,7 @@ class LMDBConversationStore(metaclass=Singleton):
         Search conversation data by message list.
         Tries raw matching, then sanitized matching, and finally fuzzy matching.
 
-        Args:
+        Params:
             model: Model name
             messages: List of messages to match
 
@@ -382,7 +382,7 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         Internal find implementation based on a message list.
 
-        Args:
+        Params:
             model: Model name
             messages: Message list to hash
             fuzzy: Whether to use fuzzy hashing
