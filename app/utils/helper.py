@@ -59,10 +59,10 @@ FILE_PATH_PATTERN = re.compile(
 GOOGLE_SEARCH_LINK_PATTERN = re.compile(
     r"`?\[`?(.+?)`?`?]\((https://www\.google\.com/search\?q=)([^)]*)\)`?"
 )
-CONFLICT_START_RE = re.compile(r"<(?:\s*<){6,}")
-CONFLICT_SEP_RE = re.compile(r"=(?:\s*=){6,}")
-CONFLICT_SEP_DASH_RE = re.compile(r"[-—](?:\s*[-—]){6,}")
-CONFLICT_END_RE = re.compile(r">(?:\s*>){6,}")
+CONFLICT_START_RE = re.compile(r"(\\?)\s*<\s*(?:<\s*){6,}")
+CONFLICT_SEP_RE = re.compile(r"(\\?)\s*=\s*(?:=\s*){6,}")
+CONFLICT_SEP_DASH_RE = re.compile(r"(\\?)\s*[-—]\s*(?:[-—]\s*){6,}")
+CONFLICT_END_RE = re.compile(r"(\\?)\s*>\s*(?:>\s*){6,}")
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
 TOOL_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
@@ -155,21 +155,24 @@ def _remove_injected_fences(s: str) -> str:
 def unescape_llm_text(s: str) -> str:
     """
     Standardize and repair LLM-generated text fragments.
+    These patches are specifically designed for complex clients like Roo Code to ensure
+    compatibility with their specialized tool protocols (e.g., apply_diff) which may be
+    mangled by Gemini Web's interface or browser auto-formatting.
 
     Sequence:
-    1. Reverse CommonMark escapes.
-    2. Restore git conflict markers broken by web processing.
+    1. Restore git conflict markers and DOUBLE any leading backslash to protect it.
+    2. Reverse CommonMark escapes (consuming one level of doubled backslashes).
     3. Strip injected anonymous code fences.
     4. Process and normalize Google Search links.
     """
     if not s:
         return ""
 
+    s = CONFLICT_START_RE.sub(r"\1\1<<<<<<<", s)
+    s = CONFLICT_SEP_RE.sub(r"\1\1=======", s)
+    s = CONFLICT_SEP_DASH_RE.sub(r"\1\1-------", s)
+    s = CONFLICT_END_RE.sub(r"\1\1>>>>>>>", s)
     s = COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
-    s = CONFLICT_START_RE.sub("<<<<<<<", s)
-    s = CONFLICT_SEP_RE.sub("=======", s)
-    s = CONFLICT_SEP_DASH_RE.sub("-------", s)
-    s = CONFLICT_END_RE.sub(">>>>>>>", s)
     s = _remove_injected_fences(s)
     s = GOOGLE_SEARCH_LINK_PATTERN.sub(_strip_google_search_links, s)
 
