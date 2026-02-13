@@ -8,7 +8,7 @@ import struct
 import tempfile
 import unicodedata
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 import orjson
@@ -56,8 +56,13 @@ FILE_PATH_PATTERN = re.compile(
     r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
     re.IGNORECASE,
 )
-GOOGLE_SEARCH_LINK_PATTERN = re.compile(
-    r"`?\[`?(.+?)`?`?]\((https://www\.google\.com/search\?q=)([^)]*)\)`?"
+GOOGLE_SEARCH_PATTERN = re.compile(
+    r"(?P<md_start>`?\[`?)?"
+    r"(?P<text>[^]]+)?"
+    r"(?(md_start)`?]\()?"
+    r"https://www\.google\.com/search\?q=(?P<query>[^&\s\"'<>)]+)"
+    r"(?(md_start)\)?`?)",
+    re.IGNORECASE,
 )
 CONFLICT_START_RE = re.compile(r"(\\?)\s*<\s*(?:<\s*){6,}(?:\s*(SEARCH)\b)?", re.IGNORECASE)
 CONFLICT_SEP_RE = re.compile(r"(\\?)\s*=(?:\s*=){6,}")
@@ -93,11 +98,13 @@ def normalize_llm_text(s: str) -> str:
     return s
 
 
-def _strip_google_search_links(match: re.Match) -> str:
-    """Extract local Markdown link from Google Search links if applicable."""
-    display_text = str(match.group(1)).strip()
-    if FILE_PATH_PATTERN.match(display_text):
-        return f"[`{display_text}`]({display_text})"
+def _strip_google_search(match: re.Match) -> str:
+    """Extract raw text from Google Search links if it looks like a file path."""
+    text_to_check = match.group("text") if match.group("text") else unquote(match.group("query"))
+    text_to_check = unquote(text_to_check.strip())
+
+    if FILE_PATH_PATTERN.match(text_to_check):
+        return text_to_check
     return match.group(0)
 
 
@@ -157,12 +164,6 @@ def unescape_llm_text(s: str) -> str:
     Standardize and repair LLM-generated text fragments for specialized client protocols.
     Designed to ensure compatibility with clients like Roo Code by fixing
     mangled conflict markers, escaping issues, and injected Markdown formatting.
-
-    Sequence:
-    1. Normalize git conflict markers (handles mangled spacing and keyword standardization).
-    2. Reverse CommonMark escapes (removes leading backslashes from structural markers).
-    3. Strip injected anonymous Markdown code fences.
-    4. Process and normalize Google Search links.
     """
     if not s:
         return ""
@@ -179,7 +180,7 @@ def unescape_llm_text(s: str) -> str:
 
     s = COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
     s = _remove_injected_fences(s)
-    s = GOOGLE_SEARCH_LINK_PATTERN.sub(_strip_google_search_links, s)
+    s = GOOGLE_SEARCH_PATTERN.sub(_strip_google_search, s)
 
     return s
 
@@ -413,7 +414,6 @@ def extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
             0xC5,
             0xC6,
             0xC7,
-            0xC9,
             0xCA,
             0xCB,
             0xCD,
