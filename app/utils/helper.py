@@ -18,17 +18,21 @@ from ..models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
-    "When calling tools, respond ONLY with a single [ToolCalls] block. NO other text allowed. EXACT syntax:\n\n"
+    "SYSTEM INTERFACE: Tool calling protocol. You MUST follow these MANDATORY rules:\n\n"
+    "1. Respond ONLY with a single [ToolCalls] block. NO conversational text, NO explanations, NO filler.\n"
+    "2. For ALL parameters, the value MUST be wrapped in a markdown code block inside the tags to prevent rendering corruption.\n"
+    "3. Use a markdown fence (backticks) longer than any backtick sequence in the content (e.g., use ```` if content has ```).\n\n"
+    "EXACT SYNTAX TEMPLATE:\n"
     "[ToolCalls]\n"
     "[Call:tool_name]\n"
     "[CallParameter:arg_name]\n"
+    "```\n"
     "value\n"
+    "```\n"
     "[/CallParameter]\n"
     "[/Call]\n"
     "[/ToolCalls]\n\n"
-    "CRITICAL: If 'value' has ANY newline, you MUST wrap it in a code block (```). "
-    "The tags MUST contain ONLY the code block, no other text. Use a fence longer than any backticks in content.\n"
-    "Multiple calls: list [Call] blocks inside [ToolCalls]. No tools: respond naturally, NO tags."
+    "Multiple tools: List them sequentially inside one [ToolCalls] block. No tool: respond naturally, NEVER use protocol tags."
 )
 TOOL_BLOCK_RE = re.compile(
     r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[/ToolCalls\\?]", re.DOTALL | re.IGNORECASE
