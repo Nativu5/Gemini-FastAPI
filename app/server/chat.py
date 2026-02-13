@@ -121,18 +121,18 @@ def _calculate_usage(
 ) -> tuple[int, int, int]:
     """Calculate prompt, completion and total tokens consistently."""
     prompt_tokens = sum(estimate_tokens(text_from_message(msg)) for msg in messages)
-    tool_params_text = ""
+    tool_args_text = ""
     if tool_calls:
         for call in tool_calls:
             if hasattr(call, "function"):
-                tool_params_text += call.function.arguments or ""
+                tool_args_text += call.function.arguments or ""
             elif isinstance(call, dict):
-                tool_params_text += call.get("function", {}).get("arguments", "")
+                tool_args_text += call.get("function", {}).get("arguments", "")
 
     completion_basis = assistant_text or ""
-    if tool_params_text:
+    if tool_args_text:
         completion_basis = (
-            f"{completion_basis}\n{tool_params_text}" if completion_basis else tool_params_text
+            f"{completion_basis}\n{tool_args_text}" if completion_basis else tool_args_text
         )
 
     completion_tokens = estimate_tokens(completion_basis)
@@ -343,7 +343,7 @@ def _build_tool_prompt(
     tools: list[Tool],
     tool_choice: str | ToolChoiceFunction | None,
 ) -> str:
-    """Generate a system prompt describing available tools and the snake_case protocol."""
+    """Generate a system prompt describing available tools and the PascalCase protocol."""
     if not tools:
         return ""
 
@@ -359,10 +359,10 @@ def _build_tool_prompt(
             schema_text = orjson.dumps(function.parameters, option=orjson.OPT_SORT_KEYS).decode(
                 "utf-8"
             )
-            lines.append("Parameters JSON schema:")
+            lines.append("Arguments JSON schema:")
             lines.append(schema_text)
         else:
-            lines.append("Parameters JSON schema: {}")
+            lines.append("Arguments JSON schema: {}")
 
     if tool_choice == "none":
         lines.append(
@@ -760,28 +760,28 @@ class StreamingOutputFilter:
 
         self.STATE_MARKERS = {
             "TOOL": {
-                "starts": ["[tool_calls]"],
-                "ends": ["[/tool_calls]"],
+                "starts": ["[ToolCalls]", "\\[ToolCalls\\]"],
+                "ends": ["[/ToolCalls]", "\\[/ToolCalls\\]"],
             },
             "ORPHAN": {
-                "starts": ["[call:"],
-                "ends": ["[/call]"],
+                "starts": ["[Call:", "\\[Call:", "\\[Call\\:"],
+                "ends": ["[/Call]", "\\[/Call\\]"],
             },
             "RESP": {
-                "starts": ["[tool_results]"],
-                "ends": ["[/tool_results]"],
+                "starts": ["[ToolResults]", "\\[ToolResults\\]"],
+                "ends": ["[/ToolResults]", "\\[/ToolResults\\]"],
             },
-            "PARAM": {
-                "starts": ["[call_parameter:"],
-                "ends": ["[/call_parameter]"],
+            "ARG": {
+                "starts": ["[CallParameter:", "\\[CallParameter:", "\\[CallParameter\\:"],
+                "ends": ["[/CallParameter]", "\\[/CallParameter\\]"],
             },
             "RESULT": {
-                "starts": ["[tool_result]"],
-                "ends": ["[/tool_result]"],
+                "starts": ["[ToolResult]", "\\[ToolResult\\]"],
+                "ends": ["[/ToolResult]", "\\[/ToolResult\\]"],
             },
             "TAG": {
-                "starts": ["<|im_start|>"],
-                "ends": ["<|im_end|>"],
+                "starts": ["<|im_start|>", "\\<|im\\_start|\\>"],
+                "ends": ["<|im_end|>", "\\<|im\\_end|\\>"],
             },
         }
 
@@ -794,10 +794,15 @@ class StreamingOutputFilter:
 
         self.ORPHAN_ENDS = [
             "<|im_end|>",
-            "[/call]",
-            "[/tool_calls]",
-            "[/call_parameter]",
-            "[/tool_result]",
+            "\\<|im\\_end|\\>",
+            "[/Call]",
+            "\\[/Call\\]",
+            "[/ToolCalls]",
+            "\\[/ToolCalls\\]",
+            "[/CallParameter]",
+            "\\[/CallParameter\\]",
+            "[/ToolResult]",
+            "\\[/ToolResult\\]",
         ]
 
         self.WATCH_MARKERS = []
@@ -871,8 +876,8 @@ class StreamingOutputFilter:
                         self.buffer = self.buffer[-max_end_len:]
                     break
 
-            elif self.state == "IN_PARAM":
-                cfg = self.STATE_MARKERS["PARAM"]
+            elif self.state == "IN_ARG":
+                cfg = self.STATE_MARKERS["ARG"]
                 found_idx, found_len = -1, 0
                 for p in cfg["ends"]:
                     idx = buf_low.find(p.lower())
@@ -998,7 +1003,7 @@ class StreamingOutputFilter:
     def flush(self) -> str:
         """Release remaining buffer content and perform final cleanup at stream end."""
         res = ""
-        if self.state in ("IN_TOOL", "IN_ORPHAN", "IN_RESP", "IN_HINT", "IN_PARAM", "IN_RESULT"):
+        if self.state in ("IN_TOOL", "IN_ORPHAN", "IN_RESP", "IN_HINT", "IN_ARG", "IN_RESULT"):
             res = ""
         elif self.state == "IN_BLOCK" and self.current_role != "tool":
             res = self.buffer

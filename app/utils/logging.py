@@ -15,7 +15,7 @@ def setup_logging(
     """
     Setup loguru logging configuration to unify all project logging output
 
-    Params:
+    Args:
         level: Log level
         diagnose: Whether to enable diagnostic information
         backtrace: Whether to enable backtrace information

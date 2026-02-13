@@ -19,45 +19,47 @@ from ..models import FunctionCall, Message, ToolCall
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
     "\n\nSYSTEM INTERFACE: Tool calling protocol. You MUST follow these MANDATORY rules:\n\n"
-    "1. Respond ONLY with a single [tool_calls] block. NO conversational text, NO explanations, NO filler.\n"
+    "1. Respond ONLY with a single [ToolCalls] block. NO conversational text, NO explanations, NO filler.\n"
     "2. For ALL parameters, the value MUST be entirely enclosed in a single markdown code block (start/end with backticks) inside the tags. NO text allowed outside this block.\n"
     "3. Use a markdown fence longer than any backtick sequence in the value (e.g., use ```` if value has ```).\n\n"
     "EXACT SYNTAX TEMPLATE:\n"
-    "[tool_calls]\n"
-    "[call:tool_name]\n"
-    "[call_parameter:parameter_name]\n"
+    "[ToolCalls]\n"
+    "[Call:tool_name]\n"
+    "[CallParameter:arg_name]\n"
     "```\n"
     "value\n"
     "```\n"
-    "[/call_parameter]\n"
-    "[/call]\n"
-    "[/tool_calls]\n\n"
+    "[/CallParameter]\n"
+    "[/Call]\n"
+    "[/ToolCalls]\n\n"
     "CRITICAL: Every tag MUST be opened and closed accurately.\n\n"
-    "Multiple tools: List them sequentially inside one [tool_calls] block. No tool: respond naturally, NEVER use protocol tags.\n"
+    "Multiple tools: List them sequentially inside one [ToolCalls] block. No tool: respond naturally, NEVER use protocol tags.\n"
 )
-TOOL_BLOCK_RE = re.compile(r"\[tool_calls]\s*(.*?)\s*\[/tool_calls]", re.DOTALL | re.IGNORECASE)
+TOOL_BLOCK_RE = re.compile(
+    r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[/ToolCalls\\?]", re.DOTALL | re.IGNORECASE
+)
 TOOL_CALL_RE = re.compile(
-    r"\[call:((?:[^]\\]|\\.)+)]\s*(.*?)\s*\[/call]", re.DOTALL | re.IGNORECASE
+    r"\\?\[Call\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/Call\\?]", re.DOTALL | re.IGNORECASE
 )
 RESPONSE_BLOCK_RE = re.compile(
-    r"\[tool_results]\s*(.*?)\s*\[/tool_results]",
+    r"\\?\[ToolResults\\?]\s*(.*?)\s*\\?\[/ToolResults\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_ITEM_RE = re.compile(
-    r"\[result:((?:[^]\\]|\\.)+)]\s*(.*?)\s*\[/result]",
+    r"\\?\[Result\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/Result\\?]",
     re.DOTALL | re.IGNORECASE,
 )
-TAGGED_PARAM_RE = re.compile(
-    r"\[call_parameter:((?:[^]\\]|\\.)+)]\s*(.*?)\s*\[/call_parameter]",
+TAGGED_ARG_RE = re.compile(
+    r"\\?\[CallParameter\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/CallParameter\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_RESULT_RE = re.compile(
-    r"\[tool_result]\s*(.*?)\s*\[/tool_result]",
+    r"\\?\[ToolResult\\?]\s*(.*?)\s*\\?\[/ToolResult\\?]",
     re.DOTALL | re.IGNORECASE,
 )
-CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>", re.IGNORECASE)
-CHATML_START_RE = re.compile(r"<\|im_start\|>\s*(\w+)\s*\n?", re.IGNORECASE)
-CHATML_END_RE = re.compile(r"<\|im_end\|>", re.IGNORECASE)
+CONTROL_TOKEN_RE = re.compile(r"\\?<\|im\\?_(?:start|end)\|\\?>", re.IGNORECASE)
+CHATML_START_RE = re.compile(r"\\?<\|im\\?_start\|\\?>\s*(\w+)\s*\n?", re.IGNORECASE)
+CHATML_END_RE = re.compile(r"\\?<\|im\\?_end\|\\?>", re.IGNORECASE)
 COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
 FILE_PATH_PATTERN = re.compile(
     r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
@@ -132,9 +134,9 @@ def _strip_param_fences(s: str) -> str:
     return s[n:-n].strip()
 
 
-def repair_param_value(s: str) -> str:
+def unescape_llm_text(s: str) -> str:
     """
-    Standardize and repair LLM-generated values (unescaping, link normalization)
+    Standardize and repair LLM-generated text fragments (unescaping, link normalization)
     to ensure compatibility with specialized clients like Roo Code.
     """
     if not s:
@@ -246,7 +248,7 @@ def strip_system_hints(text: str) -> str:
     cleaned = TOOL_CALL_RE.sub("", cleaned)
     cleaned = RESPONSE_BLOCK_RE.sub("", cleaned)
     cleaned = RESPONSE_ITEM_RE.sub("", cleaned)
-    cleaned = TAGGED_PARAM_RE.sub("", cleaned)
+    cleaned = TAGGED_ARG_RE.sub("", cleaned)
     cleaned = TAGGED_RESULT_RE.sub("", cleaned)
 
     return cleaned
@@ -255,39 +257,38 @@ def strip_system_hints(text: str) -> str:
 def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[ToolCall]]:
     """
     Extract tool metadata and return text stripped of technical markers.
-    Parameters are parsed into JSON and assigned deterministic call IDs.
+    Arguments are parsed into JSON and assigned deterministic call IDs.
     """
     if not text:
         return text, []
 
     tool_calls: list[ToolCall] = []
 
-    def _create_tool_call(name: str, raw_params: str) -> None:
+    def _create_tool_call(name: str, raw_args: str) -> None:
         if not extract:
             return
-
-        name = repair_param_value(name.strip())
-        raw_params = repair_param_value(raw_params)
-
         if not name:
             logger.warning("Encountered tool_call without a function name.")
             return
 
-        param_matches = TAGGED_PARAM_RE.findall(raw_params)
-        if param_matches:
-            params_dict = {
-                param_name.strip(): _strip_param_fences(param_value)
-                for param_name, param_value in param_matches
+        name = unescape_llm_text(name.strip())
+        raw_args = unescape_llm_text(raw_args)
+
+        arg_matches = TAGGED_ARG_RE.findall(raw_args)
+        if arg_matches:
+            args_dict = {
+                arg_name.strip(): _strip_param_fences(arg_value)
+                for arg_name, arg_value in arg_matches
             }
-            arguments = orjson.dumps(params_dict).decode("utf-8")
-            logger.debug(f"Successfully parsed {len(params_dict)} parameters for tool: {name}")
+            arguments = orjson.dumps(args_dict).decode("utf-8")
+            logger.debug(f"Successfully parsed {len(args_dict)} arguments for tool: {name}")
         else:
-            cleaned_raw = raw_params.strip()
+            cleaned_raw = raw_args.strip()
             if not cleaned_raw:
-                logger.debug(f"Successfully parsed 0 parameters for tool: {name}")
+                logger.debug(f"Successfully parsed 0 arguments for tool: {name}")
             else:
                 logger.warning(
-                    f"Malformed parameters for tool '{name}'. Text found but no valid tags: {reprlib.repr(cleaned_raw)}"
+                    f"Malformed arguments for tool '{name}'. Text found but no valid tags: {reprlib.repr(cleaned_raw)}"
                 )
             arguments = "{}"
 
@@ -322,7 +323,7 @@ def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
 
 
 def text_from_message(message: Message) -> str:
-    """Concatenate text and tool parameters from a message for token estimation."""
+    """Concatenate text and tool arguments from a message for token estimation."""
     base_text = ""
     if isinstance(message.content, str):
         base_text = message.content
@@ -334,8 +335,8 @@ def text_from_message(message: Message) -> str:
         base_text = ""
 
     if message.tool_calls:
-        tool_param_text = "".join(call.function.arguments or "" for call in message.tool_calls)
-        base_text = f"{base_text}\n{tool_param_text}" if base_text else tool_param_text
+        tool_arg_text = "".join(call.function.arguments or "" for call in message.tool_calls)
+        base_text = f"{base_text}\n{tool_arg_text}" if base_text else tool_arg_text
 
     return base_text
 
