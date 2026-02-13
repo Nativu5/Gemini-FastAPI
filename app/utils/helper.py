@@ -25,7 +25,7 @@ TOOL_WRAP_HINT = (
     "EXACT SYNTAX TEMPLATE:\n"
     "[ToolCalls]\n"
     "[Call:tool_name]\n"
-    "[CallParameter:arg_name]\n"
+    "[CallParameter:parameter_name]\n"
     "```\n"
     "value\n"
     "```\n"
