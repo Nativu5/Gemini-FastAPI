@@ -279,7 +279,7 @@ class LMDBConversationStore(metaclass=Singleton):
             raise ValueError("Messages list cannot be empty")
 
         # Ensure consistent sanitization before hashing and storage
-        sanitized_messages = self.sanitize_assistant_messages(conv.messages)
+        sanitized_messages = self.sanitize_messages(conv.messages)
         conv.messages = sanitized_messages
 
         message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
@@ -359,7 +359,7 @@ class LMDBConversationStore(metaclass=Singleton):
             logger.debug(f"Session found for '{model}' with {len(messages)} raw messages.")
             return conv
 
-        cleaned_messages = self.sanitize_assistant_messages(messages)
+        cleaned_messages = self.sanitize_messages(messages)
         if cleaned_messages != messages:
             if conv := self._find_by_message_list(model, cleaned_messages):
                 logger.debug(
