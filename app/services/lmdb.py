@@ -16,6 +16,8 @@ from ..utils.helper import (
     extract_tool_calls,
     normalize_llm_text,
     remove_tool_call_blocks,
+    strip_system_hints,
+    unescape_text,
 )
 from ..utils.singleton import Singleton
 
@@ -38,6 +40,7 @@ def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
         return None
 
     text = normalize_llm_text(text)
+    text = unescape_text(text)
 
     text = LMDBConversationStore.remove_think_tags(text)
     text = remove_tool_call_blocks(text)
@@ -589,63 +592,61 @@ class LMDBConversationStore(metaclass=Singleton):
         return cleaned_content.strip()
 
     @staticmethod
-    def sanitize_assistant_messages(messages: list[Message]) -> list[Message]:
-        """Clean assistant messages of internal markers and move tool calls to metadata."""
+    def sanitize_messages(messages: list[Message]) -> list[Message]:
+        """Clean all messages of internal markers, hints and normalize tool calls."""
         cleaned_messages = []
         for msg in messages:
-            if msg.role == "assistant":
-                if isinstance(msg.content, str):
-                    text = LMDBConversationStore.remove_think_tags(msg.content)
-                    tool_calls = msg.tool_calls
-                    if not tool_calls:
-                        text, tool_calls = extract_tool_calls(text)
-                    else:
-                        text = remove_tool_call_blocks(text).strip()
+            if isinstance(msg.content, str):
+                text = LMDBConversationStore.remove_think_tags(msg.content)
+                tool_calls = msg.tool_calls
 
-                    normalized_content = text.strip() or None
+                if msg.role == "assistant" and not tool_calls:
+                    text, tool_calls = extract_tool_calls(text)
+                else:
+                    text = strip_system_hints(text)
 
-                    if normalized_content != msg.content or tool_calls != msg.tool_calls:
-                        cleaned_msg = msg.model_copy(
+                normalized_content = text.strip() or None
+
+                if normalized_content != msg.content or tool_calls != msg.tool_calls:
+                    cleaned_msg = msg.model_copy(
+                        update={
+                            "content": normalized_content,
+                            "tool_calls": tool_calls or None,
+                        }
+                    )
+                    cleaned_messages.append(cleaned_msg)
+                else:
+                    cleaned_messages.append(msg)
+            elif isinstance(msg.content, list):
+                new_content = []
+                all_extracted_calls = list(msg.tool_calls or [])
+                changed = False
+
+                for item in msg.content:
+                    if isinstance(item, ContentItem) and item.type == "text" and item.text:
+                        text = LMDBConversationStore.remove_think_tags(item.text)
+                        if msg.role == "assistant" and not msg.tool_calls:
+                            text, extracted = extract_tool_calls(text)
+                            if extracted:
+                                all_extracted_calls.extend(extracted)
+                                changed = True
+                        else:
+                            text = strip_system_hints(text)
+
+                        if text != item.text:
+                            changed = True
+                            item = item.model_copy(update={"text": text.strip() or None})
+                    new_content.append(item)
+
+                if changed:
+                    cleaned_messages.append(
+                        msg.model_copy(
                             update={
-                                "content": normalized_content,
-                                "tool_calls": tool_calls or None,
+                                "content": new_content,
+                                "tool_calls": all_extracted_calls or None,
                             }
                         )
-                        cleaned_messages.append(cleaned_msg)
-                    else:
-                        cleaned_messages.append(msg)
-                elif isinstance(msg.content, list):
-                    new_content = []
-                    all_extracted_calls = list(msg.tool_calls or [])
-                    changed = False
-
-                    for item in msg.content:
-                        if isinstance(item, ContentItem) and item.type == "text" and item.text:
-                            text = LMDBConversationStore.remove_think_tags(item.text)
-                            if not msg.tool_calls:
-                                text, extracted = extract_tool_calls(text)
-                                if extracted:
-                                    all_extracted_calls.extend(extracted)
-                                    changed = True
-                            else:
-                                text = remove_tool_call_blocks(text).strip()
-
-                            if text != item.text:
-                                changed = True
-                                item = item.model_copy(update={"text": text.strip() or None})
-                        new_content.append(item)
-
-                    if changed:
-                        cleaned_messages.append(
-                            msg.model_copy(
-                                update={
-                                    "content": new_content,
-                                    "tool_calls": all_extracted_calls or None,
-                                }
-                            )
-                        )
-                    else:
-                        cleaned_messages.append(msg)
+                    )
                 else:
                     cleaned_messages.append(msg)
             else:

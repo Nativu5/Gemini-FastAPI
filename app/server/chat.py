@@ -270,7 +270,7 @@ def _persist_conversation(
             tool_calls=tool_calls or None,
         )
         full_history = [*messages, current_assistant_message]
-        cleaned_history = db.sanitize_assistant_messages(full_history)
+        cleaned_history = db.sanitize_messages(full_history)
 
         conv = ConversationInStore(
             model=model_name,
@@ -761,27 +761,31 @@ class StreamingOutputFilter:
         self.STATE_MARKERS = {
             "TOOL": {
                 "starts": ["[ToolCalls]", "\\[ToolCalls\\]"],
-                "ends": ["[/ToolCalls]", "\\[/ToolCalls\\]"],
+                "ends": ["[/ToolCalls]", "\\[\\/ToolCalls\\]"],
             },
             "ORPHAN": {
-                "starts": ["[Call:", "\\[Call:", "\\[Call\\:"],
-                "ends": ["[/Call]", "\\[/Call\\]"],
+                "starts": ["[Call:", "\\[Call\\:"],
+                "ends": ["[/Call]", "\\[\\/Call\\]"],
             },
             "RESP": {
                 "starts": ["[ToolResults]", "\\[ToolResults\\]"],
-                "ends": ["[/ToolResults]", "\\[/ToolResults\\]"],
+                "ends": ["[/ToolResults]", "\\[\\/ToolResults\\]"],
             },
             "ARG": {
-                "starts": ["[CallParameter:", "\\[CallParameter:", "\\[CallParameter\\:"],
-                "ends": ["[/CallParameter]", "\\[/CallParameter\\]"],
+                "starts": ["[CallParameter:", "\\[CallParameter\\:"],
+                "ends": ["[/CallParameter]", "\\[\\/CallParameter\\]"],
             },
             "RESULT": {
                 "starts": ["[ToolResult]", "\\[ToolResult\\]"],
-                "ends": ["[/ToolResult]", "\\[/ToolResult\\]"],
+                "ends": ["[/ToolResult]", "\\[\\/ToolResult\\]"],
+            },
+            "ITEM": {
+                "starts": ["[Result:", "\\[Result\\:"],
+                "ends": ["[/Result]", "\\[\\/Result\\]"],
             },
             "TAG": {
-                "starts": ["<|im_start|>", "\\<|im\\_start|\\>"],
-                "ends": ["<|im_end|>", "\\<|im\\_end|\\>"],
+                "starts": ["<|im_start|>", "\\<\\|im\\_start\\|\\>"],
+                "ends": ["<|im_end|>", "\\<\\|im\\_end\\|\\>"],
             },
         }
 
@@ -794,15 +798,19 @@ class StreamingOutputFilter:
 
         self.ORPHAN_ENDS = [
             "<|im_end|>",
-            "\\<|im\\_end|\\>",
+            "\\<\\|im\\_end\\|\\>",
             "[/Call]",
-            "\\[/Call\\]",
+            "\\[\\/Call\\]",
             "[/ToolCalls]",
-            "\\[/ToolCalls\\]",
+            "\\[\\/ToolCalls\\]",
             "[/CallParameter]",
-            "\\[/CallParameter\\]",
+            "\\[\\/CallParameter\\]",
             "[/ToolResult]",
-            "\\[/ToolResult\\]",
+            "\\[\\/ToolResult\\]",
+            "[/ToolResults]",
+            "\\[\\/ToolResults\\]",
+            "[/Result]",
+            "\\[\\/Result\\]",
         ]
 
         self.WATCH_MARKERS = []

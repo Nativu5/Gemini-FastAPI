@@ -36,30 +36,36 @@ TOOL_WRAP_HINT = (
     "Multiple tools: List them sequentially inside one [ToolCalls] block. No tool: respond naturally, NEVER use protocol tags.\n"
 )
 TOOL_BLOCK_RE = re.compile(
-    r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[/ToolCalls\\?]", re.DOTALL | re.IGNORECASE
+    r"(?:\[ToolCalls]|\\\[ToolCalls\\])\s*(.*?)\s*(?:\[/ToolCalls]|\\\[\\/ToolCalls\\])",
+    re.DOTALL | re.IGNORECASE,
 )
 TOOL_CALL_RE = re.compile(
-    r"\\?\[Call\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/Call\\?]", re.DOTALL | re.IGNORECASE
+    r"(?:\[Call:|\\\[Call\\:)(?P<name>(?:[^]\\]|\\.)+)(?:]|\\])\s*(?P<body>.*?)\s*(?:\[/Call]|\\\[\\/Call\\])",
+    re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_BLOCK_RE = re.compile(
-    r"\\?\[ToolResults\\?]\s*(.*?)\s*\\?\[/ToolResults\\?]",
+    r"(?:\[ToolResults]|\\\[ToolResults\\])\s*(.*?)\s*(?:\[/ToolResults]|\\\[\\/ToolResults\\])",
     re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_ITEM_RE = re.compile(
-    r"\\?\[Result\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/Result\\?]",
+    r"(?:\[Result:|\\\[Result\\:)(?P<name>(?:[^]\\]|\\.)+)(?:]|\\])\s*(?P<body>.*?)\s*(?:\[/Result]|\\\[\\/Result\\])",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_ARG_RE = re.compile(
-    r"\\?\[CallParameter\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/CallParameter\\?]",
+    r"(?:\[CallParameter:|\\\[CallParameter\\:)(?P<name>(?:[^]\\]|\\.)+)(?:]|\\])\s*(?P<body>.*?)\s*(?:\[/CallParameter]|\\\[\\/CallParameter\\])",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_RESULT_RE = re.compile(
-    r"\\?\[ToolResult\\?]\s*(.*?)\s*\\?\[/ToolResult\\?]",
+    r"(?:\[ToolResult]|\\\[ToolResult\\])\s*(.*?)\s*(?:\[/ToolResult]|\\\[\\/ToolResult\\])",
     re.DOTALL | re.IGNORECASE,
 )
-CONTROL_TOKEN_RE = re.compile(r"\\?<\|im\\?_(?:start|end)\|\\?>", re.IGNORECASE)
-CHATML_START_RE = re.compile(r"\\?<\|im\\?_start\|\\?>\s*(\w+)\s*\n?", re.IGNORECASE)
-CHATML_END_RE = re.compile(r"\\?<\|im\\?_end\|\\?>", re.IGNORECASE)
+CONTROL_TOKEN_RE = re.compile(
+    r"<\|im_(?:start|end)\|>|\\<\\\|im\\_(?:start|end)\\\|\\>", re.IGNORECASE
+)
+CHATML_START_RE = re.compile(
+    r"(?:<\|im_start\|>|\\<\\\|im\\_start\\\|\\>)\s*(\w+)\s*\n?", re.IGNORECASE
+)
+CHATML_END_RE = re.compile(r"<\|im_end\|>|\\<\\\|im\\_end\\\|\\>", re.IGNORECASE)
 COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
 FILE_PATH_PATTERN = re.compile(
     r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
@@ -101,6 +107,13 @@ def normalize_llm_text(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
 
     return s
+
+
+def unescape_text(s: str) -> str:
+    """Remove CommonMark backslash escapes."""
+    if not s:
+        return ""
+    return COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
 
 
 def _strip_google_search(match: re.Match) -> str:
@@ -231,7 +244,9 @@ def strip_system_hints(text: str) -> str:
     if not text:
         return text
 
-    cleaned = text.replace(TOOL_WRAP_HINT, "").replace(TOOL_HINT_STRIPPED, "")
+    t_unescaped = unescape_text(text)
+
+    cleaned = t_unescaped.replace(TOOL_WRAP_HINT, "").replace(TOOL_HINT_STRIPPED, "")
 
     if TOOL_HINT_LINE_START and TOOL_HINT_LINE_END:
         pattern = rf"\n?{re.escape(TOOL_HINT_LINE_START)}.*?{re.escape(TOOL_HINT_LINE_END)}\.?\n?"
