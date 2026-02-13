@@ -18,13 +18,15 @@ from ..models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
-    "\nWhen calling tools, use this EXACT protocol:\n"
+    "When calling tools, you MUST respond ONLY with a single [ToolCalls] block using this EXACT syntax:\n"
     "[ToolCalls]\n"
     "[Call:tool_name]\n"
-    "[CallParameter:arg_name]value[/CallParameter]\n"
+    "[CallParameter:arg_name]\n"
+    "value\n"
+    "[/CallParameter]\n"
     "[/Call]\n"
     "[/ToolCalls]\n"
-    "CRITICAL: Wrap ALL multi-line or complex values in a markdown code block (e.g., [CallParameter:arg_name]```\nvalue\n```[/CallParameter]) to prevent rendering corruption.\n"
+    "CRITICAL: If 'value' is multi-line or complex, you MUST wrap it in a markdown code block within the tags (use a fence longer than any backtick sequence in the content) to prevent rendering corruption.\n"
 )
 TOOL_BLOCK_RE = re.compile(
     r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[/ToolCalls\\?]", re.DOTALL | re.IGNORECASE
