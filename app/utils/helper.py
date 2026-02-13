@@ -58,6 +58,7 @@ TAGGED_RESULT_RE = re.compile(
 CONTROL_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>", re.IGNORECASE)
 CHATML_START_RE = re.compile(r"<\|im_start\|>\s*(\w+)\s*\n?", re.IGNORECASE)
 CHATML_END_RE = re.compile(r"<\|im_end\|>", re.IGNORECASE)
+COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
 FILE_PATH_PATTERN = re.compile(
     r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
     re.IGNORECASE,
@@ -131,14 +132,15 @@ def _strip_param_fences(s: str) -> str:
     return s[n:-n].strip()
 
 
-def _repair_param_value(s: str) -> str:
+def repair_param_value(s: str) -> str:
     """
-    Standardize and repair LLM-generated parameter values
+    Standardize and repair LLM-generated values (unescaping, link normalization)
     to ensure compatibility with specialized clients like Roo Code.
     """
     if not s:
         return ""
 
+    s = COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
     s = GOOGLE_SEARCH_PATTERN.sub(_strip_google_search, s)
 
     return s
@@ -264,7 +266,9 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         if not extract:
             return
 
-        name = name.strip()
+        name = repair_param_value(name.strip())
+        raw_params = repair_param_value(raw_params)
+
         if not name:
             logger.warning("Encountered tool_call without a function name.")
             return
@@ -272,7 +276,7 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         param_matches = TAGGED_PARAM_RE.findall(raw_params)
         if param_matches:
             params_dict = {
-                param_name.strip(): _repair_param_value(_strip_param_fences(param_value))
+                param_name.strip(): _strip_param_fences(param_value)
                 for param_name, param_value in param_matches
             }
             arguments = orjson.dumps(params_dict).decode("utf-8")

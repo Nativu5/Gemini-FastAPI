@@ -125,7 +125,6 @@ class GeminiClientWrapper(GeminiClient):
                     if isinstance(parsed_params, dict):
                         for k, v in parsed_params.items():
                             val_str = v if isinstance(v, str) else orjson.dumps(v).decode("utf-8")
-                            # Wrap value in triple backticks to match the required protocol hint
                             formatted_params += (
                                 f"[call_parameter:{k}]\n```\n{val_str}\n```\n[/call_parameter]\n"
                             )
