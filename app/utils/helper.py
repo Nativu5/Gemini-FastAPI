@@ -18,7 +18,7 @@ from ..models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
-    "SYSTEM INTERFACE: Tool calling protocol. You MUST follow these MANDATORY rules:\n\n"
+    "\n\nSYSTEM INTERFACE: Tool calling protocol. You MUST follow these MANDATORY rules:\n\n"
     "1. Respond ONLY with a single [ToolCalls] block. NO conversational text, NO explanations, NO filler.\n"
     "2. For ALL parameters, the value MUST be wrapped in a markdown code block inside the tags to prevent rendering corruption.\n"
     "3. Use a markdown fence (backticks) longer than any backtick sequence in the content (e.g., use ```` if content has ```).\n\n"
@@ -32,7 +32,7 @@ TOOL_WRAP_HINT = (
     "[/CallParameter]\n"
     "[/Call]\n"
     "[/ToolCalls]\n\n"
-    "Multiple tools: List them sequentially inside one [ToolCalls] block. No tool: respond naturally, NEVER use protocol tags."
+    "Multiple tools: List them sequentially inside one [ToolCalls] block. No tool: respond naturally, NEVER use protocol tags.\n"
 )
 TOOL_BLOCK_RE = re.compile(
     r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[/ToolCalls\\?]", re.DOTALL | re.IGNORECASE

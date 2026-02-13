@@ -378,7 +378,7 @@ def _build_tool_prompt(
             f"You are required to call the tool named `{target}`. Do not call any other tool."
         )
 
-    lines.append(TOOL_WRAP_HINT.strip())
+    lines.append(TOOL_WRAP_HINT)
 
     return "\n".join(lines)
 
