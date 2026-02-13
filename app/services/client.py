@@ -70,8 +70,8 @@ class GeminiClientWrapper(GeminiClient):
         message: Message, tempdir: Path | None = None, tagged: bool = True, wrap_tool: bool = True
     ) -> tuple[str, list[Path | str]]:
         """
-        Process a Message into Gemini API format using the PascalCase technical protocol.
-        Extracts text, handles files, and appends ToolCalls/ToolResults blocks.
+        Process a Message into Gemini API format using the snake_case technical protocol.
+        Extracts text, handles files, and appends tool_calls/tool_results blocks.
         """
         files: list[Path | str] = []
         text_fragments: list[str] = []
@@ -109,11 +109,9 @@ class GeminiClientWrapper(GeminiClient):
         if message.role == "tool":
             tool_name = message.name or "unknown"
             combined_content = "\n".join(text_fragments).strip()
-            res_block = (
-                f"[Result:{tool_name}]\n[ToolResult]\n{combined_content}\n[/ToolResult]\n[/Result]"
-            )
+            res_block = f"[result:{tool_name}]\n[tool_result]\n{combined_content}\n[/tool_result]\n[/result]"
             if wrap_tool:
-                text_fragments = [f"[ToolResults]\n{res_block}\n[/ToolResults]"]
+                text_fragments = [f"[tool_results]\n{res_block}\n[/tool_results]"]
             else:
                 text_fragments = [res_block]
 
@@ -130,18 +128,16 @@ class GeminiClientWrapper(GeminiClient):
                                 val_str = (
                                     v if isinstance(v, str) else orjson.dumps(v).decode("utf-8")
                                 )
-                                formatted_params += (
-                                    f"[CallParameter:{k}]\n```\n{val_str}\n```\n[/CallParameter]\n"
-                                )
+                                formatted_params += f"[call_parameter:{k}]\n```\n{val_str}\n```\n[/call_parameter]\n"
                         else:
                             formatted_params += f"```\n{params_text}\n```\n"
                     except orjson.JSONDecodeError:
                         formatted_params += f"```\n{params_text}\n```\n"
 
-                tool_blocks.append(f"[Call:{call.function.name}]\n{formatted_params}[/Call]")
+                tool_blocks.append(f"[call:{call.function.name}]\n{formatted_params}[/call]")
 
             if tool_blocks:
-                tool_section = "[ToolCalls]\n" + "\n".join(tool_blocks) + "\n[/ToolCalls]"
+                tool_section = "[tool_calls]\n" + "\n".join(tool_blocks) + "\n[/tool_calls]"
                 text_fragments.append(tool_section)
 
         model_input = "\n".join(fragment for fragment in text_fragments if fragment is not None)
@@ -173,7 +169,7 @@ class GeminiClientWrapper(GeminiClient):
                     i += 1
 
                 combined_tool_content = "\n".join(tool_blocks)
-                wrapped_content = f"[ToolResults]\n{combined_tool_content}\n[/ToolResults]"
+                wrapped_content = f"[tool_results]\n{combined_tool_content}\n[/tool_results]"
                 conversation.append(add_tag("tool", wrapped_content))
             else:
                 input_part, files_part = await GeminiClientWrapper.process_message(

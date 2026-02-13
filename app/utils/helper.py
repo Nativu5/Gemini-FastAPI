@@ -19,47 +19,53 @@ from ..models import FunctionCall, Message, ToolCall
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
     "\n\nSYSTEM INTERFACE: Tool calling protocol. You MUST follow these MANDATORY rules:\n\n"
-    "1. Respond ONLY with a single [ToolCalls] block. NO conversational text, NO explanations, NO filler.\n"
+    "1. Respond ONLY with a single [tool_calls] block. NO conversational text, NO explanations, NO filler.\n"
     "2. For ALL parameters, the value MUST be entirely enclosed in a single markdown code block (start/end with backticks) inside the tags. NO text allowed outside this block.\n"
     "3. Use a markdown fence longer than any backtick sequence in the value (e.g., use ```` if value has ```).\n\n"
     "EXACT SYNTAX TEMPLATE:\n"
-    "[ToolCalls]\n"
-    "[Call:tool_name]\n"
-    "[CallParameter:parameter_name]\n"
+    "[tool_calls]\n"
+    "[call:tool_name]\n"
+    "[call_parameter:parameter_name]\n"
     "```\n"
     "value\n"
     "```\n"
-    "[/CallParameter]\n"
-    "[/Call]\n"
-    "[/ToolCalls]\n\n"
+    "[/call_parameter]\n"
+    "[/call]\n"
+    "[/tool_calls]\n\n"
     "CRITICAL: Every tag MUST be opened and closed accurately.\n\n"
-    "Multiple tools: List them sequentially inside one [ToolCalls] block. No tool: respond naturally, NEVER use protocol tags.\n"
+    "Multiple tools: List them sequentially inside one [tool_calls] block. No tool: respond naturally, NEVER use protocol tags.\n"
 )
 TOOL_BLOCK_RE = re.compile(
-    r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[/ToolCalls\\?]", re.DOTALL | re.IGNORECASE
+    r"(?:\[tool_calls]|\\\[tool\\_calls\\])\s*(.*?)\s*(?:\[/tool_calls]|\\\[\\/tool\\_calls\\])",
+    re.DOTALL | re.IGNORECASE,
 )
 TOOL_CALL_RE = re.compile(
-    r"\\?\[Call\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/Call\\?]", re.DOTALL | re.IGNORECASE
+    r"(?:\[call:|\\\[call\\:)(?P<name>(?:[^]\\]|\\.)+)(?:]|\\])\s*(?P<body>.*?)\s*(?:\[/call]|\\\[\\/call\\])",
+    re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_BLOCK_RE = re.compile(
-    r"\\?\[ToolResults\\?]\s*(.*?)\s*\\?\[/ToolResults\\?]",
+    r"(?:\[tool_results]|\\\[tool\\_results\\])\s*(.*?)\s*(?:\[/tool_results]|\\\[\\/tool\\_results\\])",
     re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_ITEM_RE = re.compile(
-    r"\\?\[Result\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/Result\\?]",
+    r"(?:\[result:|\\\[result\\:)(?P<name>(?:[^]\\]|\\.)+)(?:]|\\])\s*(?P<body>.*?)\s*(?:\[/result]|\\\[\\/result\\])",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_ARG_RE = re.compile(
-    r"\\?\[CallParameter\\?:((?:[^]\\]|\\.)+)\\?]\s*(.*?)\s*\\?\[/CallParameter\\?]",
+    r"(?:\[call_parameter:|\\\[call\\_parameter\\:)(?P<name>(?:[^]\\]|\\.)+)(?:]|\\])\s*(?P<body>.*?)\s*(?:\[/call_parameter]|\\\[\\/call\\_parameter\\])",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_RESULT_RE = re.compile(
-    r"\\?\[ToolResult\\?]\s*(.*?)\s*\\?\[/ToolResult\\?]",
+    r"(?:\[tool_result]|\\\[tool\\_result\\])\s*(.*?)\s*(?:\[/tool_result]|\\\[\\/tool\\_result\\])",
     re.DOTALL | re.IGNORECASE,
 )
-CONTROL_TOKEN_RE = re.compile(r"\\?<\|im\\?_(?:start|end)\|\\?>", re.IGNORECASE)
-CHATML_START_RE = re.compile(r"\\?<\|im\\?_start\|\\?>\s*(\w+)\s*\n?", re.IGNORECASE)
-CHATML_END_RE = re.compile(r"\\?<\|im\\?_end\|\\?>", re.IGNORECASE)
+CONTROL_TOKEN_RE = re.compile(
+    r"<\|im_(?:start|end)\|>|\\<\\\|im\\_(?:start|end)\\\|\\>", re.IGNORECASE
+)
+CHATML_START_RE = re.compile(
+    r"(?:<\|im_start\|>|\\<\\\|im\\_start\\\|\\>)\s*(\w+)\s*\n?", re.IGNORECASE
+)
+CHATML_END_RE = re.compile(r"<\|im_end\|>|\\<\\\|im\\_end\\\|\\>", re.IGNORECASE)
 COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
 FILE_PATH_PATTERN = re.compile(
     r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
