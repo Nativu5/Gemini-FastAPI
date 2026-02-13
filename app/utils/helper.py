@@ -18,7 +18,7 @@ from ..models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
-    "When calling tools, you MUST respond ONLY with a single [ToolCalls] block using this EXACT syntax:\n\n"
+    "When calling tools, respond ONLY with a single [ToolCalls] block. NO other text allowed. EXACT syntax:\n\n"
     "[ToolCalls]\n"
     "[Call:tool_name]\n"
     "[CallParameter:arg_name]\n"
@@ -26,11 +26,9 @@ TOOL_WRAP_HINT = (
     "[/CallParameter]\n"
     "[/Call]\n"
     "[/ToolCalls]\n\n"
-    "CRITICAL: If 'value' contains ANY newlines or special characters, you MUST wrap it in a markdown code block (triple backticks or longer) within the tags. "
-    "Failure to wrap multi-line content will result in a protocol rejection. Use a fence longer than any backtick sequence in the content.\n\n"
-    "Multiple tool calls MUST be listed sequentially within the same [ToolCalls] block.\n"
-    "If no tool is needed, respond naturally and NEVER use any [ToolCalls] or [Call] tags.\n"
-    "Note: Tool results are returned in [ToolResults] blocks."
+    "CRITICAL: If 'value' has ANY newline, you MUST wrap it in a code block (```). "
+    "The tags MUST contain ONLY the code block, no other text. Use a fence longer than any backticks in content.\n"
+    "Multiple calls: list [Call] blocks inside [ToolCalls]. No tools: respond naturally, NO tags."
 )
 TOOL_BLOCK_RE = re.compile(
     r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[/ToolCalls\\?]", re.DOTALL | re.IGNORECASE
