@@ -18,13 +18,13 @@ from ..models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
-    "\nWhen you decide to call tools, you MUST respond ONLY with a single [ToolCalls] block using this EXACT syntax:\n"
+    "\nWhen calling tools, use this EXACT protocol:\n"
     "[ToolCalls]\n"
     "[Call:tool_name]\n"
     "[CallParameter:arg_name]value[/CallParameter]\n"
     "[/Call]\n"
     "[/ToolCalls]\n"
-    "CRITICAL: Every argument MUST be enclosed in [CallParameter:arg_name]...[/CallParameter]. Output as RAW text. Content inside tags can be any format.\n"
+    "CRITICAL: Wrap ALL multi-line or complex values in a markdown code block (e.g., [CallParameter:arg_name]```\nvalue\n```[/CallParameter]) to prevent rendering corruption.\n"
 )
 TOOL_BLOCK_RE = re.compile(
     r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[/ToolCalls\\?]", re.DOTALL | re.IGNORECASE
@@ -64,10 +64,6 @@ GOOGLE_SEARCH_PATTERN = re.compile(
     r"(?(md_start)\)?`?)",
     re.IGNORECASE,
 )
-CONFLICT_START_RE = re.compile(r"(\\?)\s*<\s*(?:<\s*){6,}(?:\s*(SEARCH)\b)?", re.IGNORECASE)
-CONFLICT_SEP_RE = re.compile(r"(\\?)\s*=(?:\s*=){6,}")
-CONFLICT_SEP_DASH_RE = re.compile(r"(\\?)\s*[-—](?:\s*[-—]){6,}")
-CONFLICT_END_RE = re.compile(r"(\\?)\s*>\s*(?:>\s*){6,}(?:\s*(REPLACE)\b)?", re.IGNORECASE)
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
 TOOL_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
@@ -108,78 +104,36 @@ def _strip_google_search(match: re.Match) -> str:
     return match.group(0)
 
 
-def _remove_injected_fences(s: str) -> str:
+def _strip_param_fences(s: str) -> str:
     """
-    Strip anonymous Markdown code fences often injected by LLMs around
-    responses or tool calls, while preserving named blocks and all internal content.
+    Remove one layer of outermost Markdown code fences,
+    supporting nested blocks by detecting variable fence lengths.
     """
+    s = s.strip()
     if not s:
         return ""
 
+    match = re.match(r"^(?P<fence>`{3,})", s)
+    if not match or not s.endswith(match.group("fence")):
+        return s
+
     lines = s.splitlines()
-    out = []
-    in_fence = False
-    fence_len = 0
-    is_anonymous = False
+    if len(lines) >= 2:
+        return "\n".join(lines[1:-1])
 
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            count = 0
-            for char in stripped:
-                if char == "`":
-                    count += 1
-                else:
-                    break
-
-            lang = stripped[count:].strip()
-
-            if not in_fence:
-                in_fence = True
-                fence_len = count
-                is_anonymous = not lang
-                if not is_anonymous:
-                    out.append(line)
-                continue
-
-            if count >= fence_len:
-                if is_anonymous and lang:
-                    out.append(line)
-                    continue
-
-                if not is_anonymous:
-                    out.append(line)
-                in_fence = False
-                is_anonymous = False
-                fence_len = 0
-                continue
-
-        out.append(line)
-
-    return "\n".join(out)
+    n = len(match.group("fence"))
+    return s[n:-n].strip()
 
 
 def unescape_llm_text(s: str) -> str:
     """
-    Standardize and repair LLM-generated text fragments for specialized client protocols.
-    Designed to ensure compatibility with clients like Roo Code by fixing
-    mangled conflict markers, escaping issues, and injected Markdown formatting.
+    Standardize and repair LLM-generated text fragments (unescaping, link normalization)
+    to ensure compatibility with specialized clients like Roo Code.
     """
     if not s:
         return ""
 
-    if any(c in s for c in ("<", "=", ">", "-", "—")):
-        s = CONFLICT_START_RE.sub(
-            lambda m: (m.group(1) or "") + "<<<<<<<" + (" SEARCH" if m.group(2) else ""), s
-        )
-        s = CONFLICT_SEP_RE.sub(lambda m: (m.group(1) or "") + "=======", s)
-        s = CONFLICT_SEP_DASH_RE.sub(lambda m: (m.group(1) or "") + "-------", s)
-        s = CONFLICT_END_RE.sub(
-            lambda m: (m.group(1) or "") + ">>>>>>>" + (" REPLACE" if m.group(2) else ""), s
-        )
-
     s = COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
-    s = _remove_injected_fences(s)
     s = GOOGLE_SEARCH_PATTERN.sub(_strip_google_search, s)
 
     return s
@@ -196,13 +150,11 @@ async def save_file_to_tempfile(
     file_in_base64: str, file_name: str = "", tempdir: Path | None = None
 ) -> Path:
     """Decode base64 file data and save to a temporary file."""
-    data = base64.b64decode(file_in_base64)
-    suffix = Path(file_name).suffix if file_name else ".bin"
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=tempdir) as tmp:
-        tmp.write(data)
+    with tempfile.NamedTemporaryFile(
+        delete=False, suffix=Path(file_name).suffix if file_name else ".bin", dir=tempdir
+    ) as tmp:
+        tmp.write(base64.b64decode(file_in_base64))
         path = Path(tmp.name)
-
     return path
 
 
@@ -213,35 +165,22 @@ async def save_url_to_tempfile(url: str, tempdir: Path | None = None) -> Path:
     if url.startswith("data:image/"):
         metadata_part = url.split(",")[0]
         mime_type = metadata_part.split(":")[1].split(";")[0]
-
-        base64_data = url.split(",")[1]
-        data = base64.b64decode(base64_data)
-
-        suffix = mimetypes.guess_extension(mime_type)
-        if not suffix:
-            suffix = f".{mime_type.split('/')[1]}"
+        data = base64.b64decode(url.split(",")[1])
+        suffix = mimetypes.guess_extension(mime_type) or f".{mime_type.split('/')[1]}"
     else:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             data = resp.content
             content_type = resp.headers.get("content-type")
-
             if content_type:
-                mime_type = content_type.split(";")[0].strip()
-                suffix = mimetypes.guess_extension(mime_type)
-
+                suffix = mimetypes.guess_extension(content_type.split(";")[0].strip())
             if not suffix:
-                path_url = urlparse(url).path
-                suffix = Path(path_url).suffix
-
-            if not suffix:
-                suffix = ".bin"
+                suffix = Path(urlparse(url).path).suffix or ".bin"
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=tempdir) as tmp:
         tmp.write(data)
         path = Path(tmp.name)
-
     return path
 
 
@@ -249,7 +188,6 @@ def strip_tagged_blocks(text: str) -> str:
     """
     Remove ChatML role blocks (<|im_start|>role...<|im_end|>).
     Role 'tool' blocks are removed entirely; others have markers stripped but content preserved.
-    Handles both raw and escaped markers consistently.
     """
     if not text:
         return text
@@ -274,7 +212,6 @@ def strip_tagged_blocks(text: str) -> str:
 
         if role != "tool":
             result.append(text[content_start : match_end.start()])
-
         idx = match_end.end()
 
     return "".join(result)
@@ -297,7 +234,6 @@ def strip_system_hints(text: str) -> str:
         cleaned = re.sub(rf"\s*{re.escape(TOOL_HINT_LINE_END)}\.?\n?", "", cleaned)
 
     cleaned = strip_tagged_blocks(cleaned)
-
     cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
     cleaned = TOOL_BLOCK_RE.sub("", cleaned)
     cleaned = TOOL_CALL_RE.sub("", cleaned)
@@ -331,7 +267,10 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
 
         arg_matches = TAGGED_ARG_RE.findall(raw_args)
         if arg_matches:
-            args_dict = {arg_name.strip(): arg_value.strip() for arg_name, arg_value in arg_matches}
+            args_dict = {
+                arg_name.strip(): _strip_param_fences(arg_value)
+                for arg_name, arg_value in arg_matches
+            }
             arguments = orjson.dumps(args_dict).decode("utf-8")
             logger.debug(f"Successfully parsed {len(args_dict)} arguments for tool: {name}")
         else:
@@ -360,7 +299,6 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         _create_tool_call(match.group(1), match.group(2))
 
     cleaned = strip_system_hints(text)
-
     return cleaned, tool_calls
 
 
@@ -406,21 +344,7 @@ def extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
     if len(data) >= 4 and data[0:2] == b"\xff\xd8":
         idx = 2
         length = len(data)
-        sof_markers = {
-            0xC0,
-            0xC1,
-            0xC2,
-            0xC3,
-            0xC5,
-            0xC6,
-            0xC7,
-            0xC9,
-            0xCA,
-            0xCB,
-            0xCD,
-            0xCE,
-            0xCF,
-        }
+        sof_markers = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
         while idx < length:
             if data[idx] != 0xFF:
                 idx += 1
@@ -431,26 +355,21 @@ def extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
                 break
             marker = data[idx]
             idx += 1
-
             if marker in (0xD8, 0xD9, 0x01) or 0xD0 <= marker <= 0xD7:
                 continue
-
             if idx + 1 >= length:
                 break
             segment_length = (data[idx] << 8) + data[idx + 1]
             idx += 2
             if segment_length < 2:
                 break
-
             if marker in sof_markers:
                 if idx + 4 < length:
                     height = (data[idx + 1] << 8) + data[idx + 2]
                     width = (data[idx + 3] << 8) + data[idx + 4]
                     return int(width), int(height)
                 break
-
             idx += segment_length - 2
-
     return None, None
 
 

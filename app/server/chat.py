@@ -378,17 +378,7 @@ def _build_tool_prompt(
             f"You are required to call the tool named `{target}`. Do not call any other tool."
         )
 
-    lines.append(
-        "When you decide to call tools, you MUST respond ONLY with a single [ToolCalls] block using this EXACT syntax:"
-    )
-    lines.append("[ToolCalls]")
-    lines.append("[Call:tool_name]")
-    lines.append("[CallParameter:arg_name]value[/CallParameter]")
-    lines.append("[/Call]")
-    lines.append("[/ToolCalls]")
-    lines.append(
-        "CRITICAL: Every argument MUST be enclosed in [CallParameter:arg_name]...[/CallParameter]. Output as RAW text. Content inside tags can be any format."
-    )
+    lines.append(TOOL_WRAP_HINT.strip())
     lines.append(
         "If multiple tools are needed, list them sequentially within the same [ToolCalls] block."
     )
