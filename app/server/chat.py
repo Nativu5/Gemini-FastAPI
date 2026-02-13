@@ -379,15 +379,6 @@ def _build_tool_prompt(
         )
 
     lines.append(TOOL_WRAP_HINT.strip())
-    lines.append(
-        "If multiple tools are needed, list them sequentially within the same [ToolCalls] block."
-    )
-    lines.append(
-        "If no tool call is needed, provide a normal response and NEVER use the [ToolCalls] tag."
-    )
-    lines.append(
-        "Note: Tool results are returned in a [ToolResults] block using [ToolResult] tags."
-    )
 
     return "\n".join(lines)
 
