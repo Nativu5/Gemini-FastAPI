@@ -59,10 +59,10 @@ FILE_PATH_PATTERN = re.compile(
 GOOGLE_SEARCH_LINK_PATTERN = re.compile(
     r"`?\[`?(.+?)`?`?]\((https://www\.google\.com/search\?q=)([^)]*)\)`?"
 )
-CONFLICT_START_RE = re.compile(r"(\\?)\s*<\s*(?:<\s*){6,}")
-CONFLICT_SEP_RE = re.compile(r"=(?:\s*=){6,}")
-CONFLICT_SEP_DASH_RE = re.compile(r"[-—](?:\s*[-—]){6,}")
-CONFLICT_END_RE = re.compile(r"(\\?)\s*>\s*(?:>\s*){6,}")
+CONFLICT_START_RE = re.compile(r"(\\?)\s*<\s*(?:<\s*){6,}(?:\s*(SEARCH)\b)?", re.IGNORECASE)
+CONFLICT_SEP_RE = re.compile(r"(\\?)\s*=(?:\s*=){6,}")
+CONFLICT_SEP_DASH_RE = re.compile(r"(\\?)\s*[-—](?:\s*[-—]){6,}")
+CONFLICT_END_RE = re.compile(r"(\\?)\s*>\s*(?:>\s*){6,}(?:\s*(REPLACE)\b)?", re.IGNORECASE)
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
 TOOL_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
@@ -168,10 +168,14 @@ def unescape_llm_text(s: str) -> str:
     if not s:
         return ""
 
-    s = CONFLICT_START_RE.sub(r"\1\1<<<<<<<", s)
-    s = CONFLICT_SEP_RE.sub("=======", s)
-    s = CONFLICT_SEP_DASH_RE.sub("-------", s)
-    s = CONFLICT_END_RE.sub(r"\1\1>>>>>>>", s)
+    s = CONFLICT_START_RE.sub(
+        lambda m: (m.group(1) or "") + "<<<<<<<" + (" SEARCH" if m.group(2) else ""), s
+    )
+    s = CONFLICT_SEP_RE.sub(lambda m: (m.group(1) or "") + "=======", s)
+    s = CONFLICT_SEP_DASH_RE.sub(lambda m: (m.group(1) or "") + "-------", s)
+    s = CONFLICT_END_RE.sub(
+        lambda m: (m.group(1) or "") + ">>>>>>>" + (" REPLACE" if m.group(2) else ""), s
+    )
     s = COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
     s = _remove_injected_fences(s)
     s = GOOGLE_SEARCH_LINK_PATTERN.sub(_strip_google_search_links, s)
