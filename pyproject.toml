@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
     "fastapi>=0.129.0",
-    "gemini-webapi>=1.19.1",
+    "gemini-webapi>=1.19.2",
     "lmdb>=1.7.5",
     "loguru>=0.7.3",
     "orjson>=3.11.7",
