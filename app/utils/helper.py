@@ -8,7 +8,7 @@ import struct
 import tempfile
 import unicodedata
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 import httpx
 import orjson
@@ -67,18 +67,6 @@ CHATML_START_RE = re.compile(
 )
 CHATML_END_RE = re.compile(r"<\|im_end\|>|\\<\\\|im\\_end\\\|\\>", re.IGNORECASE)
 COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
-FILE_PATH_PATTERN = re.compile(
-    r"^(?=.*[./\\]|.*:\d+|^(?:Dockerfile|Makefile|Jenkinsfile|Procfile|Rakefile|Gemfile|Vagrantfile|Caddyfile|Justfile|LICENSE|README|CONTRIBUTING|CODEOWNERS|AUTHORS|NOTICE|CHANGELOG)$)([a-zA-Z0-9_./\\-]+(?::\d+)?)$",
-    re.IGNORECASE,
-)
-GOOGLE_SEARCH_PATTERN = re.compile(
-    r"(?P<md_start>`?\[`?)?"
-    r"(?P<text>[^]]+)?"
-    r"(?(md_start)`?]\()?"
-    r"https://www\.google\.com/search\?q=(?P<query>[^&\s\"'<>)]+)"
-    r"(?(md_start)\)?`?)",
-    re.IGNORECASE,
-)
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
 TOOL_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
@@ -110,20 +98,10 @@ def normalize_llm_text(s: str) -> str:
 
 
 def unescape_text(s: str) -> str:
-    """Remove CommonMark backslash escapes."""
+    """Remove CommonMark backslash escapes from LLM-generated text."""
     if not s:
         return ""
     return COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
-
-
-def _strip_google_search(match: re.Match) -> str:
-    """Extract raw text from Google Search links if it looks like a file path."""
-    text_to_check = match.group("text") if match.group("text") else unquote(match.group("query"))
-    text_to_check = unquote(text_to_check.strip())
-
-    if FILE_PATH_PATTERN.match(text_to_check):
-        return text_to_check
-    return match.group(0)
 
 
 def _strip_param_fences(s: str) -> str:
@@ -145,20 +123,6 @@ def _strip_param_fences(s: str) -> str:
 
     n = len(match.group("fence"))
     return s[n:-n].strip()
-
-
-def _repair_param_value(s: str) -> str:
-    """
-    Standardize and repair LLM-generated text fragments (unescaping, link normalization)
-    to ensure compatibility with specialized clients like Roo Code.
-    """
-    if not s:
-        return ""
-
-    s = COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
-    s = GOOGLE_SEARCH_PATTERN.sub(_strip_google_search, s)
-
-    return s
 
 
 def estimate_tokens(text: str | None) -> int:
@@ -286,8 +250,8 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             logger.warning("Encountered tool_call without a function name.")
             return
 
-        name = _repair_param_value(name.strip())
-        raw_args = _repair_param_value(raw_args)
+        name = unescape_text(name.strip())
+        raw_args = unescape_text(raw_args)
 
         arg_matches = TAGGED_ARG_RE.findall(raw_args)
         if arg_matches:
