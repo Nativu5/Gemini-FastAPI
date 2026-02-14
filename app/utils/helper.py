@@ -18,11 +18,12 @@ from ..models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
-    "\n\nSYSTEM INTERFACE: Tool calling protocol. You MUST follow these MANDATORY rules:\n\n"
-    "1. Respond ONLY with a single [ToolCalls] block. NO conversational text, NO explanations, NO filler.\n"
-    "2. For ALL parameters, the value MUST be entirely enclosed in a single markdown code block (start/end with backticks) inside the tags. NO text allowed outside this block.\n"
-    "3. Use a markdown fence longer than any backtick sequence in the value (e.g., use ```` if value has ```).\n\n"
-    "EXACT SYNTAX TEMPLATE:\n"
+    "\n\n### SYSTEM: TOOL CALLING PROTOCOL (MANDATORY) ###\n"
+    "If tool execution is required, you MUST adhere to this EXACT protocol. No exceptions.\n\n"
+    "1. OUTPUT RESTRICTION: Your response MUST contain ONLY the [ToolCalls] block. Conversational filler, preambles, or concluding remarks are STRICTLY PROHIBITED.\n"
+    "2. WRAPPING LOGIC: Every parameter value MUST be enclosed in a markdown code block. Use 3 backticks (```) by default. If the value contains backticks, the outer fence MUST be longer than any sequence inside (e.g., ````).\n"
+    "3. TAG SYMMETRY: All tags MUST be balanced and closed in the exact reverse order of opening. Incomplete or unclosed blocks are strictly prohibited.\n\n"
+    "REQUIRED SYNTAX:\n"
     "[ToolCalls]\n"
     "[Call:tool_name]\n"
     "[CallParameter:parameter_name]\n"
@@ -32,8 +33,7 @@ TOOL_WRAP_HINT = (
     "[/CallParameter]\n"
     "[/Call]\n"
     "[/ToolCalls]\n\n"
-    "CRITICAL: Every tag MUST be opened and closed accurately.\n\n"
-    "Multiple tools: List them sequentially inside one [ToolCalls] block. No tool: respond naturally, NEVER use protocol tags.\n"
+    "CRITICAL: Do NOT mix natural language with protocol tags. Either respond naturally OR provide the protocol block alone. There is no middle ground.\n"
 )
 TOOL_BLOCK_RE = re.compile(
     r"(?:\[ToolCalls]|\\\[ToolCalls\\])\s*(.*?)\s*(?:\[/ToolCalls]|\\\[\\/ToolCalls\\])",
