@@ -45,9 +45,11 @@ from ..utils.helper import (
     TOOL_HINT_LINE_START,
     TOOL_HINT_STRIPPED,
     TOOL_WRAP_HINT,
+    detect_image_extension,
     estimate_tokens,
     extract_image_dimensions,
     extract_tool_calls,
+    remove_tool_call_blocks,
     strip_system_hints,
     text_from_message,
 )
@@ -91,11 +93,21 @@ async def _image_to_base64(
         raise ValueError("Failed to save generated image")
 
     original_path = Path(saved_path)
-    random_name = f"img_{uuid.uuid4().hex}{original_path.suffix}"
+    data = original_path.read_bytes()
+    suffix = original_path.suffix
+
+    if not suffix:
+        detected_ext = detect_image_extension(data)
+        if detected_ext:
+            suffix = detected_ext
+        else:
+            # Fallback if detection fails
+            suffix = ".png" if isinstance(image, GeneratedImage) else ".jpg"
+
+    random_name = f"img_{uuid.uuid4().hex}{suffix}"
     new_path = temp_dir / random_name
     original_path.rename(new_path)
 
-    data = new_path.read_bytes()
     width, height = extract_image_dimensions(data)
     filename = random_name
     file_hash = hashlib.sha256(data).hexdigest()
@@ -210,7 +222,7 @@ def _process_llm_output(
     structured_requirement: StructuredOutputRequirement | None,
 ) -> tuple[str, str, list[Any]]:
     """
-    Common post-processing logic for Gemini output.
+    Post-process Gemini output to extract tool calls and prepare clean text for display and storage.
     Returns: (visible_text, storage_output, tool_calls)
     """
     visible_with_think, tool_calls = extract_tool_calls(raw_output_with_think)
@@ -219,7 +231,7 @@ def _process_llm_output(
 
     visible_output = visible_with_think.strip()
 
-    storage_output, _ = extract_tool_calls(raw_output_clean)
+    storage_output = remove_tool_call_blocks(raw_output_clean)
     storage_output = storage_output.strip()
 
     if structured_requirement:
@@ -258,7 +270,7 @@ def _persist_conversation(
             tool_calls=tool_calls or None,
         )
         full_history = [*messages, current_assistant_message]
-        cleaned_history = db.sanitize_assistant_messages(full_history)
+        cleaned_history = db.sanitize_messages(full_history)
 
         conv = ConversationInStore(
             model=model_name,
@@ -331,12 +343,12 @@ def _build_tool_prompt(
     tools: list[Tool],
     tool_choice: str | ToolChoiceFunction | None,
 ) -> str:
-    """Generate a system prompt chunk describing available tools."""
+    """Generate a system prompt describing available tools and the PascalCase protocol."""
     if not tools:
         return ""
 
     lines: list[str] = [
-        "You can invoke the following developer tools. Call a tool only when it is required and follow the JSON schema exactly when providing arguments."
+        "SYSTEM INTERFACE: You have access to the following technical tools. You MUST invoke them when necessary to fulfill the request, strictly adhering to the provided JSON schemas."
     ]
 
     for tool in tools:
@@ -366,22 +378,7 @@ def _build_tool_prompt(
             f"You are required to call the tool named `{target}`. Do not call any other tool."
         )
 
-    lines.append(
-        "When you decide to call a tool you MUST respond with nothing except a single [function_calls] block exactly like the template below."
-    )
-    lines.append("Do not add text before or after the block.")
-    lines.append("[function_calls]")
-    lines.append('[call:tool_name]{"argument": "value"}[/call]')
-    lines.append("[/function_calls]")
-    lines.append(
-        "Use double quotes for JSON keys and values. CRITICAL: The content inside [call:...]...[/call] MUST be a raw JSON object. Do not wrap it in ```json blocks or add any conversational text inside the tag."
-    )
-    lines.append(
-        "To call multiple tools, list each [call:tool_name]...[/call] entry sequentially within a single [function_calls] block."
-    )
-    lines.append(
-        "If no tool call is needed, provide a normal response and DO NOT use the [function_calls] tag."
-    )
+    lines.append(TOOL_WRAP_HINT)
 
     return "\n".join(lines)
 
@@ -398,26 +395,16 @@ def _build_image_generation_instruction(
         return None
 
     instructions: list[str] = [
-        "Image generation is enabled. When the user requests an image, you must return an actual generated image, not a text description.",
-        "For new image requests, generate at least one new image matching the description.",
-        "If the user provides an image and asks for edits or variations, return a newly generated image with the requested changes.",
-        "Avoid all text replies unless a short caption is explicitly requested. Do not explain, apologize, or describe image creation steps.",
-        "Never send placeholder text like 'Here is your image' or any other response without an actual image attachment.",
+        "IMAGE GENERATION ENABLED: When an image is requested, you MUST return a real generated image directly.",
+        "1. For new requests, generate new images matching the description immediately.",
+        "2. For edits to existing images, apply changes and return a new generated version.",
+        "3. CRITICAL: Provide ZERO text explanation, prologue, or apologies. Do not describe the creation process.",
+        "4. NEVER send placeholder text or descriptions like 'Generating image...' without an actual image attachment.",
     ]
-
-    if primary:
-        if primary.model:
-            instructions.append(
-                f"Where styles differ, favor the `{primary.model}` image model when rendering the scene."
-            )
-        if primary.output_format:
-            instructions.append(
-                f"Encode the image using the `{primary.output_format}` format whenever possible."
-            )
 
     if has_forced_choice:
         instructions.append(
-            "Image generation was explicitly requested. You must return at least one generated image. Any response without an image will be treated as a failure."
+            "Image generation was explicitly requested. You MUST return at least one generated image. Any response without an image will be treated as a failure."
         )
 
     return "\n\n".join(instructions)
@@ -471,11 +458,13 @@ def _prepare_messages_for_model(
             msg.name = tool_id_to_name.get(msg.tool_call_id)
 
     instructions: list[str] = []
+    tool_prompt_injected = False
     if inject_system_defaults:
         if tools:
             tool_prompt = _build_tool_prompt(tools, tool_choice)
             if tool_prompt:
                 instructions.append(tool_prompt)
+                tool_prompt_injected = True
 
         if extra_instructions:
             instructions.extend(instr for instr in extra_instructions if instr)
@@ -484,7 +473,7 @@ def _prepare_messages_for_model(
             )
 
     if not instructions:
-        if tools and tool_choice != "none":
+        if tools and tool_choice != "none" and not tool_prompt_injected:
             _append_tool_hint_to_last_user_message(prepared)
         return prepared
 
@@ -497,7 +486,7 @@ def _prepare_messages_for_model(
     else:
         prepared.insert(0, Message(role="system", content=combined_instructions))
 
-    if tools and tool_choice != "none":
+    if tools and tool_choice != "none" and not tool_prompt_injected:
         _append_tool_hint_to_last_user_message(prepared)
 
     return prepared
@@ -759,8 +748,8 @@ async def _send_with_split(
 
 class StreamingOutputFilter:
     """
-    State Machine filter to suppress technical markers, tool calls, and system hints.
-    Handles fragmentation where markers are split across multiple chunks.
+    Filter to suppress technical protocol markers, tool calls, and system hints from the stream.
+    Uses a state machine to handle fragmentation where markers are split across multiple chunks.
     """
 
     def __init__(self):
@@ -769,46 +758,92 @@ class StreamingOutputFilter:
         self.current_role = ""
         self.block_buffer = ""
 
-        self.TOOL_START = "[function_calls]"
-        self.TOOL_END = "[/function_calls]"
-        self.TAG_START = "<|im_start|>"
-        self.TAG_END = "<|im_end|>"
-        self.HINT_START = f"\n{TOOL_HINT_LINE_START}" if TOOL_HINT_LINE_START else ""
-        self.HINT_END = TOOL_HINT_LINE_END
-        self.TOOL_PREFIX = "[call:"
+        self.STATE_MARKERS = {
+            "TOOL": {
+                "starts": ["[ToolCalls]", "\\[ToolCalls\\]"],
+                "ends": ["[/ToolCalls]", "\\[\\/ToolCalls\\]"],
+            },
+            "ORPHAN": {
+                "starts": ["[Call:", "\\[Call\\:"],
+                "ends": ["[/Call]", "\\[\\/Call\\]"],
+            },
+            "RESP": {
+                "starts": ["[ToolResults]", "\\[ToolResults\\]"],
+                "ends": ["[/ToolResults]", "\\[\\/ToolResults\\]"],
+            },
+            "ARG": {
+                "starts": ["[CallParameter:", "\\[CallParameter\\:"],
+                "ends": ["[/CallParameter]", "\\[\\/CallParameter\\]"],
+            },
+            "RESULT": {
+                "starts": ["[ToolResult]", "\\[ToolResult\\]"],
+                "ends": ["[/ToolResult]", "\\[\\/ToolResult\\]"],
+            },
+            "ITEM": {
+                "starts": ["[Result:", "\\[Result\\:"],
+                "ends": ["[/Result]", "\\[\\/Result\\]"],
+            },
+            "TAG": {
+                "starts": ["<|im_start|>", "\\<\\|im\\_start\\|\\>"],
+                "ends": ["<|im_end|>", "\\<\\|im\\_end\\|\\>"],
+            },
+        }
 
-        self.WATCH_PREFIXES = [self.TOOL_START, self.TAG_START, self.TAG_END]
-        if self.HINT_START:
-            self.WATCH_PREFIXES.append(self.HINT_START)
+        hint_start = f"\n{TOOL_HINT_LINE_START}" if TOOL_HINT_LINE_START else ""
+        if hint_start:
+            self.STATE_MARKERS["HINT"] = {
+                "starts": [hint_start],
+                "ends": [TOOL_HINT_LINE_END],
+            }
+
+        self.ORPHAN_ENDS = [
+            "<|im_end|>",
+            "\\<\\|im\\_end\\|\\>",
+            "[/Call]",
+            "\\[\\/Call\\]",
+            "[/ToolCalls]",
+            "\\[\\/ToolCalls\\]",
+            "[/CallParameter]",
+            "\\[\\/CallParameter\\]",
+            "[/ToolResult]",
+            "\\[\\/ToolResult\\]",
+            "[/ToolResults]",
+            "\\[\\/ToolResults\\]",
+            "[/Result]",
+            "\\[\\/Result\\]",
+        ]
+
+        self.WATCH_MARKERS = []
+        for cfg in self.STATE_MARKERS.values():
+            self.WATCH_MARKERS.extend(cfg["starts"])
+            self.WATCH_MARKERS.extend(cfg.get("ends", []))
+        self.WATCH_MARKERS.extend(self.ORPHAN_ENDS)
 
     def process(self, chunk: str) -> str:
         self.buffer += chunk
         output = []
 
         while self.buffer:
+            buf_low = self.buffer.lower()
             if self.state == "NORMAL":
-                tool_idx = self.buffer.find(self.TOOL_START)
-                tag_idx = self.buffer.find(self.TAG_START)
-                end_idx = self.buffer.find(self.TAG_END)
-                hint_idx = self.buffer.find(self.HINT_START) if self.HINT_START else -1
+                indices = []
+                for m_type, cfg in self.STATE_MARKERS.items():
+                    for p in cfg["starts"]:
+                        idx = buf_low.find(p.lower())
+                        if idx != -1:
+                            indices.append((idx, m_type, len(p)))
 
-                indices = [
-                    (i, t)
-                    for i, t in [
-                        (tool_idx, "TOOL"),
-                        (tag_idx, "TAG"),
-                        (end_idx, "END"),
-                        (hint_idx, "HINT"),
-                    ]
-                    if i != -1
-                ]
+                for p in self.ORPHAN_ENDS:
+                    idx = buf_low.find(p.lower())
+                    if idx != -1:
+                        indices.append((idx, "SKIP", len(p)))
 
                 if not indices:
-                    # Guard against split start markers
                     keep_len = 0
-                    for p in self.WATCH_PREFIXES:
-                        for i in range(len(p) - 1, 0, -1):
-                            if self.buffer.endswith(p[:i]):
+                    for marker in self.WATCH_MARKERS:
+                        m_low = marker.lower()
+                        for i in range(len(m_low) - 1, 0, -1):
+                            if buf_low.endswith(m_low[:i]):
                                 keep_len = max(keep_len, i)
                                 break
                     yield_len = len(self.buffer) - keep_len
@@ -818,47 +853,121 @@ class StreamingOutputFilter:
                     break
 
                 indices.sort()
-                idx, m_type = indices[0]
+                idx, m_type, m_len = indices[0]
                 output.append(self.buffer[:idx])
                 self.buffer = self.buffer[idx:]
 
-                if m_type == "TOOL":
-                    self.state = "IN_TOOL"
+                if m_type == "SKIP":
+                    self.buffer = self.buffer[m_len:]
+                    continue
+
+                self.state = f"IN_{m_type}"
+                if m_type in ("TOOL", "ORPHAN"):
                     self.block_buffer = ""
-                    self.buffer = self.buffer[len(self.TOOL_START) :]
-                elif m_type == "TAG":
-                    self.state = "IN_TAG"
-                    self.buffer = self.buffer[len(self.TAG_START) :]
-                elif m_type == "END":
-                    self.buffer = self.buffer[len(self.TAG_END) :]
-                elif m_type == "HINT":
-                    self.state = "IN_HINT"
-                    self.buffer = self.buffer[len(self.HINT_START) :]
+
+                self.buffer = self.buffer[m_len:]
 
             elif self.state == "IN_HINT":
-                end_idx = self.buffer.find(self.HINT_END)
-                if end_idx != -1:
-                    self.buffer = self.buffer[end_idx + len(self.HINT_END) :]
+                cfg = self.STATE_MARKERS["HINT"]
+                found_idx, found_len = -1, 0
+                for p in cfg["ends"]:
+                    idx = buf_low.find(p.lower())
+                    if idx != -1 and (found_idx == -1 or idx < found_idx):
+                        found_idx, found_len = idx, len(p)
+
+                if found_idx != -1:
+                    self.buffer = self.buffer[found_idx + found_len :]
                     self.state = "NORMAL"
                 else:
-                    # Keep end of buffer to avoid missing split HINT_END
-                    keep_len = len(self.HINT_END) - 1
-                    if len(self.buffer) > keep_len:
-                        self.buffer = self.buffer[-keep_len:]
+                    max_end_len = max(len(p) for p in cfg["ends"])
+                    if len(self.buffer) > max_end_len:
+                        self.buffer = self.buffer[-max_end_len:]
+                    break
+
+            elif self.state == "IN_ARG":
+                cfg = self.STATE_MARKERS["ARG"]
+                found_idx, found_len = -1, 0
+                for p in cfg["ends"]:
+                    idx = buf_low.find(p.lower())
+                    if idx != -1 and (found_idx == -1 or idx < found_idx):
+                        found_idx, found_len = idx, len(p)
+
+                if found_idx != -1:
+                    self.buffer = self.buffer[found_idx + found_len :]
+                    self.state = "NORMAL"
+                else:
+                    max_end_len = max(len(p) for p in cfg["ends"])
+                    if len(self.buffer) > max_end_len:
+                        self.buffer = self.buffer[-max_end_len:]
+                    break
+
+            elif self.state == "IN_RESULT":
+                cfg = self.STATE_MARKERS["RESULT"]
+                found_idx, found_len = -1, 0
+                for p in cfg["ends"]:
+                    idx = buf_low.find(p.lower())
+                    if idx != -1 and (found_idx == -1 or idx < found_idx):
+                        found_idx, found_len = idx, len(p)
+
+                if found_idx != -1:
+                    self.buffer = self.buffer[found_idx + found_len :]
+                    self.state = "NORMAL"
+                else:
+                    max_end_len = max(len(p) for p in cfg["ends"])
+                    if len(self.buffer) > max_end_len:
+                        self.buffer = self.buffer[-max_end_len:]
+                    break
+
+            elif self.state == "IN_RESP":
+                cfg = self.STATE_MARKERS["RESP"]
+                found_idx, found_len = -1, 0
+                for p in cfg["ends"]:
+                    idx = buf_low.find(p.lower())
+                    if idx != -1 and (found_idx == -1 or idx < found_idx):
+                        found_idx, found_len = idx, len(p)
+
+                if found_idx != -1:
+                    self.buffer = self.buffer[found_idx + found_len :]
+                    self.state = "NORMAL"
+                else:
                     break
 
             elif self.state == "IN_TOOL":
-                end_idx = self.buffer.find(self.TOOL_END)
-                if end_idx != -1:
-                    self.block_buffer += self.buffer[:end_idx]
-                    self.buffer = self.buffer[end_idx + len(self.TOOL_END) :]
+                cfg = self.STATE_MARKERS["TOOL"]
+                found_idx, found_len = -1, 0
+                for p in cfg["ends"]:
+                    idx = buf_low.find(p.lower())
+                    if idx != -1 and (found_idx == -1 or idx < found_idx):
+                        found_idx, found_len = idx, len(p)
+
+                if found_idx != -1:
+                    self.block_buffer += self.buffer[:found_idx]
+                    self.buffer = self.buffer[found_idx + found_len :]
                     self.state = "NORMAL"
                 else:
-                    # Accumulate and keep potential split end marker
-                    keep_len = len(self.TOOL_END) - 1
-                    if len(self.buffer) > keep_len:
-                        self.block_buffer += self.buffer[:-keep_len]
-                        self.buffer = self.buffer[-keep_len:]
+                    max_end_len = max(len(p) for p in cfg["ends"])
+                    if len(self.buffer) > max_end_len:
+                        self.block_buffer += self.buffer[:-max_end_len]
+                        self.buffer = self.buffer[-max_end_len:]
+                    break
+
+            elif self.state == "IN_ORPHAN":
+                cfg = self.STATE_MARKERS["ORPHAN"]
+                found_idx, found_len = -1, 0
+                for p in cfg["ends"]:
+                    idx = buf_low.find(p.lower())
+                    if idx != -1 and (found_idx == -1 or idx < found_idx):
+                        found_idx, found_len = idx, len(p)
+
+                if found_idx != -1:
+                    self.block_buffer += self.buffer[:found_idx]
+                    self.buffer = self.buffer[found_idx + found_len :]
+                    self.state = "NORMAL"
+                else:
+                    max_end_len = max(len(p) for p in cfg["ends"])
+                    if len(self.buffer) > max_end_len:
+                        self.block_buffer += self.buffer[:-max_end_len]
+                        self.buffer = self.buffer[-max_end_len:]
                     break
 
             elif self.state == "IN_TAG":
@@ -871,34 +980,39 @@ class StreamingOutputFilter:
                     break
 
             elif self.state == "IN_BLOCK":
-                end_idx = self.buffer.find(self.TAG_END)
-                if end_idx != -1:
-                    content = self.buffer[:end_idx]
+                cfg = self.STATE_MARKERS["TAG"]
+                found_idx, found_len = -1, 0
+                for p in cfg["ends"]:
+                    idx = buf_low.find(p.lower())
+                    if idx != -1 and (found_idx == -1 or idx < found_idx):
+                        found_idx, found_len = idx, len(p)
+
+                if found_idx != -1:
+                    content = self.buffer[:found_idx]
                     if self.current_role != "tool":
                         output.append(content)
-                    self.buffer = self.buffer[end_idx + len(self.TAG_END) :]
+                    self.buffer = self.buffer[found_idx + found_len :]
                     self.state = "NORMAL"
                     self.current_role = ""
                 else:
-                    # Yield safe part and keep potential split TAG_END
-                    keep_len = len(self.TAG_END) - 1
+                    max_end_len = max(len(p) for p in cfg["ends"])
                     if self.current_role != "tool":
-                        if len(self.buffer) > keep_len:
-                            output.append(self.buffer[:-keep_len])
-                            self.buffer = self.buffer[-keep_len:]
+                        if len(self.buffer) > max_end_len:
+                            output.append(self.buffer[:-max_end_len])
+                            self.buffer = self.buffer[-max_end_len:]
                         break
                     else:
-                        if len(self.buffer) > keep_len:
-                            self.buffer = self.buffer[-keep_len:]
+                        if len(self.buffer) > max_end_len:
+                            self.buffer = self.buffer[-max_end_len:]
                         break
 
         return "".join(output)
 
     def flush(self) -> str:
+        """Release remaining buffer content and perform final cleanup at stream end."""
         res = ""
-        if self.state == "IN_TOOL":
-            if self.TOOL_PREFIX not in self.block_buffer.lower():
-                res = f"{self.TOOL_START}{self.block_buffer}"
+        if self.state in ("IN_TOOL", "IN_ORPHAN", "IN_RESP", "IN_HINT", "IN_ARG", "IN_RESULT"):
+            res = ""
         elif self.state == "IN_BLOCK" and self.current_role != "tool":
             res = self.buffer
         elif self.state == "NORMAL":
@@ -1036,16 +1150,14 @@ def _create_real_streaming_response(
         for image in images:
             try:
                 image_store = get_image_store_dir()
-                _, _, _, filename, file_hash = await _image_to_base64(image, image_store)
-                if file_hash in seen_hashes:
+                _, _, _, fname, fhash = await _image_to_base64(image, image_store)
+                if fhash in seen_hashes:
                     # Duplicate content, delete the file and skip
-                    (image_store / filename).unlink(missing_ok=True)
+                    (image_store / fname).unlink(missing_ok=True)
                     continue
-                seen_hashes.add(file_hash)
+                seen_hashes.add(fhash)
 
-                img_url = (
-                    f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
-                )
+                img_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
                 image_markdown += f"\n\n{img_url}"
             except Exception as exc:
                 logger.warning(f"Failed to process image in OpenAI stream: {exc}")
@@ -1197,24 +1309,25 @@ def _create_responses_real_streaming_response(
         seen_hashes = set()
         for image in images:
             try:
-                image_base64, width, height, filename, file_hash = await _image_to_base64(
-                    image, image_store
-                )
-                if file_hash in seen_hashes:
-                    (image_store / filename).unlink(missing_ok=True)
+                b64, w, h, fname, fhash = await _image_to_base64(image, image_store)
+                if fhash in seen_hashes:
+                    (image_store / fname).unlink(missing_ok=True)
                     continue
-                seen_hashes.add(file_hash)
+                seen_hashes.add(fhash)
 
-                img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
-                image_url = (
-                    f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
-                )
+                if "." in fname:
+                    img_id, img_format = fname.rsplit(".", 1)
+                else:
+                    img_id = fname
+                    img_format = "png" if isinstance(image, GeneratedImage) else "jpeg"
+
+                image_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
                 image_call_items.append(
                     ResponseImageGenerationCall(
-                        id=filename.rsplit(".", 1)[0],
-                        result=image_base64,
+                        id=img_id,
+                        result=b64,
                         output_format=img_format,
-                        size=f"{width}x{height}" if width and height else None,
+                        size=f"{w}x{h}" if w and h else None,
                     )
                 )
                 response_contents.append(ResponseOutputContent(type="output_text", text=image_url))
@@ -1329,12 +1442,7 @@ async def create_chat_completion(
             extra_instr,
             False,
         )
-        if len(input_msgs) == 1:
-            m_input, files = await GeminiClientWrapper.process_message(
-                input_msgs[0], tmp_dir, tagged=False
-            )
-        else:
-            m_input, files = await GeminiClientWrapper.process_conversation(input_msgs, tmp_dir)
+        m_input, files = await GeminiClientWrapper.process_conversation(input_msgs, tmp_dir)
 
         logger.debug(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(input_msgs)} prepared messages."
@@ -1398,15 +1506,13 @@ async def create_chat_completion(
     seen_hashes = set()
     for image in images:
         try:
-            _, _, _, filename, file_hash = await _image_to_base64(image, image_store)
-            if file_hash in seen_hashes:
-                (image_store / filename).unlink(missing_ok=True)
+            _, _, _, fname, fhash = await _image_to_base64(image, image_store)
+            if fhash in seen_hashes:
+                (image_store / fname).unlink(missing_ok=True)
                 continue
-            seen_hashes.add(file_hash)
+            seen_hashes.add(fhash)
 
-            img_url = (
-                f"![{filename}]({base_url}images/{filename}?token={get_image_token(filename)})"
-            )
+            img_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
             image_markdown += f"\n\n{img_url}"
         except Exception as exc:
             logger.warning(f"Failed to process image in OpenAI response: {exc}")
@@ -1503,11 +1609,7 @@ async def create_response(
         )
         if not msgs:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
-        m_input, files = (
-            await GeminiClientWrapper.process_message(msgs[0], tmp_dir, tagged=False)
-            if len(msgs) == 1
-            else await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
-        )
+        m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
         logger.debug(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(msgs)} prepared messages."
         )
@@ -1578,6 +1680,12 @@ async def create_response(
                 continue
             seen_hashes.add(fhash)
 
+            if "." in fname:
+                img_id, img_format = fname.rsplit(".", 1)
+            else:
+                img_id = fname
+                img_format = "png" if isinstance(img, GeneratedImage) else "jpeg"
+
             contents.append(
                 ResponseOutputContent(
                     type="output_text",
@@ -1586,9 +1694,9 @@ async def create_response(
             )
             img_calls.append(
                 ResponseImageGenerationCall(
-                    id=fname.rsplit(".", 1)[0],
+                    id=img_id,
                     result=b64,
-                    output_format="png" if isinstance(img, GeneratedImage) else "jpeg",
+                    output_format=img_format,
                     size=f"{w}x{h}" if w and h else None,
                 )
             )

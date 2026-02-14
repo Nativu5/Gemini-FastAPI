@@ -22,9 +22,10 @@ gemini:
       secure_1psid: "YOUR_SECURE_1PSID_HERE"
       secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
       proxy: null          # Optional proxy URL (null/empty means direct connection)
-  timeout: 120             # Init timeout in seconds
+  timeout: 300             # Init timeout in seconds (Not less than 30s)
+  watchdog_timeout: 60     # Watchdog timeout in seconds (Not more than 75s)
   auto_refresh: true       # Auto-refresh session cookies
-  refresh_interval: 540    # Refresh interval in seconds
+  refresh_interval: 540    # Refresh interval in seconds (Not less than 60s)
   verbose: false           # Enable verbose logging for Gemini requests
   max_chars_per_request: 1000000     # Maximum characters Gemini Web accepts per request. Non-pro users might have a lower limit
   model_strategy: "append" # Strategy: 'append' (default + custom) or 'overwrite' (custom only)

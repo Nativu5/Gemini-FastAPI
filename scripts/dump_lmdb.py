@@ -42,7 +42,7 @@ def dump_lmdb(path: Path, keys: Iterable[str] | None = None) -> None:
             records = _dump_all(txn)
     env.close()
 
-    print(orjson.dumps(records, option=orjson.OPT_INDENT_2).decode())
+    print(orjson.dumps(records, option=orjson.OPT_INDENT_2).decode("utf-8"))
 
 
 def main() -> None:
