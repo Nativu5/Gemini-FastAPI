@@ -1,6 +1,7 @@
 import argparse
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable, List
+from typing import Any
 
 import lmdb
 import orjson
@@ -14,17 +15,17 @@ def _decode_value(value: bytes) -> Any:
         return value.decode("utf-8", errors="replace")
 
 
-def _dump_all(txn: lmdb.Transaction) -> List[dict[str, Any]]:
+def _dump_all(txn: lmdb.Transaction) -> list[dict[str, Any]]:
     """Return all records from the database."""
-    result: List[dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for key, value in txn.cursor():
         result.append({"key": key.decode("utf-8"), "value": _decode_value(value)})
     return result
 
 
-def _dump_selected(txn: lmdb.Transaction, keys: Iterable[str]) -> List[dict[str, Any]]:
+def _dump_selected(txn: lmdb.Transaction, keys: Iterable[str]) -> list[dict[str, Any]]:
     """Return records for the provided keys."""
-    result: List[dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for key in keys:
         raw = txn.get(key.encode("utf-8"))
         if raw is not None:
@@ -36,10 +37,7 @@ def dump_lmdb(path: Path, keys: Iterable[str] | None = None) -> None:
     """Print selected or all key-value pairs from the LMDB database."""
     env = lmdb.open(str(path), readonly=True, lock=False)
     with env.begin() as txn:
-        if keys:
-            records = _dump_selected(txn, keys)
-        else:
-            records = _dump_all(txn)
+        records = _dump_selected(txn, keys) if keys else _dump_all(txn)
     env.close()
 
     print(orjson.dumps(records, option=orjson.OPT_INDENT_2).decode("utf-8"))

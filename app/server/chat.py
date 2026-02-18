@@ -3,10 +3,11 @@ import hashlib
 import io
 import reprlib
 import uuid
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -17,7 +18,7 @@ from gemini_webapi.constants import Model
 from gemini_webapi.types.image import GeneratedImage, Image
 from loguru import logger
 
-from ..models import (
+from app.models import (
     ChatCompletionRequest,
     ContentItem,
     ConversationInStore,
@@ -38,9 +39,15 @@ from ..models import (
     Tool,
     ToolChoiceFunction,
 )
-from ..services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
-from ..utils import g_config
-from ..utils.helper import (
+from app.server.middleware import (
+    get_image_store_dir,
+    get_image_token,
+    get_temp_dir,
+    verify_api_key,
+)
+from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
+from app.utils import g_config
+from app.utils.helper import (
     TOOL_HINT_LINE_END,
     TOOL_HINT_LINE_START,
     TOOL_HINT_STRIPPED,
@@ -53,7 +60,6 @@ from ..utils.helper import (
     strip_system_hints,
     text_from_message,
 )
-from .middleware import get_image_store_dir, get_image_token, get_temp_dir, verify_api_key
 
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 METADATA_TTL_MINUTES = 15
@@ -98,11 +104,7 @@ async def _image_to_base64(
 
     if not suffix:
         detected_ext = detect_image_extension(data)
-        if detected_ext:
-            suffix = detected_ext
-        else:
-            # Fallback if detection fails
-            suffix = ".png" if isinstance(image, GeneratedImage) else ".jpg"
+        suffix = detected_ext or (".png" if isinstance(image, GeneratedImage) else ".jpg")
 
     random_name = f"img_{uuid.uuid4().hex}{suffix}"
     new_path = temp_dir / random_name
@@ -628,7 +630,7 @@ def _get_model_by_name(name: str) -> Model:
 
 def _get_available_models() -> list[ModelData]:
     """Return a list of available models based on configuration strategy."""
-    now = int(datetime.now(tz=timezone.utc).timestamp())
+    now = int(datetime.now(tz=UTC).timestamp())
     strategy = g_config.gemini.model_strategy
     models_data = []
 
@@ -712,7 +714,7 @@ async def _send_with_split(
     text: str,
     files: list[Path | str | io.BytesIO] | None = None,
     stream: bool = False,
-) -> AsyncGenerator[ModelOutput, None] | ModelOutput:
+) -> AsyncGenerator[ModelOutput] | ModelOutput:
     """Send text to Gemini, splitting or converting to attachment if too long."""
     if len(text) <= MAX_CHARS_PER_REQUEST:
         try:
@@ -1013,9 +1015,7 @@ class StreamingOutputFilter:
         res = ""
         if self.state in ("IN_TOOL", "IN_ORPHAN", "IN_RESP", "IN_HINT", "IN_ARG", "IN_RESULT"):
             res = ""
-        elif self.state == "IN_BLOCK" and self.current_role != "tool":
-            res = self.buffer
-        elif self.state == "NORMAL":
+        elif (self.state == "IN_BLOCK" and self.current_role != "tool") or self.state == "NORMAL":
             res = self.buffer
 
         self.buffer = ""
@@ -1027,7 +1027,7 @@ class StreamingOutputFilter:
 
 
 def _create_real_streaming_response(
-    generator: AsyncGenerator[ModelOutput, None],
+    generator: AsyncGenerator[ModelOutput],
     completion_id: str,
     created_time: int,
     model_name: str,
@@ -1221,7 +1221,7 @@ def _create_real_streaming_response(
 
 
 def _create_responses_real_streaming_response(
-    generator: AsyncGenerator[ModelOutput, None],
+    generator: AsyncGenerator[ModelOutput],
     response_id: str,
     created_time: int,
     model_name: str,
@@ -1455,10 +1455,12 @@ async def create_chat_completion(
             m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
         except Exception as e:
             logger.exception("Error in preparing conversation")
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
+            ) from e
 
     completion_id = f"chatcmpl-{uuid.uuid4()}"
-    created_time = int(datetime.now(tz=timezone.utc).timestamp())
+    created_time = int(datetime.now(tz=UTC).timestamp())
 
     try:
         assert session and client
@@ -1470,7 +1472,7 @@ async def create_chat_completion(
         )
     except Exception as e:
         logger.exception("Gemini API error")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     if request.stream:
         return _create_real_streaming_response(
@@ -1620,10 +1622,12 @@ async def create_response(
             m_input, files = await GeminiClientWrapper.process_conversation(messages, tmp_dir)
         except Exception as e:
             logger.exception("Error in preparing conversation")
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
+            ) from e
 
     response_id = f"resp_{uuid.uuid4().hex}"
-    created_time = int(datetime.now(tz=timezone.utc).timestamp())
+    created_time = int(datetime.now(tz=UTC).timestamp())
 
     try:
         assert session and client
@@ -1635,7 +1639,7 @@ async def create_response(
         )
     except Exception as e:
         logger.exception("Gemini API error")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     if request.stream:
         return _create_responses_real_streaming_response(

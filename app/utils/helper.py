@@ -14,7 +14,7 @@ import httpx
 import orjson
 from loguru import logger
 
-from ..models import FunctionCall, Message, ToolCall
+from app.models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
@@ -67,6 +67,7 @@ CHATML_START_RE = re.compile(
 )
 CHATML_END_RE = re.compile(r"<\|im_end\|>|\\<\\\|im\\_end\\\|\\>", re.IGNORECASE)
 COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
+PARAM_FENCE_RE = re.compile(r"^(?P<fence>`{3,})")
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
 TOOL_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
@@ -113,7 +114,7 @@ def _strip_param_fences(s: str) -> str:
     if not s:
         return ""
 
-    match = re.match(r"^(?P<fence>`{3,})", s)
+    match = PARAM_FENCE_RE.match(s)
     if not match or not s.endswith(match.group("fence")):
         return s
 
@@ -272,7 +273,7 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             arguments = "{}"
 
         index = len(tool_calls)
-        seed = f"{name}:{arguments}:{index}".encode("utf-8")
+        seed = f"{name}:{arguments}:{index}".encode()
         call_id = f"call_{hashlib.sha256(seed).hexdigest()[:24]}"
 
         tool_calls.append(

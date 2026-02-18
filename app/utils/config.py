@@ -1,7 +1,7 @@
 import ast
 import os
 import sys
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import orjson
 from loguru import logger
@@ -28,7 +28,7 @@ class ServerConfig(BaseModel):
 
     host: str = Field(default="0.0.0.0", description="Server host address")
     port: int = Field(default=8000, ge=1, le=65535, description="Server port number")
-    api_key: Optional[str] = Field(
+    api_key: str | None = Field(
         default=None,
         description="API key for authentication, if set, will enable API key validation",
     )
@@ -41,11 +41,11 @@ class GeminiClientSettings(BaseModel):
     id: str = Field(..., description="Unique identifier for the client")
     secure_1psid: str = Field(..., description="Gemini Secure 1PSID")
     secure_1psidts: str = Field(..., description="Gemini Secure 1PSIDTS")
-    proxy: Optional[str] = Field(default=None, description="Proxy URL for this Gemini client")
+    proxy: str | None = Field(default=None, description="Proxy URL for this Gemini client")
 
     @field_validator("proxy", mode="before")
     @classmethod
-    def _blank_proxy_to_none(cls, value: Optional[str]) -> Optional[str]:
+    def _blank_proxy_to_none(cls, value: str | None) -> str | None:
         if value is None:
             return None
         stripped = value.strip()
@@ -55,8 +55,8 @@ class GeminiClientSettings(BaseModel):
 class GeminiModelConfig(BaseModel):
     """Configuration for a custom Gemini model."""
 
-    model_name: Optional[str] = Field(default=None, description="Name of the model")
-    model_header: Optional[dict[str, Optional[str]]] = Field(
+    model_name: str | None = Field(default=None, description="Name of the model")
+    model_header: dict[str, str | None] | None = Field(
         default=None, description="Header for the model"
     )
 

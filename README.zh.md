@@ -1,6 +1,6 @@
 # Gemini-FastAPI
 
-[![Python 3.12](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.13](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -24,7 +24,7 @@
 
 ### 前置条件
 
-- Python 3.12
+- Python 3.13
 - 拥有网页版 Gemini 访问权限的 Google 账号
 - 从 Gemini 网页获取的 `secure_1psid` 和 `secure_1psidts` Cookie
 

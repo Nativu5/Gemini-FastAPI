@@ -10,7 +10,7 @@ from fastapi.responses import ORJSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 
-from ..utils import g_config
+from app.utils import g_config
 
 # Persistent directory for storing generated images
 IMAGE_STORE_DIR = Path(tempfile.gettempdir()) / "ai_generated_images"

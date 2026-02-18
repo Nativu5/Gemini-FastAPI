@@ -5,9 +5,9 @@ import orjson
 from gemini_webapi import GeminiClient, ModelOutput
 from loguru import logger
 
-from ..models import Message
-from ..utils import g_config
-from ..utils.helper import (
+from app.models import Message
+from app.utils import g_config
+from app.utils.helper import (
     add_tag,
     normalize_llm_text,
     save_file_to_tempfile,
@@ -146,9 +146,8 @@ class GeminiClientWrapper(GeminiClient):
 
         model_input = "\n".join(fragment for fragment in text_fragments if fragment is not None)
 
-        if model_input or message.role == "tool":
-            if tagged:
-                model_input = add_tag(message.role, model_input)
+        if (model_input or message.role == "tool") and tagged:
+            model_input = add_tag(message.role, model_input)
 
         return model_input, files
 

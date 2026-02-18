@@ -1,6 +1,6 @@
 # Gemini-FastAPI
 
-[![Python 3.12](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.13](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -24,7 +24,7 @@ Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by [Hanao
 
 ### Prerequisites
 
-- Python 3.12
+- Python 3.13
 - Google account with Gemini access on web
 - `secure_1psid` and `secure_1psidts` cookies from Gemini web interface
 

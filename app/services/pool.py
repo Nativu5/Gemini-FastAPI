@@ -1,11 +1,11 @@
 import asyncio
 from collections import deque
-from typing import Dict, List, Optional
 
 from loguru import logger
 
-from ..utils import g_config
-from ..utils.singleton import Singleton
+from app.utils import g_config
+from app.utils.singleton import Singleton
+
 from .client import GeminiClientWrapper
 
 
@@ -13,10 +13,10 @@ class GeminiClientPool(metaclass=Singleton):
     """Pool of GeminiClient instances identified by unique ids."""
 
     def __init__(self) -> None:
-        self._clients: List[GeminiClientWrapper] = []
-        self._id_map: Dict[str, GeminiClientWrapper] = {}
+        self._clients: list[GeminiClientWrapper] = []
+        self._id_map: dict[str, GeminiClientWrapper] = {}
         self._round_robin: deque[GeminiClientWrapper] = deque()
-        self._restart_locks: Dict[str, asyncio.Lock] = {}
+        self._restart_locks: dict[str, asyncio.Lock] = {}
 
         if len(g_config.gemini.clients) == 0:
             raise ValueError("No Gemini clients configured")
@@ -55,7 +55,7 @@ class GeminiClientPool(metaclass=Singleton):
         if success_count == 0:
             raise RuntimeError("Failed to initialize any Gemini clients")
 
-    async def acquire(self, client_id: Optional[str] = None) -> GeminiClientWrapper:
+    async def acquire(self, client_id: str | None = None) -> GeminiClientWrapper:
         """Return a healthy client by id or using round-robin."""
         if not self._round_robin:
             raise RuntimeError("No Gemini clients configured")
@@ -106,10 +106,10 @@ class GeminiClientPool(metaclass=Singleton):
                 return False
 
     @property
-    def clients(self) -> List[GeminiClientWrapper]:
+    def clients(self) -> list[GeminiClientWrapper]:
         """Return managed clients."""
         return self._clients
 
-    def status(self) -> Dict[str, bool]:
+    def status(self) -> dict[str, bool]:
         """Return running status for each client."""
         return {client.id: client.running() for client in self._clients}
