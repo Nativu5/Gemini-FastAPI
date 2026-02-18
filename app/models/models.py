@@ -10,10 +10,10 @@ class ContentItem(BaseModel):
     """Individual content item (text, image, or file) within a message."""
 
     type: Literal["text", "image_url", "file", "input_audio"]
-    text: str | None = None
-    image_url: dict[str, str] | None = None
-    input_audio: dict[str, Any] | None = None
-    file: dict[str, str] | None = None
+    text: str | None = Field(default=None)
+    image_url: dict[str, Any] | None = Field(default=None)
+    input_audio: dict[str, Any] | None = Field(default=None)
+    file: dict[str, Any] | None = Field(default=None)
     annotations: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -21,13 +21,13 @@ class Message(BaseModel):
     """Message model"""
 
     role: str
-    content: str | list[ContentItem] | None = None
-    name: str | None = None
-    tool_calls: list[ToolCall] | None = None
-    tool_call_id: str | None = None
-    refusal: str | None = None
-    reasoning_content: str | None = None
-    audio: dict[str, Any] | None = None
+    content: str | list[ContentItem] | None = Field(default=None)
+    name: str | None = Field(default=None)
+    tool_calls: list[ToolCall] | None = Field(default=None)
+    tool_call_id: str | None = Field(default=None)
+    refusal: str | None = Field(default=None)
+    reasoning_content: str | None = Field(default=None)
+    audio: dict[str, Any] | None = Field(default=None)
     annotations: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -44,7 +44,7 @@ class Choice(BaseModel):
     index: int
     message: Message
     finish_reason: str
-    logprobs: dict[str, Any] | None = None
+    logprobs: dict[str, Any] | None = Field(default=None)
 
 
 class FunctionCall(BaseModel):
@@ -66,8 +66,8 @@ class ToolFunctionDefinition(BaseModel):
     """Function definition for tool."""
 
     name: str
-    description: str | None = None
-    parameters: dict[str, Any] | None = None
+    description: str | None = Field(default=None)
+    parameters: dict[str, Any] | None = Field(default=None)
 
 
 class Tool(BaseModel):
@@ -96,8 +96,8 @@ class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
-    prompt_tokens_details: dict[str, int] | None = None
-    completion_tokens_details: dict[str, int] | None = None
+    prompt_tokens_details: dict[str, int] | None = Field(default=None)
+    completion_tokens_details: dict[str, int] | None = Field(default=None)
 
 
 class ModelData(BaseModel):
@@ -114,16 +114,16 @@ class ChatCompletionRequest(BaseModel):
 
     model: str
     messages: list[Message]
-    stream: bool | None = False
-    user: str | None = None
-    temperature: float | None = 0.7
-    top_p: float | None = 1.0
-    max_tokens: int | None = None
-    tools: list[Tool] | None = None
+    stream: bool | None = Field(default=False)
+    user: str | None = Field(default=None)
+    temperature: float | None = Field(default=0.7)
+    top_p: float | None = Field(default=1.0)
+    max_tokens: int | None = Field(default=None)
+    tools: list[Tool] | None = Field(default=None)
     tool_choice: (
         Literal["none"] | Literal["auto"] | Literal["required"] | ToolChoiceFunction | None
-    ) = None
-    response_format: dict[str, Any] | None = None
+    ) = Field(default=None)
+    response_format: dict[str, Any] | None = Field(default=None)
 
 
 class ChatCompletionResponse(BaseModel):
@@ -148,9 +148,9 @@ class HealthCheckResponse(BaseModel):
     """Health check response model"""
 
     ok: bool
-    storage: dict[str, str | int] | None = None
-    clients: dict[str, bool] | None = None
-    error: str | None = None
+    storage: dict[str, Any] | None = Field(default=None)
+    clients: dict[str, bool] | None = Field(default=None)
+    error: str | None = Field(default=None)
 
 
 class ConversationInStore(BaseModel):
@@ -172,12 +172,12 @@ class ResponseInputContent(BaseModel):
     """Content item for Responses API input."""
 
     type: Literal["input_text", "input_image", "input_file"]
-    text: str | None = None
-    image_url: str | None = None
-    detail: Literal["auto", "low", "high"] | None = None
-    file_url: str | None = None
-    file_data: str | None = None
-    filename: str | None = None
+    text: str | None = Field(default=None)
+    image_url: str | None = Field(default=None)
+    detail: Literal["auto", "low", "high"] | None = Field(default=None)
+    file_url: str | None = Field(default=None)
+    file_data: str | None = Field(default=None)
+    filename: str | None = Field(default=None)
     annotations: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="before")
@@ -192,7 +192,7 @@ class ResponseInputContent(BaseModel):
 class ResponseInputItem(BaseModel):
     """Single input item for Responses API."""
 
-    type: Literal["message"] | None = "message"
+    type: Literal["message"] | None = Field(default="message")
     role: Literal["user", "assistant", "system", "developer"]
     content: str | list[ResponseInputContent]
 
@@ -201,15 +201,15 @@ class ResponseToolChoice(BaseModel):
     """Tool choice enforcing a specific tool in Responses API."""
 
     type: Literal["function", "image_generation"]
-    function: ToolChoiceFunctionDetail | None = None
+    function: ToolChoiceFunctionDetail | None = Field(default=None)
 
 
 class ResponseImageTool(BaseModel):
     """Image generation tool specification for Responses API."""
 
     type: Literal["image_generation"]
-    model: str | None = None
-    output_format: str | None = None
+    model: str | None = Field(default=None)
+    output_format: str | None = Field(default=None)
 
 
 class ResponseCreateRequest(BaseModel):
@@ -217,17 +217,17 @@ class ResponseCreateRequest(BaseModel):
 
     model: str
     input: str | list[ResponseInputItem]
-    instructions: str | list[ResponseInputItem] | None = None
-    temperature: float | None = 0.7
-    top_p: float | None = 1.0
-    max_output_tokens: int | None = None
-    stream: bool | None = False
-    tool_choice: str | ResponseToolChoice | None = None
-    tools: list[Tool | ResponseImageTool] | None = None
-    store: bool | None = None
-    user: str | None = None
-    response_format: dict[str, Any] | None = None
-    metadata: dict[str, Any] | None = None
+    instructions: str | list[ResponseInputItem] | None = Field(default=None)
+    temperature: float | None = Field(default=0.7)
+    top_p: float | None = Field(default=1.0)
+    max_output_tokens: int | None = Field(default=None)
+    stream: bool | None = Field(default=False)
+    tool_choice: str | ResponseToolChoice | None = Field(default=None)
+    tools: list[Tool | ResponseImageTool] | None = Field(default=None)
+    store: bool | None = Field(default=None)
+    user: str | None = Field(default=None)
+    response_format: dict[str, Any] | None = Field(default=None)
+    metadata: dict[str, Any] | None = Field(default=None)
 
 
 class ResponseUsage(BaseModel):
@@ -242,7 +242,7 @@ class ResponseOutputContent(BaseModel):
     """Content item for Responses API output."""
 
     type: Literal["output_text"]
-    text: str | None = ""
+    text: str | None = Field(default="")
     annotations: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -259,20 +259,22 @@ class ResponseImageGenerationCall(BaseModel):
     """Image generation call record emitted in Responses API."""
 
     id: str
-    type: Literal["image_generation_call"] = "image_generation_call"
-    status: Literal["completed", "in_progress", "generating", "failed"] = "completed"
-    result: str | None = None
-    output_format: str | None = None
-    size: str | None = None
-    revised_prompt: str | None = None
+    type: Literal["image_generation_call"] = Field(default="image_generation_call")
+    status: Literal["completed", "in_progress", "generating", "failed"] = Field(default="completed")
+    result: str | None = Field(default=None)
+    output_format: str | None = Field(default=None)
+    size: str | None = Field(default=None)
+    revised_prompt: str | None = Field(default=None)
 
 
 class ResponseToolCall(BaseModel):
     """Tool call record emitted in Responses API."""
 
     id: str
-    type: Literal["tool_call"] = "tool_call"
-    status: Literal["in_progress", "completed", "failed", "requires_action"] = "completed"
+    type: Literal["tool_call"] = Field(default="tool_call")
+    status: Literal["in_progress", "completed", "failed", "requires_action"] = Field(
+        default="completed"
+    )
     function: FunctionCall
 
 
@@ -280,7 +282,7 @@ class ResponseCreateResponse(BaseModel):
     """Responses API response payload."""
 
     id: str
-    object: Literal["response"] = "response"
+    object: Literal["response"] = Field(default="response")
     created_at: int
     model: str
     output: list[ResponseOutputMessage | ResponseImageGenerationCall | ResponseToolCall]
@@ -291,13 +293,13 @@ class ResponseCreateResponse(BaseModel):
         "incomplete",
         "cancelled",
         "requires_action",
-    ] = "completed"
-    tool_choice: str | ResponseToolChoice | None = None
-    tools: list[Tool | ResponseImageTool] | None = None
+    ] = Field(default="completed")
+    tool_choice: str | ResponseToolChoice | None = Field(default=None)
+    tools: list[Tool | ResponseImageTool] | None = Field(default=None)
     usage: ResponseUsage
-    error: dict[str, Any] | None = None
-    metadata: dict[str, Any] | None = None
-    input: str | list[ResponseInputItem] | None = None
+    error: dict[str, Any] | None = Field(default=None)
+    metadata: dict[str, Any] | None = Field(default=None)
+    input: str | list[ResponseInputItem] | None = Field(default=None)
 
 
 # Rebuild models with forward references
