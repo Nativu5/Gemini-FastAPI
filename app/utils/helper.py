@@ -36,32 +36,36 @@ TOOL_WRAP_HINT = (
     "CRITICAL: Do NOT mix natural language with protocol tags. Either respond naturally OR provide the protocol block alone. There is no middle ground.\n"
 )
 TOOL_BLOCK_RE = re.compile(
-    r"\\?\[ToolCalls\\?]\s*(.*?)\s*\\?\[\\?/?ToolCalls\\?]",
+    r"\\?\[\s*ToolCalls\s*\\?]\s*(.*?)\s*\\?\[\s*\\?/\s*ToolCalls\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TOOL_CALL_RE = re.compile(
-    r"\\?\[Call\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\\?/?Call\\?]",
+    r"\\?\[\s*Call\s*\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\s*\\?/\s*Call\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_BLOCK_RE = re.compile(
-    r"\\?\[ToolResults\\?]\s*(.*?)\s*\\?\[\\?/?ToolResults\\?]",
+    r"\\?\[\s*ToolResults\s*\\?]\s*(.*?)\s*\\?\[\s*\\?/\s*ToolResults\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_ITEM_RE = re.compile(
-    r"\\?\[Result\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\\?/?Result\\?]",
+    r"\\?\[\s*Result\s*\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\s*\\?/\s*Result\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_ARG_RE = re.compile(
-    r"\\?\[CallParameter\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\\?/?CallParameter\\?]",
+    r"\\?\[\s*CallParameter\s*\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\s*\\?/\s*CallParameter\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_RESULT_RE = re.compile(
-    r"\\?\[ToolResult\\?]\s*(.*?)\s*\\?\[\\?/?ToolResult\\?]",
+    r"\\?\[\s*ToolResult\s*\\?]\s*(.*?)\s*\\?\[\s*\\?/\s*ToolResult\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
-CONTROL_TOKEN_RE = re.compile(r"\\?<\\?\|im\\?_(?:start|end)\\?\|\\?>", re.IGNORECASE)
-CHATML_START_RE = re.compile(r"\\?<\\?\|im\\?_start\\?\|\\?>\s*(\w+)\s*\n?", re.IGNORECASE)
-CHATML_END_RE = re.compile(r"\\?<\\?\|im\\?_end\\?\|\\?>", re.IGNORECASE)
+CONTROL_TOKEN_RE = re.compile(
+    r"\\?\s*<\s*\\?\|\s*im\s*\\?_(?:start|end)\s*\\?\|\s*>\s*", re.IGNORECASE
+)
+CHATML_START_RE = re.compile(
+    r"\\?\s*<\s*\\?\|\s*im\s*\\?_start\s*\\?\|\s*>\s*(\w+)\s*\n?", re.IGNORECASE
+)
+CHATML_END_RE = re.compile(r"\\?\s*<\s*\\?\|\s*im\s*\\?_end\s*\\?\|\s*>\s*", re.IGNORECASE)
 COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
 PARAM_FENCE_RE = re.compile(r"^(?P<fence>`{3,})")
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
@@ -81,17 +85,19 @@ HINT_END_RE = re.compile(rf"\s*{TOOL_HINT_END_ESC}\.?\n?") if TOOL_HINT_END_ESC 
 
 # --- Streaming Specific Patterns ---
 _START_PATTERNS = {
-    "TOOL": r"\\?\[ToolCalls\\?\]",
-    "ORPHAN": r"\\?\[Call\\?:\s*[^\]\\]+\s*\\?\]",
-    "RESP": r"\\?\[ToolResults\\?\]",
-    "ARG": r"\\?\[CallParameter\\?:\s*[^\]\\]+\s*\\?\]",
-    "RESULT": r"\\?\[ToolResult\\?\]",
-    "ITEM": r"\\?\[Result\\?:\s*[^\]\\]+\s*\\?\]",
-    "TAG": r"\\?<\\?\|im\\?_start\\?\|\\?>",
+    "TOOL": r"\\?\[\s*ToolCalls\s*\\?\]",
+    "ORPHAN": r"\\?\[\s*Call\s*\\?:\s*(?:[^\]\\]|\\.)+\s*\\?\]",
+    "RESP": r"\\?\[\s*ToolResults\s*\\?\]",
+    "ARG": r"\\?\[\s*CallParameter\s*\\?:\s*(?:[^\]\\]|\\.)+\s*\\?\]",
+    "RESULT": r"\\?\[\s*ToolResult\s*\\?\]",
+    "ITEM": r"\\?\[\s*Result\s*\\?:\s*(?:[^\]\\]|\\.)+\s*\\?\]",
+    "TAG": r"\\?\s*<\s*\\?\|\s*im\s*\\?_start\s*\\?\|\s*>",
 }
 
-_PROTOCOL_ENDS = r"\\?\[\\?/(?:ToolCalls|Call|ToolResults|CallParameter|ToolResult|Result)\\?\]"
-_TAG_END = r"\\?<\\?\|im\\?_end\\?\|\\?>"
+_PROTOCOL_ENDS = (
+    r"\\?\[\s*\\?/\s*(?:ToolCalls|Call|ToolResults|CallParameter|ToolResult|Result)\s*\\?\]"
+)
+_TAG_END = r"\\?\s*<\s*\\?\|\s*im\s*\\?_end\s*\\?\|\s*>"
 
 _master_parts = [f"(?P<{name}_START>{pattern})" for name, pattern in _START_PATTERNS.items()]
 _master_parts.append(f"(?P<PROTOCOL_EXIT>{_PROTOCOL_ENDS})")
@@ -103,7 +109,7 @@ if TOOL_HINT_START_ESC and TOOL_HINT_END_ESC:
 
 STREAM_MASTER_RE = re.compile("|".join(_master_parts), re.IGNORECASE)
 STREAM_TAIL_RE = re.compile(
-    r"(?:\\|\\?\[(?:T(?:o?o?l?)?|C(?:a?l?l?)?|R(?:e?s?u?l?t?)?|/)?[\w/:]*|\\?<\??\|?i?m?_?(?:s?t?a?r?t?|e?n?d?)\|?|)$",
+    r"(?:\\|\\?\[[TCRP/]?\s*[^]]*|\\?\s*<\s*\\?\|?\s*i?\s*m?\s*\\?_?(?:s?t?a?r?t?|e?n?d?)\s*\\?\|?\s*>?|)$",
     re.IGNORECASE,
 )
 
