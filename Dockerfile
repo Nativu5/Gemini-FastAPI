@@ -1,6 +1,7 @@
 FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim
 
-LABEL org.opencontainers.image.description="Web-based Gemini models wrapped into an OpenAI-compatible API."
+LABEL org.opencontainers.image.title="Gemini-FastAPI" \
+      org.opencontainers.image.description="Web-based Gemini models wrapped into an OpenAI-compatible API."
 
 WORKDIR /app
 

@@ -48,8 +48,8 @@ from app.server.middleware import (
 from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from app.utils import g_config
 from app.utils.helper import (
-    TOOL_HINT_LINE_END,
-    TOOL_HINT_LINE_START,
+    STREAM_MASTER_RE,
+    STREAM_TAIL_RE,
     TOOL_HINT_STRIPPED,
     TOOL_WRAP_HINT,
     detect_image_extension,
@@ -751,275 +751,80 @@ async def _send_with_split(
 class StreamingOutputFilter:
     """
     Filter to suppress technical protocol markers, tool calls, and system hints from the stream.
-    Uses a state machine to handle fragmentation where markers are split across multiple chunks.
+    Uses a high-performance regex state machine to handle fragmented markers.
     """
 
     def __init__(self):
         self.buffer = ""
         self.state = "NORMAL"
         self.current_role = ""
-        self.block_buffer = ""
-
-        self.STATE_MARKERS = {
-            "TOOL": {
-                "starts": ["[ToolCalls]", "\\[ToolCalls\\]"],
-                "ends": ["[/ToolCalls]", "\\[\\/ToolCalls\\]"],
-            },
-            "ORPHAN": {
-                "starts": ["[Call:", "\\[Call\\:"],
-                "ends": ["[/Call]", "\\[\\/Call\\]"],
-            },
-            "RESP": {
-                "starts": ["[ToolResults]", "\\[ToolResults\\]"],
-                "ends": ["[/ToolResults]", "\\[\\/ToolResults\\]"],
-            },
-            "ARG": {
-                "starts": ["[CallParameter:", "\\[CallParameter\\:"],
-                "ends": ["[/CallParameter]", "\\[\\/CallParameter\\]"],
-            },
-            "RESULT": {
-                "starts": ["[ToolResult]", "\\[ToolResult\\]"],
-                "ends": ["[/ToolResult]", "\\[\\/ToolResult\\]"],
-            },
-            "ITEM": {
-                "starts": ["[Result:", "\\[Result\\:"],
-                "ends": ["[/Result]", "\\[\\/Result\\]"],
-            },
-            "TAG": {
-                "starts": ["<|im_start|>", "\\<\\|im\\_start\\|\\>"],
-                "ends": ["<|im_end|>", "\\<\\|im\\_end\\|\\>"],
-            },
-        }
-
-        hint_start = f"\n{TOOL_HINT_LINE_START}" if TOOL_HINT_LINE_START else ""
-        if hint_start:
-            self.STATE_MARKERS["HINT"] = {
-                "starts": [hint_start],
-                "ends": [TOOL_HINT_LINE_END],
-            }
-
-        self.ORPHAN_ENDS = [
-            "<|im_end|>",
-            "\\<\\|im\\_end\\|\\>",
-            "[/Call]",
-            "\\[\\/Call\\]",
-            "[/ToolCalls]",
-            "\\[\\/ToolCalls\\]",
-            "[/CallParameter]",
-            "\\[\\/CallParameter\\]",
-            "[/ToolResult]",
-            "\\[\\/ToolResult\\]",
-            "[/ToolResults]",
-            "\\[\\/ToolResults\\]",
-            "[/Result]",
-            "\\[\\/Result\\]",
-        ]
-
-        self.WATCH_MARKERS = []
-        for cfg in self.STATE_MARKERS.values():
-            self.WATCH_MARKERS.extend(cfg["starts"])
-            self.WATCH_MARKERS.extend(cfg.get("ends", []))
-        self.WATCH_MARKERS.extend(self.ORPHAN_ENDS)
+        self.in_chatml = False
 
     def process(self, chunk: str) -> str:
         self.buffer += chunk
         output = []
 
         while self.buffer:
-            buf_low = self.buffer.lower()
-            if self.state == "NORMAL":
-                indices = []
-                for m_type, cfg in self.STATE_MARKERS.items():
-                    for p in cfg["starts"]:
-                        idx = buf_low.find(p.lower())
-                        if idx != -1:
-                            indices.append((idx, m_type, len(p)))
-
-                for p in self.ORPHAN_ENDS:
-                    idx = buf_low.find(p.lower())
-                    if idx != -1:
-                        indices.append((idx, "SKIP", len(p)))
-
-                if not indices:
-                    keep_len = 0
-                    for marker in self.WATCH_MARKERS:
-                        m_low = marker.lower()
-                        for i in range(len(m_low) - 1, 0, -1):
-                            if buf_low.endswith(m_low[:i]):
-                                keep_len = max(keep_len, i)
-                                break
-                    yield_len = len(self.buffer) - keep_len
-                    if yield_len > 0:
-                        output.append(self.buffer[:yield_len])
-                        self.buffer = self.buffer[yield_len:]
-                    break
-
-                indices.sort()
-                idx, m_type, m_len = indices[0]
-                output.append(self.buffer[:idx])
-                self.buffer = self.buffer[idx:]
-
-                if m_type == "SKIP":
-                    self.buffer = self.buffer[m_len:]
-                    continue
-
-                self.state = f"IN_{m_type}"
-                if m_type in ("TOOL", "ORPHAN"):
-                    self.block_buffer = ""
-
-                self.buffer = self.buffer[m_len:]
-
-            elif self.state == "IN_HINT":
-                cfg = self.STATE_MARKERS["HINT"]
-                found_idx, found_len = -1, 0
-                for p in cfg["ends"]:
-                    idx = buf_low.find(p.lower())
-                    if idx != -1 and (found_idx == -1 or idx < found_idx):
-                        found_idx, found_len = idx, len(p)
-
-                if found_idx != -1:
-                    self.buffer = self.buffer[found_idx + found_len :]
-                    self.state = "NORMAL"
-                else:
-                    max_end_len = max(len(p) for p in cfg["ends"])
-                    if len(self.buffer) > max_end_len:
-                        self.buffer = self.buffer[-max_end_len:]
-                    break
-
-            elif self.state == "IN_ARG":
-                cfg = self.STATE_MARKERS["ARG"]
-                found_idx, found_len = -1, 0
-                for p in cfg["ends"]:
-                    idx = buf_low.find(p.lower())
-                    if idx != -1 and (found_idx == -1 or idx < found_idx):
-                        found_idx, found_len = idx, len(p)
-
-                if found_idx != -1:
-                    self.buffer = self.buffer[found_idx + found_len :]
-                    self.state = "NORMAL"
-                else:
-                    max_end_len = max(len(p) for p in cfg["ends"])
-                    if len(self.buffer) > max_end_len:
-                        self.buffer = self.buffer[-max_end_len:]
-                    break
-
-            elif self.state == "IN_RESULT":
-                cfg = self.STATE_MARKERS["RESULT"]
-                found_idx, found_len = -1, 0
-                for p in cfg["ends"]:
-                    idx = buf_low.find(p.lower())
-                    if idx != -1 and (found_idx == -1 or idx < found_idx):
-                        found_idx, found_len = idx, len(p)
-
-                if found_idx != -1:
-                    self.buffer = self.buffer[found_idx + found_len :]
-                    self.state = "NORMAL"
-                else:
-                    max_end_len = max(len(p) for p in cfg["ends"])
-                    if len(self.buffer) > max_end_len:
-                        self.buffer = self.buffer[-max_end_len:]
-                    break
-
-            elif self.state == "IN_RESP":
-                cfg = self.STATE_MARKERS["RESP"]
-                found_idx, found_len = -1, 0
-                for p in cfg["ends"]:
-                    idx = buf_low.find(p.lower())
-                    if idx != -1 and (found_idx == -1 or idx < found_idx):
-                        found_idx, found_len = idx, len(p)
-
-                if found_idx != -1:
-                    self.buffer = self.buffer[found_idx + found_len :]
-                    self.state = "NORMAL"
-                else:
-                    break
-
-            elif self.state == "IN_TOOL":
-                cfg = self.STATE_MARKERS["TOOL"]
-                found_idx, found_len = -1, 0
-                for p in cfg["ends"]:
-                    idx = buf_low.find(p.lower())
-                    if idx != -1 and (found_idx == -1 or idx < found_idx):
-                        found_idx, found_len = idx, len(p)
-
-                if found_idx != -1:
-                    self.block_buffer += self.buffer[:found_idx]
-                    self.buffer = self.buffer[found_idx + found_len :]
-                    self.state = "NORMAL"
-                else:
-                    max_end_len = max(len(p) for p in cfg["ends"])
-                    if len(self.buffer) > max_end_len:
-                        self.block_buffer += self.buffer[:-max_end_len]
-                        self.buffer = self.buffer[-max_end_len:]
-                    break
-
-            elif self.state == "IN_ORPHAN":
-                cfg = self.STATE_MARKERS["ORPHAN"]
-                found_idx, found_len = -1, 0
-                for p in cfg["ends"]:
-                    idx = buf_low.find(p.lower())
-                    if idx != -1 and (found_idx == -1 or idx < found_idx):
-                        found_idx, found_len = idx, len(p)
-
-                if found_idx != -1:
-                    self.block_buffer += self.buffer[:found_idx]
-                    self.buffer = self.buffer[found_idx + found_len :]
-                    self.state = "NORMAL"
-                else:
-                    max_end_len = max(len(p) for p in cfg["ends"])
-                    if len(self.buffer) > max_end_len:
-                        self.block_buffer += self.buffer[:-max_end_len]
-                        self.buffer = self.buffer[-max_end_len:]
-                    break
-
-            elif self.state == "IN_TAG":
+            if self.state == "IN_TAG_HEADER":
                 nl_idx = self.buffer.find("\n")
                 if nl_idx != -1:
                     self.current_role = self.buffer[:nl_idx].strip().lower()
                     self.buffer = self.buffer[nl_idx + 1 :]
                     self.state = "IN_BLOCK"
+                    self.in_chatml = True
+                    continue
                 else:
                     break
 
-            elif self.state == "IN_BLOCK":
-                cfg = self.STATE_MARKERS["TAG"]
-                found_idx, found_len = -1, 0
-                for p in cfg["ends"]:
-                    idx = buf_low.find(p.lower())
-                    if idx != -1 and (found_idx == -1 or idx < found_idx):
-                        found_idx, found_len = idx, len(p)
+            match = STREAM_MASTER_RE.search(self.buffer)
+            if not match:
+                tail_match = STREAM_TAIL_RE.search(self.buffer)
+                keep_len = len(tail_match.group(0)) if tail_match else 0
+                yield_len = len(self.buffer) - keep_len
+                if yield_len > 0:
+                    if self.state == "NORMAL" or (
+                        self.state == "IN_BLOCK" and self.current_role != "tool"
+                    ):
+                        output.append(self.buffer[:yield_len])
+                    self.buffer = self.buffer[yield_len:]
+                break
 
-                if found_idx != -1:
-                    content = self.buffer[:found_idx]
-                    if self.current_role != "tool":
-                        output.append(content)
-                    self.buffer = self.buffer[found_idx + found_len :]
-                    self.state = "NORMAL"
-                    self.current_role = ""
+            start, end = match.span()
+            matched_group = match.lastgroup
+            pre_text = self.buffer[:start]
+
+            if self.state == "NORMAL" or (self.state == "IN_BLOCK" and self.current_role != "tool"):
+                output.append(pre_text)
+
+            if matched_group.endswith("_START"):
+                m_type = matched_group.split("_")[0]
+                if m_type == "TAG":
+                    self.state = "IN_TAG_HEADER"
                 else:
-                    max_end_len = max(len(p) for p in cfg["ends"])
-                    if self.current_role != "tool":
-                        if len(self.buffer) > max_end_len:
-                            output.append(self.buffer[:-max_end_len])
-                            self.buffer = self.buffer[-max_end_len:]
-                        break
-                    else:
-                        if len(self.buffer) > max_end_len:
-                            self.buffer = self.buffer[-max_end_len:]
-                        break
+                    self.state = f"IN_{m_type}"
+            elif matched_group in ("PROTOCOL_EXIT", "HINT_EXIT"):
+                self.state = "IN_BLOCK" if self.in_chatml else "NORMAL"
+            elif matched_group == "TAG_EXIT":
+                self.state = "NORMAL"
+                self.in_chatml = False
+                self.current_role = ""
+
+            self.buffer = self.buffer[end:]
 
         return "".join(output)
 
     def flush(self) -> str:
         """Release remaining buffer content and perform final cleanup at stream end."""
         res = ""
-        if self.state in ("IN_TOOL", "IN_ORPHAN", "IN_RESP", "IN_HINT", "IN_ARG", "IN_RESULT"):
-            res = ""
-        elif (self.state == "IN_BLOCK" and self.current_role != "tool") or self.state == "NORMAL":
+        if self.state == "NORMAL" or (self.state == "IN_BLOCK" and self.current_role != "tool"):
             res = self.buffer
+            tail_match = STREAM_TAIL_RE.search(res)
+            if tail_match:
+                res = res[: -len(tail_match.group(0))]
 
         self.buffer = ""
         self.state = "NORMAL"
+        self.in_chatml = False
         return strip_system_hints(res)
 
 
