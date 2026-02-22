@@ -5,13 +5,13 @@ description = "FastAPI Server built on Gemini Web API"
 readme = "README.md"
 requires-python = "==3.13.*"
 dependencies = [
-    "fastapi>=0.129.0",
+    "fastapi>=0.129.2",
     "gemini-webapi>=1.19.2",
     "httptools>=0.7.1",
     "lmdb>=1.7.5",
     "loguru>=0.7.3",
     "orjson>=3.11.7",
-    "pydantic-settings[yaml]>=2.13.0",
+    "pydantic-settings[yaml]>=2.13.1",
     "uvicorn>=0.41.0",
     "uvloop>=0.22.1; sys_platform != 'win32'",
 ]
@@ -22,7 +22,7 @@ Repository = "https://github.com/Nativu5/Gemini-FastAPI"
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.2",
-    "ruff>=0.15.1",
+    "ruff>=0.15.2",
 ]
 
 [dependency-groups]
