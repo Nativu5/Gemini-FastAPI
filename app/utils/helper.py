@@ -14,7 +14,7 @@ import httpx
 import orjson
 from loguru import logger
 
-from ..models import FunctionCall, Message, ToolCall
+from app.models import FunctionCall, Message, ToolCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
@@ -36,41 +36,88 @@ TOOL_WRAP_HINT = (
     "CRITICAL: Do NOT mix natural language with protocol tags. Either respond naturally OR provide the protocol block alone. There is no middle ground.\n"
 )
 TOOL_BLOCK_RE = re.compile(
-    r"(?:\[ToolCalls]|\\\[ToolCalls\\])\s*(.*?)\s*(?:\[/ToolCalls]|\\\[\\/ToolCalls\\])",
+    r"\\?\[\s*ToolCalls\s*\\?]\s*(.*?)\s*\\?\[\s*\\?/\s*ToolCalls\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TOOL_CALL_RE = re.compile(
-    r"(?:\[Call:|\\\[Call\\:)(?P<name>(?:[^]\\]|\\.)+)(?:]|\\])\s*(?P<body>.*?)\s*(?:\[/Call]|\\\[\\/Call\\])",
+    r"\\?\[\s*Call\s*\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\s*\\?/\s*Call\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_BLOCK_RE = re.compile(
-    r"(?:\[ToolResults]|\\\[ToolResults\\])\s*(.*?)\s*(?:\[/ToolResults]|\\\[\\/ToolResults\\])",
+    r"\\?\[\s*ToolResults\s*\\?]\s*(.*?)\s*\\?\[\s*\\?/\s*ToolResults\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_ITEM_RE = re.compile(
-    r"(?:\[Result:|\\\[Result\\:)(?P<name>(?:[^]\\]|\\.)+)(?:]|\\])\s*(?P<body>.*?)\s*(?:\[/Result]|\\\[\\/Result\\])",
+    r"\\?\[\s*Result\s*\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\s*\\?/\s*Result\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_ARG_RE = re.compile(
-    r"(?:\[CallParameter:|\\\[CallParameter\\:)(?P<name>(?:[^]\\]|\\.)+)(?:]|\\])\s*(?P<body>.*?)\s*(?:\[/CallParameter]|\\\[\\/CallParameter\\])",
+    r"\\?\[\s*CallParameter\s*\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\s*\\?/\s*CallParameter\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_RESULT_RE = re.compile(
-    r"(?:\[ToolResult]|\\\[ToolResult\\])\s*(.*?)\s*(?:\[/ToolResult]|\\\[\\/ToolResult\\])",
+    r"\\?\[\s*ToolResult\s*\\?]\s*(.*?)\s*\\?\[\s*\\?/\s*ToolResult\s*\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 CONTROL_TOKEN_RE = re.compile(
-    r"<\|im_(?:start|end)\|>|\\<\\\|im\\_(?:start|end)\\\|\\>", re.IGNORECASE
+    r"\\?\s*<\s*\\?\|\s*im\s*\\?_(?:start|end)\s*\\?\|\s*>\s*", re.IGNORECASE
 )
 CHATML_START_RE = re.compile(
-    r"(?:<\|im_start\|>|\\<\\\|im\\_start\\\|\\>)\s*(\w+)\s*\n?", re.IGNORECASE
+    r"\\?\s*<\s*\\?\|\s*im\s*\\?_start\s*\\?\|\s*>\s*(\w+)\s*\n?", re.IGNORECASE
 )
-CHATML_END_RE = re.compile(r"<\|im_end\|>|\\<\\\|im\\_end\\\|\\>", re.IGNORECASE)
+CHATML_END_RE = re.compile(r"\\?\s*<\s*\\?\|\s*im\s*\\?_end\s*\\?\|\s*>\s*", re.IGNORECASE)
 COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
+PARAM_FENCE_RE = re.compile(r"^(?P<fence>`{3,})")
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
 _hint_lines = [line.strip() for line in TOOL_WRAP_HINT.split("\n") if line.strip()]
 TOOL_HINT_LINE_START = _hint_lines[0] if _hint_lines else ""
 TOOL_HINT_LINE_END = _hint_lines[-1] if _hint_lines else ""
+TOOL_HINT_START_ESC = re.escape(TOOL_HINT_LINE_START) if TOOL_HINT_LINE_START else ""
+TOOL_HINT_END_ESC = re.escape(TOOL_HINT_LINE_END) if TOOL_HINT_LINE_END else ""
+
+HINT_FULL_RE = (
+    re.compile(rf"\n?{TOOL_HINT_START_ESC}:?.*?{TOOL_HINT_END_ESC}\n?", re.DOTALL | re.IGNORECASE)
+    if TOOL_HINT_START_ESC and TOOL_HINT_END_ESC
+    else None
+)
+HINT_START_RE = (
+    re.compile(rf"\n?{TOOL_HINT_START_ESC}:?\s*", re.IGNORECASE) if TOOL_HINT_START_ESC else None
+)
+HINT_END_RE = (
+    re.compile(rf"\s*{TOOL_HINT_END_ESC}\n?", re.IGNORECASE) if TOOL_HINT_END_ESC else None
+)
+
+# --- Streaming Specific Patterns ---
+_START_PATTERNS = {
+    "TOOL": r"\\?\[\s*ToolCalls\s*\\?\]",
+    "ORPHAN": r"\\?\[\s*Call\s*\\?:\s*(?:[^\]\\]|\\.)+\s*\\?\]",
+    "RESP": r"\\?\[\s*ToolResults\s*\\?\]",
+    "ARG": r"\\?\[\s*CallParameter\s*\\?:\s*(?:[^\]\\]|\\.)+\s*\\?\]",
+    "RESULT": r"\\?\[\s*ToolResult\s*\\?\]",
+    "ITEM": r"\\?\[\s*Result\s*\\?:\s*(?:[^\]\\]|\\.)+\s*\\?\]",
+    "TAG": r"\\?\s*<\s*\\?\|\s*im\s*\\?_start\s*\\?\|\s*>",
+}
+
+_PROTOCOL_ENDS = (
+    r"\\?\[\s*\\?/\s*(?:ToolCalls|Call|ToolResults|CallParameter|ToolResult|Result)\s*\\?\]"
+)
+_TAG_END = r"\\?\s*<\s*\\?\|\s*im\s*\\?_end\s*\\?\|\s*>"
+
+if TOOL_HINT_START_ESC and TOOL_HINT_END_ESC:
+    _START_PATTERNS["HINT"] = rf"\n?{TOOL_HINT_START_ESC}:?\s*"
+
+_master_parts = [f"(?P<{name}_START>{pattern})" for name, pattern in _START_PATTERNS.items()]
+_master_parts.append(f"(?P<PROTOCOL_EXIT>{_PROTOCOL_ENDS})")
+_master_parts.append(f"(?P<TAG_EXIT>{_TAG_END})")
+
+if TOOL_HINT_START_ESC and TOOL_HINT_END_ESC:
+    _master_parts.append(f"(?P<HINT_EXIT>{TOOL_HINT_END_ESC}\n?)")
+
+STREAM_MASTER_RE = re.compile("|".join(_master_parts), re.IGNORECASE)
+STREAM_TAIL_RE = re.compile(
+    r"(?:\\|\\?\[[TCRP/]?\s*[^]]*|\\?\s*<\s*\\?\|?\s*i?\s*m?\s*\\?_?(?:s?t?a?r?t?|e?n?d?)\s*\\?\|?\s*>?|)$",
+    re.IGNORECASE,
+)
 
 
 def add_tag(role: str, content: str, unclose: bool = False) -> str:
@@ -113,7 +160,7 @@ def _strip_param_fences(s: str) -> str:
     if not s:
         return ""
 
-    match = re.match(r"^(?P<fence>`{3,})", s)
+    match = PARAM_FENCE_RE.match(s)
     if not match or not s.endswith(match.group("fence")):
         return s
 
@@ -212,14 +259,12 @@ def strip_system_hints(text: str) -> str:
 
     cleaned = t_unescaped.replace(TOOL_WRAP_HINT, "").replace(TOOL_HINT_STRIPPED, "")
 
-    if TOOL_HINT_LINE_START and TOOL_HINT_LINE_END:
-        pattern = rf"\n?{re.escape(TOOL_HINT_LINE_START)}.*?{re.escape(TOOL_HINT_LINE_END)}\.?\n?"
-        cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
-
-    if TOOL_HINT_LINE_START:
-        cleaned = re.sub(rf"\n?{re.escape(TOOL_HINT_LINE_START)}:?\s*", "", cleaned)
-    if TOOL_HINT_LINE_END:
-        cleaned = re.sub(rf"\s*{re.escape(TOOL_HINT_LINE_END)}\.?\n?", "", cleaned)
+    if HINT_FULL_RE:
+        cleaned = HINT_FULL_RE.sub("", cleaned)
+    if HINT_START_RE:
+        cleaned = HINT_START_RE.sub("", cleaned)
+    if HINT_END_RE:
+        cleaned = HINT_END_RE.sub("", cleaned)
 
     cleaned = strip_tagged_blocks(cleaned)
     cleaned = CONTROL_TOKEN_RE.sub("", cleaned)
@@ -272,7 +317,7 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
             arguments = "{}"
 
         index = len(tool_calls)
-        seed = f"{name}:{arguments}:{index}".encode("utf-8")
+        seed = f"{name}:{arguments}:{index}".encode()
         call_id = f"call_{hashlib.sha256(seed).hexdigest()[:24]}"
 
         tool_calls.append(

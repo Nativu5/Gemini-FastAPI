@@ -3,33 +3,61 @@ name = "gemini-fastapi"
 version = "1.0.0"
 description = "FastAPI Server built on Gemini Web API"
 readme = "README.md"
-requires-python = "==3.12.*"
+requires-python = "==3.13.*"
 dependencies = [
-    "fastapi>=0.129.0",
+    "fastapi>=0.129.2",
     "gemini-webapi>=1.19.2",
+    "httptools>=0.7.1",
     "lmdb>=1.7.5",
     "loguru>=0.7.3",
     "orjson>=3.11.7",
-    "pydantic-settings[yaml]>=2.12.0",
-    "uvicorn>=0.40.0",
+    "pydantic-settings[yaml]>=2.13.1",
+    "uvicorn>=0.41.0",
     "uvloop>=0.22.1; sys_platform != 'win32'",
 ]
 
+[project.urls]
+Repository = "https://github.com/Nativu5/Gemini-FastAPI"
+
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.15.0",
+    "pytest>=9.0.2",
+    "ruff>=0.15.2",
+]
+
+[dependency-groups]
+dev = [
+    "gemini-fastapi[dev]",
 ]
 
 [tool.ruff]
 line-length = 100
-lint.select = ["E", "F", "W", "I", "RUF"]
-lint.ignore = ["E501"]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+    "TID",  # flake8-tidy-imports
+]
+ignore = [
+    "E501", # line too long
+]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.security.HTTPBearer",
+]
 
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
-
-[dependency-groups]
-dev = [
-    "ruff>=0.15.1",
-]

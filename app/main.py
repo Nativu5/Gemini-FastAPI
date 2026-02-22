@@ -43,7 +43,7 @@ async def _run_retention_cleanup(stop_event: asyncio.Event) -> None:
                 stop_event.wait(),
                 timeout=RETENTION_CLEANUP_INTERVAL_SECONDS,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             continue
 
     logger.info("LMDB retention cleanup task stopped.")

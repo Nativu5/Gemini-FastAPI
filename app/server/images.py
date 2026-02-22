@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
-from ..server.middleware import get_image_store_dir, verify_image_token
+from app.server.middleware import get_image_store_dir, verify_image_token
 
 router = APIRouter()
 

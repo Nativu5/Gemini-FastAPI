@@ -8,8 +8,9 @@ on:
       - "v*"
     paths-ignore:
       - "**/*.md"
-      - ".github/workflows/ruff.yaml"
-      - ".github/workflows/track.yml"
+      - ".github/*"
+      - "LICENSE"
+      - ".gitignore"
 
 env:
   REGISTRY: ghcr.io
@@ -25,6 +26,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -46,6 +50,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=raw,value={{date 'YYYYMMDD'}}-{{sha}}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image

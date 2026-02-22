@@ -1,8 +1,8 @@
 from fastapi import APIRouter
 from loguru import logger
 
-from ..models import HealthCheckResponse
-from ..services import GeminiClientPool, LMDBConversationStore
+from app.models import HealthCheckResponse
+from app.services import GeminiClientPool, LMDBConversationStore
 
 router = APIRouter()
 

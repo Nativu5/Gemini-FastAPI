@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -10,28 +10,28 @@ class ContentItem(BaseModel):
     """Individual content item (text, image, or file) within a message."""
 
     type: Literal["text", "image_url", "file", "input_audio"]
-    text: Optional[str] = None
-    image_url: Optional[Dict[str, str]] = None
-    input_audio: Optional[Dict[str, Any]] = None
-    file: Optional[Dict[str, str]] = None
-    annotations: List[Dict[str, Any]] = Field(default_factory=list)
+    text: str | None = Field(default=None)
+    image_url: dict[str, Any] | None = Field(default=None)
+    input_audio: dict[str, Any] | None = Field(default=None)
+    file: dict[str, Any] | None = Field(default=None)
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class Message(BaseModel):
     """Message model"""
 
     role: str
-    content: Union[str, List[ContentItem], None] = None
-    name: Optional[str] = None
-    tool_calls: Optional[List["ToolCall"]] = None
-    tool_call_id: Optional[str] = None
-    refusal: Optional[str] = None
-    reasoning_content: Optional[str] = None
-    audio: Optional[Dict[str, Any]] = None
-    annotations: List[Dict[str, Any]] = Field(default_factory=list)
+    content: str | list[ContentItem] | None = Field(default=None)
+    name: str | None = Field(default=None)
+    tool_calls: list[ToolCall] | None = Field(default=None)
+    tool_call_id: str | None = Field(default=None)
+    refusal: str | None = Field(default=None)
+    reasoning_content: str | None = Field(default=None)
+    audio: dict[str, Any] | None = Field(default=None)
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def normalize_role(self) -> "Message":
+    def normalize_role(self) -> Message:
         """Normalize 'developer' role to 'system' for Gemini compatibility."""
         if self.role == "developer":
             self.role = "system"
@@ -44,7 +44,7 @@ class Choice(BaseModel):
     index: int
     message: Message
     finish_reason: str
-    logprobs: Optional[Dict[str, Any]] = None
+    logprobs: dict[str, Any] | None = Field(default=None)
 
 
 class FunctionCall(BaseModel):
@@ -66,8 +66,8 @@ class ToolFunctionDefinition(BaseModel):
     """Function definition for tool."""
 
     name: str
-    description: Optional[str] = None
-    parameters: Optional[Dict[str, Any]] = None
+    description: str | None = Field(default=None)
+    parameters: dict[str, Any] | None = Field(default=None)
 
 
 class Tool(BaseModel):
@@ -96,8 +96,8 @@ class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
-    prompt_tokens_details: Optional[Dict[str, int]] = None
-    completion_tokens_details: Optional[Dict[str, int]] = None
+    prompt_tokens_details: dict[str, int] | None = Field(default=None)
+    completion_tokens_details: dict[str, int] | None = Field(default=None)
 
 
 class ModelData(BaseModel):
@@ -113,17 +113,17 @@ class ChatCompletionRequest(BaseModel):
     """Chat completion request model"""
 
     model: str
-    messages: List[Message]
-    stream: Optional[bool] = False
-    user: Optional[str] = None
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 1.0
-    max_tokens: Optional[int] = None
-    tools: Optional[List["Tool"]] = None
-    tool_choice: Optional[
-        Union[Literal["none"], Literal["auto"], Literal["required"], "ToolChoiceFunction"]
-    ] = None
-    response_format: Optional[Dict[str, Any]] = None
+    messages: list[Message]
+    stream: bool | None = Field(default=False)
+    user: str | None = Field(default=None)
+    temperature: float | None = Field(default=0.7)
+    top_p: float | None = Field(default=1.0)
+    max_tokens: int | None = Field(default=None)
+    tools: list[Tool] | None = Field(default=None)
+    tool_choice: (
+        Literal["none"] | Literal["auto"] | Literal["required"] | ToolChoiceFunction | None
+    ) = Field(default=None)
+    response_format: dict[str, Any] | None = Field(default=None)
 
 
 class ChatCompletionResponse(BaseModel):
@@ -133,7 +133,7 @@ class ChatCompletionResponse(BaseModel):
     object: str = "chat.completion"
     created: int
     model: str
-    choices: List[Choice]
+    choices: list[Choice]
     usage: Usage
 
 
@@ -141,23 +141,23 @@ class ModelListResponse(BaseModel):
     """Model list model"""
 
     object: str = "list"
-    data: List[ModelData]
+    data: list[ModelData]
 
 
 class HealthCheckResponse(BaseModel):
     """Health check response model"""
 
     ok: bool
-    storage: Optional[Dict[str, str | int]] = None
-    clients: Optional[Dict[str, bool]] = None
-    error: Optional[str] = None
+    storage: dict[str, Any] | None = Field(default=None)
+    clients: dict[str, bool] | None = Field(default=None)
+    error: str | None = Field(default=None)
 
 
 class ConversationInStore(BaseModel):
     """Conversation model for storing in the database."""
 
-    created_at: Optional[datetime] = Field(default=None)
-    updated_at: Optional[datetime] = Field(default=None)
+    created_at: datetime | None = Field(default=None)
+    updated_at: datetime | None = Field(default=None)
 
     # Gemini Web API does not support changing models once a conversation is created.
     model: str = Field(..., description="Model used for the conversation")
@@ -172,13 +172,13 @@ class ResponseInputContent(BaseModel):
     """Content item for Responses API input."""
 
     type: Literal["input_text", "input_image", "input_file"]
-    text: Optional[str] = None
-    image_url: Optional[str] = None
-    detail: Optional[Literal["auto", "low", "high"]] = None
-    file_url: Optional[str] = None
-    file_data: Optional[str] = None
-    filename: Optional[str] = None
-    annotations: List[Dict[str, Any]] = Field(default_factory=list)
+    text: str | None = Field(default=None)
+    image_url: str | None = Field(default=None)
+    detail: Literal["auto", "low", "high"] | None = Field(default=None)
+    file_url: str | None = Field(default=None)
+    file_data: str | None = Field(default=None)
+    filename: str | None = Field(default=None)
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -192,42 +192,42 @@ class ResponseInputContent(BaseModel):
 class ResponseInputItem(BaseModel):
     """Single input item for Responses API."""
 
-    type: Optional[Literal["message"]] = "message"
+    type: Literal["message"] | None = Field(default="message")
     role: Literal["user", "assistant", "system", "developer"]
-    content: Union[str, List[ResponseInputContent]]
+    content: str | list[ResponseInputContent]
 
 
 class ResponseToolChoice(BaseModel):
     """Tool choice enforcing a specific tool in Responses API."""
 
     type: Literal["function", "image_generation"]
-    function: Optional[ToolChoiceFunctionDetail] = None
+    function: ToolChoiceFunctionDetail | None = Field(default=None)
 
 
 class ResponseImageTool(BaseModel):
     """Image generation tool specification for Responses API."""
 
     type: Literal["image_generation"]
-    model: Optional[str] = None
-    output_format: Optional[str] = None
+    model: str | None = Field(default=None)
+    output_format: str | None = Field(default=None)
 
 
 class ResponseCreateRequest(BaseModel):
     """Responses API request payload."""
 
     model: str
-    input: Union[str, List[ResponseInputItem]]
-    instructions: Optional[Union[str, List[ResponseInputItem]]] = None
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 1.0
-    max_output_tokens: Optional[int] = None
-    stream: Optional[bool] = False
-    tool_choice: Optional[Union[str, ResponseToolChoice]] = None
-    tools: Optional[List[Union[Tool, ResponseImageTool]]] = None
-    store: Optional[bool] = None
-    user: Optional[str] = None
-    response_format: Optional[Dict[str, Any]] = None
-    metadata: Optional[Dict[str, Any]] = None
+    input: str | list[ResponseInputItem]
+    instructions: str | list[ResponseInputItem] | None = Field(default=None)
+    temperature: float | None = Field(default=0.7)
+    top_p: float | None = Field(default=1.0)
+    max_output_tokens: int | None = Field(default=None)
+    stream: bool | None = Field(default=False)
+    tool_choice: str | ResponseToolChoice | None = Field(default=None)
+    tools: list[Tool | ResponseImageTool] | None = Field(default=None)
+    store: bool | None = Field(default=None)
+    user: str | None = Field(default=None)
+    response_format: dict[str, Any] | None = Field(default=None)
+    metadata: dict[str, Any] | None = Field(default=None)
 
 
 class ResponseUsage(BaseModel):
@@ -242,8 +242,8 @@ class ResponseOutputContent(BaseModel):
     """Content item for Responses API output."""
 
     type: Literal["output_text"]
-    text: Optional[str] = ""
-    annotations: List[Dict[str, Any]] = Field(default_factory=list)
+    text: str | None = Field(default="")
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ResponseOutputMessage(BaseModel):
@@ -252,27 +252,29 @@ class ResponseOutputMessage(BaseModel):
     id: str
     type: Literal["message"]
     role: Literal["assistant"]
-    content: List[ResponseOutputContent]
+    content: list[ResponseOutputContent]
 
 
 class ResponseImageGenerationCall(BaseModel):
     """Image generation call record emitted in Responses API."""
 
     id: str
-    type: Literal["image_generation_call"] = "image_generation_call"
-    status: Literal["completed", "in_progress", "generating", "failed"] = "completed"
-    result: Optional[str] = None
-    output_format: Optional[str] = None
-    size: Optional[str] = None
-    revised_prompt: Optional[str] = None
+    type: Literal["image_generation_call"] = Field(default="image_generation_call")
+    status: Literal["completed", "in_progress", "generating", "failed"] = Field(default="completed")
+    result: str | None = Field(default=None)
+    output_format: str | None = Field(default=None)
+    size: str | None = Field(default=None)
+    revised_prompt: str | None = Field(default=None)
 
 
 class ResponseToolCall(BaseModel):
     """Tool call record emitted in Responses API."""
 
     id: str
-    type: Literal["tool_call"] = "tool_call"
-    status: Literal["in_progress", "completed", "failed", "requires_action"] = "completed"
+    type: Literal["tool_call"] = Field(default="tool_call")
+    status: Literal["in_progress", "completed", "failed", "requires_action"] = Field(
+        default="completed"
+    )
     function: FunctionCall
 
 
@@ -280,10 +282,10 @@ class ResponseCreateResponse(BaseModel):
     """Responses API response payload."""
 
     id: str
-    object: Literal["response"] = "response"
+    object: Literal["response"] = Field(default="response")
     created_at: int
     model: str
-    output: List[Union[ResponseOutputMessage, ResponseImageGenerationCall, ResponseToolCall]]
+    output: list[ResponseOutputMessage | ResponseImageGenerationCall | ResponseToolCall]
     status: Literal[
         "in_progress",
         "completed",
@@ -291,13 +293,13 @@ class ResponseCreateResponse(BaseModel):
         "incomplete",
         "cancelled",
         "requires_action",
-    ] = "completed"
-    tool_choice: Optional[Union[str, ResponseToolChoice]] = None
-    tools: Optional[List[Union[Tool, ResponseImageTool]]] = None
+    ] = Field(default="completed")
+    tool_choice: str | ResponseToolChoice | None = Field(default=None)
+    tools: list[Tool | ResponseImageTool] | None = Field(default=None)
     usage: ResponseUsage
-    error: Optional[Dict[str, Any]] = None
-    metadata: Optional[Dict[str, Any]] = None
-    input: Optional[Union[str, List[ResponseInputItem]]] = None
+    error: dict[str, Any] | None = Field(default=None)
+    metadata: dict[str, Any] | None = Field(default=None)
+    input: str | list[ResponseInputItem] | None = Field(default=None)
 
 
 # Rebuild models with forward references
