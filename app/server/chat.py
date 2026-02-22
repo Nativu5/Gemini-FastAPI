@@ -751,14 +751,21 @@ async def _send_with_split(
 class StreamingOutputFilter:
     """
     Filter to suppress technical protocol markers, tool calls, and system hints from the stream.
-    Uses a high-performance regex state machine to handle fragmented markers.
+    Uses a stack-based state machine to handle nested fragmented markers.
     """
 
     def __init__(self):
         self.buffer = ""
-        self.state = "NORMAL"
+        self.stack = ["NORMAL"]
         self.current_role = ""
-        self.in_chatml = False
+
+    @property
+    def state(self):
+        return self.stack[-1]
+
+    def _is_outputting(self) -> bool:
+        """Determines if the current state allows yielding text to the stream."""
+        return self.state == "NORMAL" or (self.state == "IN_BLOCK" and self.current_role != "tool")
 
     def process(self, chunk: str) -> str:
         self.buffer += chunk
@@ -770,8 +777,7 @@ class StreamingOutputFilter:
                 if nl_idx != -1:
                     self.current_role = self.buffer[:nl_idx].strip().lower()
                     self.buffer = self.buffer[nl_idx + 1 :]
-                    self.state = "IN_BLOCK"
-                    self.in_chatml = True
+                    self.stack[-1] = "IN_BLOCK"
                     continue
                 else:
                     break
@@ -782,9 +788,7 @@ class StreamingOutputFilter:
                 keep_len = len(tail_match.group(0)) if tail_match else 0
                 yield_len = len(self.buffer) - keep_len
                 if yield_len > 0:
-                    if self.state == "NORMAL" or (
-                        self.state == "IN_BLOCK" and self.current_role != "tool"
-                    ):
+                    if self._is_outputting():
                         output.append(self.buffer[:yield_len])
                     self.buffer = self.buffer[yield_len:]
                 break
@@ -793,21 +797,23 @@ class StreamingOutputFilter:
             matched_group = match.lastgroup
             pre_text = self.buffer[:start]
 
-            if self.state == "NORMAL" or (self.state == "IN_BLOCK" and self.current_role != "tool"):
+            if self._is_outputting():
                 output.append(pre_text)
 
             if matched_group.endswith("_START"):
                 m_type = matched_group.split("_")[0]
                 if m_type == "TAG":
-                    self.state = "IN_TAG_HEADER"
+                    self.stack.append("IN_TAG_HEADER")
                 else:
-                    self.state = f"IN_{m_type}"
-            elif matched_group in ("PROTOCOL_EXIT", "HINT_EXIT"):
-                self.state = "IN_BLOCK" if self.in_chatml else "NORMAL"
-            elif matched_group == "TAG_EXIT":
-                self.state = "NORMAL"
-                self.in_chatml = False
-                self.current_role = ""
+                    self.stack.append(f"IN_{m_type}")
+            elif matched_group in ("PROTOCOL_EXIT", "TAG_EXIT", "HINT_EXIT"):
+                if len(self.stack) > 1:
+                    self.stack.pop()
+                else:
+                    self.stack = ["NORMAL"]
+
+                if self.state == "NORMAL":
+                    self.current_role = ""
 
             self.buffer = self.buffer[end:]
 
@@ -816,15 +822,15 @@ class StreamingOutputFilter:
     def flush(self) -> str:
         """Release remaining buffer content and perform final cleanup at stream end."""
         res = ""
-        if self.state == "NORMAL" or (self.state == "IN_BLOCK" and self.current_role != "tool"):
+        if self._is_outputting():
             res = self.buffer
             tail_match = STREAM_TAIL_RE.search(res)
             if tail_match:
                 res = res[: -len(tail_match.group(0))]
 
         self.buffer = ""
-        self.state = "NORMAL"
-        self.in_chatml = False
+        self.stack = ["NORMAL"]
+        self.current_role = ""
         return strip_system_hints(res)
 
 
