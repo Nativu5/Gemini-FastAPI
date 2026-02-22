@@ -76,12 +76,16 @@ TOOL_HINT_START_ESC = re.escape(TOOL_HINT_LINE_START) if TOOL_HINT_LINE_START el
 TOOL_HINT_END_ESC = re.escape(TOOL_HINT_LINE_END) if TOOL_HINT_LINE_END else ""
 
 HINT_FULL_RE = (
-    re.compile(rf"\n?{TOOL_HINT_START_ESC}:?.*?{TOOL_HINT_END_ESC}\\.?\n?", re.DOTALL)
+    re.compile(rf"\n?{TOOL_HINT_START_ESC}:?.*?{TOOL_HINT_END_ESC}\n?", re.DOTALL | re.IGNORECASE)
     if TOOL_HINT_START_ESC and TOOL_HINT_END_ESC
     else None
 )
-HINT_START_RE = re.compile(rf"\n?{TOOL_HINT_START_ESC}:?\s*") if TOOL_HINT_START_ESC else None
-HINT_END_RE = re.compile(rf"\s*{TOOL_HINT_END_ESC}\.?\n?") if TOOL_HINT_END_ESC else None
+HINT_START_RE = (
+    re.compile(rf"\n?{TOOL_HINT_START_ESC}:?\s*", re.IGNORECASE) if TOOL_HINT_START_ESC else None
+)
+HINT_END_RE = (
+    re.compile(rf"\s*{TOOL_HINT_END_ESC}\n?", re.IGNORECASE) if TOOL_HINT_END_ESC else None
+)
 
 # --- Streaming Specific Patterns ---
 _START_PATTERNS = {
@@ -99,13 +103,15 @@ _PROTOCOL_ENDS = (
 )
 _TAG_END = r"\\?\s*<\s*\\?\|\s*im\s*\\?_end\s*\\?\|\s*>"
 
+if TOOL_HINT_START_ESC and TOOL_HINT_END_ESC:
+    _START_PATTERNS["HINT"] = rf"\n?{TOOL_HINT_START_ESC}:?\s*"
+
 _master_parts = [f"(?P<{name}_START>{pattern})" for name, pattern in _START_PATTERNS.items()]
 _master_parts.append(f"(?P<PROTOCOL_EXIT>{_PROTOCOL_ENDS})")
 _master_parts.append(f"(?P<TAG_EXIT>{_TAG_END})")
 
 if TOOL_HINT_START_ESC and TOOL_HINT_END_ESC:
-    _START_PATTERNS["HINT"] = rf"\n?{TOOL_HINT_START_ESC}:?\s*"
-    _master_parts.append(f"(?P<HINT_EXIT>{TOOL_HINT_END_ESC}\\.?\n?)")
+    _master_parts.append(f"(?P<HINT_EXIT>{TOOL_HINT_END_ESC}\n?)")
 
 STREAM_MASTER_RE = re.compile("|".join(_master_parts), re.IGNORECASE)
 STREAM_TAIL_RE = re.compile(
