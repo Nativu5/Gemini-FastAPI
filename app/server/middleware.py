@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 
@@ -70,12 +70,12 @@ def cleanup_expired_images(retention_days: int) -> int:
 
 def global_exception_handler(request: Request, exc: Exception):
     if isinstance(exc, HTTPException):
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"message": exc.detail}},
         )
 
-    return ORJSONResponse(
+    return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"error": {"message": str(exc)}},
     )

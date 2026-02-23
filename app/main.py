@@ -2,7 +2,6 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.responses import ORJSONResponse
 from loguru import logger
 
 from .server.chat import router as chat_router
@@ -93,7 +92,6 @@ def create_app() -> FastAPI:
         description="OpenAI-compatible API for Gemini Web",
         version="1.0.0",
         lifespan=lifespan,
-        default_response_class=ORJSONResponse,
     )
 
     add_cors_middleware(app)
