@@ -10,8 +10,8 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 
-import httpx
 import orjson
+from curl_cffi.requests import AsyncSession
 from loguru import logger
 
 from app.models import FunctionCall, Message, ToolCall
@@ -202,7 +202,7 @@ async def save_url_to_tempfile(url: str, tempdir: Path | None = None) -> Path:
         data = base64.b64decode(url.split(",")[1])
         suffix = mimetypes.guess_extension(mime_type) or f".{mime_type.split('/')[1]}"
     else:
-        async with httpx.AsyncClient(http2=True, follow_redirects=True) as client:
+        async with AsyncSession(impersonate="chrome", allow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             data = resp.content
