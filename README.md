@@ -74,6 +74,30 @@ python run.py
 
 The server will start on `http://localhost:8000` by default.
 
+## API Endpoints
+
+The server provides several endpoints, including OpenAI-compatible ones.
+
+### OpenAI-Compatible Endpoints
+
+These endpoints are designed to be compatible with OpenAI's API structure, allowing you to use Gemini as a drop-in replacement.
+
+- **`GET /v1/models`**: Lists all supported Gemini models.
+- **`POST /v1/chat/completions`**: Unified chat interface.
+  - **Streaming**: Set `stream: true` to receive real-time delta chunks.
+  - **Multi-modal**: Supports text, images, and file uploads.
+  - **Tool Calling**: Supports function calling via the `tools` parameter.
+  - **Structured Output**: Supports `response_format` for JSON schema enforcement.
+
+### Advanced Endpoints
+
+- **`POST /v1/responses`**: An alternative endpoint for complex interaction patterns, supporting rich output items including generated images and tool calls.
+
+### Utility Endpoints
+
+- **`GET /health`**: Health check endpoint. Returns the status of the server, configured Gemini clients, and conversation storage.
+- **`GET /images/{filename}`**: Internal endpoint to serve generated images. Requires a valid token (automatically included in image URLs returned by the API).
+
 ## Docker Deployment
 
 ### Run with Options

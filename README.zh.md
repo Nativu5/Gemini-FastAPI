@@ -74,6 +74,30 @@ python run.py
 
 服务默认启动在 `http://localhost:8000`。
 
+## API 接口
+
+本服务器提供了一系列接口，重点支持 OpenAI 兼容协议。
+
+### OpenAI 兼容接口
+
+这些接口遵循 OpenAI 的 API 规范，允许你将 Gemini 作为 **Drop-in 替代方案** 直接接入现有的 AI 应用。
+
+- **`GET /v1/models`**: 列出所有可用的 Gemini 模型。
+- **`POST /v1/chat/completions`**: 统一聊天对话接口。
+  - **流式传输**: 设置 `stream: true` 即可实时接收增量响应 (Stream Delta)。
+  - **多模态支持**: 支持在消息中包含文本、图片以及文件上传。
+  - **工具调用**: 支持通过 `tools` 参数进行函数调用 (Function Calling)。
+  - **结构化输出**: 支持 `response_format`，可严格遵循 JSON Schema。
+
+### 高级接口
+
+- **`POST /v1/responses`**: 用于复杂交互模式的专用接口，支持分步输出、生成图片及工具调用等更丰富的响应项。
+
+### 辅助与系统接口
+
+- **`GET /health`**: 健康检查接口。返回服务器运行状态、已配置的 Gemini 客户端健康度以及对话存储统计信息。
+- **`GET /images/{filename}`**: 用于访问生成的图片的内部接口。需携带有效 Token（API 返回的图片 URL 中已自动包含该 Token）。
+
 ## Docker 部署
 
 ### 直接运行
