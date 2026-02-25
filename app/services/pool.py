@@ -1,6 +1,8 @@
 import asyncio
+import inspect
 from collections import deque
 
+from gemini_webapi import GeminiClient
 from loguru import logger
 
 from app.utils import g_config
@@ -22,12 +24,23 @@ class GeminiClientPool(metaclass=Singleton):
             raise ValueError("No Gemini clients configured")
 
         for c in g_config.gemini.clients:
-            client = GeminiClientWrapper(
-                client_id=c.id,
-                secure_1psid=c.secure_1psid,
-                secure_1psidts=c.secure_1psidts,
-                proxy=c.proxy,
-            )
+            kwargs = {
+                "client_id": c.id,
+                "secure_1psid": c.secure_1psid,
+                "secure_1psidts": c.secure_1psidts,
+                "proxy": c.proxy,
+            }
+            if c.cookies:
+                sig = inspect.signature(GeminiClient.__init__)
+                if "cookies" in sig.parameters:
+                    kwargs["cookies"] = c.cookies
+                else:
+                    logger.debug(
+                        f"Ignoring 'cookies' in config for client {c.id} because "
+                        "the current version of gemini_webapi doesn't support it."
+                    )
+
+            client = GeminiClientWrapper(**kwargs)
             self._clients.append(client)
             self._id_map[c.id] = client
             self._round_robin.append(client)
