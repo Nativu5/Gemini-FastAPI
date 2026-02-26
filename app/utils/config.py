@@ -42,6 +42,9 @@ class GeminiClientSettings(BaseModel):
     secure_1psid: str = Field(..., description="Gemini Secure 1PSID")
     secure_1psidts: str = Field(..., description="Gemini Secure 1PSIDTS")
     proxy: str | None = Field(default=None, description="Proxy URL for this Gemini client")
+    cookies: dict[str, str] | None = Field(
+        default=None, description="Optional custom cookies for this Gemini client"
+    )
 
     @field_validator("proxy", mode="before")
     @classmethod
@@ -50,6 +53,16 @@ class GeminiClientSettings(BaseModel):
             return None
         stripped = value.strip()
         return stripped or None
+
+    @field_validator("cookies", mode="before")
+    @classmethod
+    def _parse_cookies(cls, v: Any) -> Any:
+        if isinstance(v, str) and v.strip().startswith("{"):
+            try:
+                return orjson.loads(v)
+            except orjson.JSONDecodeError:
+                pass
+        return v
 
 
 class GeminiModelConfig(BaseModel):
@@ -67,7 +80,6 @@ class GeminiModelConfig(BaseModel):
             try:
                 return orjson.loads(v)
             except orjson.JSONDecodeError:
-                # Return the original value to let Pydantic handle the error or type mismatch
                 return v
         return v
 
