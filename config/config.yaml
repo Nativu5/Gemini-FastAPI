@@ -23,7 +23,7 @@ gemini:
       secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
       proxy: null          # Optional proxy URL (null/empty means direct connection)
   timeout: 300             # Init timeout in seconds (Not less than 30s)
-  watchdog_timeout: 60     # Watchdog timeout in seconds (Not more than 75s)
+  watchdog_timeout: 120    # Watchdog timeout in seconds (Not less than 30s)
   auto_refresh: true       # Auto-refresh session cookies
   refresh_interval: 540    # Refresh interval in seconds (Not less than 60s)
   verbose: false           # Enable verbose logging for Gemini requests
