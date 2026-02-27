@@ -33,7 +33,7 @@ class GeminiClientWrapper(GeminiClient):
         timeout: float = cast(float, _UNSET),
         watchdog_timeout: float = cast(float, _UNSET),
         auto_close: bool = False,
-        close_delay: float = 300,
+        close_delay: float = cast(float, _UNSET),
         auto_refresh: bool = cast(bool, _UNSET),
         refresh_interval: float = cast(float, _UNSET),
         verbose: bool = cast(bool, _UNSET),
@@ -44,6 +44,7 @@ class GeminiClientWrapper(GeminiClient):
         config = g_config.gemini
         timeout = cast(float, _resolve(timeout, config.timeout))
         watchdog_timeout = cast(float, _resolve(watchdog_timeout, config.watchdog_timeout))
+        close_delay = timeout
         auto_refresh = cast(bool, _resolve(auto_refresh, config.auto_refresh))
         refresh_interval = cast(float, _resolve(refresh_interval, config.refresh_interval))
         verbose = cast(bool, _resolve(verbose, config.verbose))
