@@ -86,7 +86,6 @@ HINT_START_RE = (
 HINT_END_RE = (
     re.compile(rf"\s*{TOOL_HINT_END_ESC}\n?", re.IGNORECASE) if TOOL_HINT_END_ESC else None
 )
-THINK_TAGS_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 # --- Streaming Specific Patterns ---
 _START_PATTERNS = {

@@ -171,7 +171,7 @@ class ConversationInStore(BaseModel):
 class ResponseInputContent(BaseModel):
     """Content item for Responses API input."""
 
-    type: Literal["input_text", "input_image", "input_file"]
+    type: Literal["input_text", "output_text", "reasoning_text", "input_image", "input_file"]
     text: str | None = Field(default=None)
     image_url: str | None = Field(default=None)
     detail: Literal["auto", "low", "high"] | None = Field(default=None)
@@ -179,14 +179,6 @@ class ResponseInputContent(BaseModel):
     file_data: str | None = Field(default=None)
     filename: str | None = Field(default=None)
     annotations: list[dict[str, Any]] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_output_text(cls, data: Any) -> Any:
-        """Allow output_text (from previous turns) to be treated as input_text."""
-        if isinstance(data, dict) and data.get("type") == "output_text":
-            data["type"] = "input_text"
-        return data
 
 
 class ResponseInputItem(BaseModel):
@@ -236,6 +228,8 @@ class ResponseUsage(BaseModel):
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    input_tokens_details: dict[str, int] | None = Field(default=None)
+    output_tokens_details: dict[str, int] | None = Field(default=None)
 
 
 class ResponseOutputContent(BaseModel):
@@ -253,6 +247,30 @@ class ResponseOutputMessage(BaseModel):
     type: Literal["message"]
     role: Literal["assistant"]
     content: list[ResponseOutputContent]
+
+
+class ResponseSummaryPart(BaseModel):
+    """Summary part for reasoning."""
+
+    type: Literal["summary_text"] = Field(default="summary_text")
+    text: str
+
+
+class ResponseReasoningContentPart(BaseModel):
+    """Content part for reasoning."""
+
+    type: Literal["reasoning_text"] = Field(default="reasoning_text")
+    text: str
+
+
+class ResponseReasoning(BaseModel):
+    """Reasoning item returned by Responses API."""
+
+    id: str
+    type: Literal["reasoning"] = Field(default="reasoning")
+    status: Literal["in_progress", "completed", "incomplete"] = Field(default="completed")
+    summary: list[ResponseSummaryPart] | None = Field(default=None)
+    content: list[ResponseReasoningContentPart] | None = Field(default=None)
 
 
 class ResponseImageGenerationCall(BaseModel):
@@ -285,7 +303,9 @@ class ResponseCreateResponse(BaseModel):
     object: Literal["response"] = Field(default="response")
     created_at: int
     model: str
-    output: list[ResponseOutputMessage | ResponseImageGenerationCall | ResponseToolCall]
+    output: list[
+        ResponseReasoning | ResponseOutputMessage | ResponseImageGenerationCall | ResponseToolCall
+    ]
     status: Literal[
         "in_progress",
         "completed",
