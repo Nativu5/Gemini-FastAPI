@@ -879,7 +879,7 @@ def _create_real_streaming_response(
 
                 if t_delta := chunk.thoughts_delta:
                     if not last_chunk_was_thought and not full_thoughts:
-                        yield f"data: {orjson.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': model_name, 'choices': [{'index': 0, 'delta': {'content': '<think>'}, 'finish_reason': None}]}).decode('utf-8')}\n\n"
+                        yield f"data: {orjson.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': model_name, 'choices': [{'index': 0, 'delta': {'content': '<think>\n'}, 'finish_reason': None}]}).decode('utf-8')}\n\n"
                     full_thoughts += t_delta
                     data = {
                         "id": completion_id,
@@ -895,7 +895,7 @@ def _create_real_streaming_response(
 
                 if text_delta := chunk.text_delta:
                     if last_chunk_was_thought:
-                        yield f"data: {orjson.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': model_name, 'choices': [{'index': 0, 'delta': {'content': '</think>\n'}, 'finish_reason': None}]}).decode('utf-8')}\n\n"
+                        yield f"data: {orjson.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': model_name, 'choices': [{'index': 0, 'delta': {'content': '\n</think>\n\n'}, 'finish_reason': None}]}).decode('utf-8')}\n\n"
                         last_chunk_was_thought = False
                     full_text += text_delta
                     if visible_delta := suppressor.process(text_delta):
@@ -926,7 +926,7 @@ def _create_real_streaming_response(
                 full_thoughts = final_chunk.thoughts
 
         if last_chunk_was_thought:
-            yield f"data: {orjson.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': model_name, 'choices': [{'index': 0, 'delta': {'content': '</think>\n'}, 'finish_reason': None}]}).decode('utf-8')}\n\n"
+            yield f"data: {orjson.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': model_name, 'choices': [{'index': 0, 'delta': {'content': '\n</think>\n\n'}, 'finish_reason': None}]}).decode('utf-8')}\n\n"
 
         if remaining_text := suppressor.flush():
             data = {
@@ -940,7 +940,7 @@ def _create_real_streaming_response(
             }
             yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
-        raw_output_with_think = f"<think>{full_thoughts}</think>\n" if full_thoughts else ""
+        raw_output_with_think = f"<think>\n{full_thoughts}\n</think>\n\n" if full_thoughts else ""
         raw_output_with_think += full_text
         assistant_text, storage_output, tool_calls = _process_llm_output(
             raw_output_with_think, full_text, structured_requirement
@@ -1072,13 +1072,13 @@ def _create_responses_real_streaming_response(
                 all_outputs.append(chunk)
                 if t_delta := chunk.thoughts_delta:
                     if not last_chunk_was_thought and not full_thoughts:
-                        yield f"data: {orjson.dumps({**base_event, 'type': 'response.output_text.delta', 'output_index': 0, 'delta': '<think>'}).decode('utf-8')}\n\n"
+                        yield f"data: {orjson.dumps({**base_event, 'type': 'response.output_text.delta', 'output_index': 0, 'delta': '<think>\n'}).decode('utf-8')}\n\n"
                     full_thoughts += t_delta
                     yield f"data: {orjson.dumps({**base_event, 'type': 'response.output_text.delta', 'output_index': 0, 'delta': t_delta}).decode('utf-8')}\n\n"
                     last_chunk_was_thought = True
                 if text_delta := chunk.text_delta:
                     if last_chunk_was_thought:
-                        yield f"data: {orjson.dumps({**base_event, 'type': 'response.output_text.delta', 'output_index': 0, 'delta': '</think>\n'}).decode('utf-8')}\n\n"
+                        yield f"data: {orjson.dumps({**base_event, 'type': 'response.output_text.delta', 'output_index': 0, 'delta': '\n</think>\n\n'}).decode('utf-8')}\n\n"
                         last_chunk_was_thought = False
                     full_text += text_delta
                     if visible_delta := suppressor.process(text_delta):
@@ -1096,12 +1096,12 @@ def _create_responses_real_streaming_response(
                 full_thoughts = final_chunk.thoughts
 
         if last_chunk_was_thought:
-            yield f"data: {orjson.dumps({**base_event, 'type': 'response.output_text.delta', 'output_index': 0, 'delta': '</think>\n'}).decode('utf-8')}\n\n"
+            yield f"data: {orjson.dumps({**base_event, 'type': 'response.output_text.delta', 'output_index': 0, 'delta': '\n</think>\n\n'}).decode('utf-8')}\n\n"
         if remaining_text := suppressor.flush():
             yield f"data: {orjson.dumps({**base_event, 'type': 'response.output_text.delta', 'output_index': 0, 'delta': remaining_text}).decode('utf-8')}\n\n"
         yield f"data: {orjson.dumps({**base_event, 'type': 'response.output_text.done', 'output_index': 0}).decode('utf-8')}\n\n"
 
-        raw_output_with_think = f"<think>{full_thoughts}</think>\n" if full_thoughts else ""
+        raw_output_with_think = f"<think>\n{full_thoughts}\n</think>\n\n" if full_thoughts else ""
         raw_output_with_think += full_text
         assistant_text, storage_output, detected_tool_calls = _process_llm_output(
             raw_output_with_think, full_text, structured_requirement
