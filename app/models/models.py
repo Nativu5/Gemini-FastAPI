@@ -245,6 +245,7 @@ class ResponseOutputMessage(BaseModel):
 
     id: str
     type: Literal["message"]
+    status: Literal["in_progress", "completed", "incomplete"] = Field(default="completed")
     role: Literal["assistant"]
     content: list[ResponseOutputContent]
 

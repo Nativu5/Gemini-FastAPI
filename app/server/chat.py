@@ -20,6 +20,8 @@ from loguru import logger
 
 from app.models import (
     ChatCompletionRequest,
+    ChatCompletionResponse,
+    Choice,
     ContentItem,
     ConversationInStore,
     Message,
@@ -34,12 +36,14 @@ from app.models import (
     ResponseOutputContent,
     ResponseOutputMessage,
     ResponseReasoning,
-    ResponseReasoningContentPart,
+    ResponseSummaryPart,
     ResponseToolCall,
     ResponseToolChoice,
     ResponseUsage,
     Tool,
+    ToolCall,
     ToolChoiceFunction,
+    Usage,
 )
 from app.server.middleware import (
     get_image_store_dir,
@@ -165,16 +169,17 @@ def _create_responses_standard_payload(
     full_thoughts: str | None = None,
 ) -> ResponseCreateResponse:
     """Unified factory for building ResponseCreateResponse objects."""
-    message_id = f"msg_{uuid.uuid4().hex}"
-    reason_id = f"reason_{uuid.uuid4().hex}"
+    message_id = f"msg_{uuid.uuid4().hex[:24]}"
+    reason_id = f"rs_{uuid.uuid4().hex[:24]}"
 
     output_items: list[Any] = []
     if full_thoughts:
         output_items.append(
             ResponseReasoning(
                 id=reason_id,
+                type="reasoning",
                 status="completed",
-                content=[ResponseReasoningContentPart(text=full_thoughts)],
+                summary=[ResponseSummaryPart(type="summary_text", text=full_thoughts)],
             )
         )
 
@@ -182,6 +187,7 @@ def _create_responses_standard_payload(
         ResponseOutputMessage(
             id=message_id,
             type="message",
+            status="completed",
             role="assistant",
             content=response_contents,
         )
@@ -192,6 +198,7 @@ def _create_responses_standard_payload(
             [
                 ResponseToolCall(
                     id=call.id if hasattr(call, "id") else call["id"],
+                    type="tool_call",
                     status="completed",
                     function=call.function if hasattr(call, "function") else call["function"],
                 )
@@ -203,15 +210,16 @@ def _create_responses_standard_payload(
 
     return ResponseCreateResponse(
         id=response_id,
+        object="response",
         created_at=created_time,
         model=model_name,
         output=output_items,
         status="completed",
         usage=usage,
         input=normalized_input or None,
-        metadata=request.metadata or None,
-        tools=request.tools,
-        tool_choice=request.tool_choice,
+        metadata=request.metadata or {},
+        tools=request.tools or [],
+        tool_choice=request.tool_choice or "auto",
     )
 
 
@@ -224,27 +232,34 @@ def _create_chat_completion_standard_payload(
     finish_reason: str,
     usage: dict,
     reasoning_content: str | None = None,
-) -> dict:
-    """Unified factory for building Chat Completion response dictionaries."""
-    return {
-        "id": completion_id,
-        "object": "chat.completion",
-        "created": created_time,
-        "model": model_name,
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": visible_output or None,
-                    "tool_calls": tool_calls_payload or None,
-                    "reasoning_content": reasoning_content or None,
-                },
-                "finish_reason": finish_reason,
-            }
+) -> ChatCompletionResponse:
+    """Unified factory for building Chat Completion response objects."""
+    # Convert tool calls to Model objects if they are dicts
+    tool_calls = None
+    if tool_calls_payload:
+        tool_calls = [ToolCall.model_validate(tc) for tc in tool_calls_payload]
+
+    message = Message(
+        role="assistant",
+        content=visible_output or None,
+        tool_calls=tool_calls,
+        reasoning_content=reasoning_content or None,
+    )
+
+    return ChatCompletionResponse(
+        id=completion_id,
+        object="chat.completion",
+        created=created_time,
+        model=model_name,
+        choices=[
+            Choice(
+                index=0,
+                message=message,
+                finish_reason=finish_reason,
+            )
         ],
-        "usage": usage,
-    }
+        usage=Usage(**usage),
+    )
 
 
 def _process_llm_output(
@@ -994,7 +1009,6 @@ def _create_real_streaming_response(
         for out in all_outputs:
             if out.images:
                 for img in out.images:
-                    # Use the image URL as a stable identifier across chunks
                     if img.url not in seen_urls:
                         images.append(img)
                         seen_urls.add(img.url)
@@ -1006,7 +1020,6 @@ def _create_real_streaming_response(
                 image_store = get_image_store_dir()
                 _, _, _, fname, fhash = await _image_to_base64(image, image_store)
                 if fhash in seen_hashes:
-                    # Duplicate content, delete the file and skip
                     (image_store / fname).unlink(missing_ok=True)
                     continue
                 seen_hashes.add(fhash)
@@ -1019,7 +1032,6 @@ def _create_real_streaming_response(
         if image_markdown:
             assistant_text += image_markdown
             storage_output += image_markdown
-            # Send the image Markdown as a final text chunk before usage
             data = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -1050,12 +1062,12 @@ def _create_real_streaming_response(
         p_tok, c_tok, t_tok, r_tok = _calculate_usage(
             messages, assistant_text, tool_calls, full_thoughts
         )
-        usage = {
-            "prompt_tokens": p_tok,
-            "completion_tokens": c_tok,
-            "total_tokens": t_tok,
-            "completion_tokens_details": {"reasoning_tokens": r_tok},
-        }
+        usage = Usage(
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+            total_tokens=t_tok,
+            completion_tokens_details={"reasoning_tokens": r_tok},
+        )
         data = {
             "id": completion_id,
             "object": "chat.completion.chunk",
@@ -1064,7 +1076,7 @@ def _create_real_streaming_response(
             "choices": [
                 {"index": 0, "delta": {}, "finish_reason": "tool_calls" if tool_calls else "stop"}
             ],
-            "usage": usage,
+            "usage": usage.model_dump(mode="json"),
         }
         _persist_conversation(
             db,
@@ -1099,7 +1111,7 @@ def _create_responses_real_streaming_response(
 ) -> StreamingResponse:
     """
     Create a real-time streaming response for the Responses API.
-    Ensures final accumulated text and thoughts are synchronized.
+    Ensures final accumulated text and thoughts are synchronized and follow the formal event stream spec.
     """
     base_event = {
         "id": response_id,
@@ -1109,190 +1121,205 @@ def _create_responses_real_streaming_response(
     }
 
     async def generate_stream():
-        yield f"data: {
-            orjson.dumps(
-                {
-                    **base_event,
-                    'type': 'response.created',
-                    'response': {
-                        'id': response_id,
-                        'object': 'response',
-                        'created_at': created_time,
-                        'model': model_name,
-                        'status': 'in_progress',
-                        'metadata': request.metadata,
-                        'input': None,
-                        'tools': request.tools,
-                        'tool_choice': request.tool_choice,
-                    },
-                }
-            ).decode()
-        }\n\n"
+        seq = 0
 
-        full_thoughts = ""
-        full_text = ""
+        def make_event(etype: str, data: dict) -> str:
+            nonlocal seq
+            data["sequence_number"] = seq
+            seq += 1
+            return f"event: {etype}\ndata: {orjson.dumps(data).decode()}\n\n"
+
+        yield make_event(
+            "response.created",
+            {
+                **base_event,
+                "type": "response.created",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_time,
+                    "model": model_name,
+                    "status": "in_progress",
+                    "metadata": request.metadata or {},
+                    "input": None,
+                    "tools": request.tools or [],
+                    "tool_choice": request.tool_choice or "auto",
+                    "output": [],
+                    "usage": None,
+                },
+            },
+        )
+
+        yield make_event(
+            "response.in_progress",
+            {
+                **base_event,
+                "type": "response.in_progress",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_time,
+                    "model": model_name,
+                    "status": "in_progress",
+                    "metadata": request.metadata or {},
+                    "output": [],
+                },
+            },
+        )
+
+        full_thoughts, full_text = "", ""
         all_outputs: list[ModelOutput] = []
 
-        thought_item_id = f"reason_{uuid.uuid4().hex}"
-        message_item_id = f"msg_{uuid.uuid4().hex}"
+        thought_item_id = f"rs_{uuid.uuid4().hex[:24]}"
+        message_item_id = f"msg_{uuid.uuid4().hex[:24]}"
 
-        thought_open = False
-        message_open = False
+        thought_open, message_open = False, False
         current_index = 0
-
         suppressor = StreamingOutputFilter()
 
         try:
             async for chunk in generator:
                 all_outputs.append(chunk)
+
                 if chunk.thoughts_delta:
                     if not thought_open:
-                        yield f"data: {
-                            orjson.dumps(
-                                {
-                                    **base_event,
-                                    'type': 'response.output_item.added',
-                                    'output_index': current_index,
-                                    'item': {
-                                        'id': thought_item_id,
-                                        'type': 'reasoning',
-                                        'status': 'in_progress',
-                                        'content': [],
-                                    },
-                                }
-                            ).decode()
-                        }\n\n"
+                        yield make_event(
+                            "response.output_item.added",
+                            {
+                                **base_event,
+                                "type": "response.output_item.added",
+                                "output_index": current_index,
+                                "item": ResponseReasoning(
+                                    id=thought_item_id,
+                                    type="reasoning",
+                                    status="in_progress",
+                                    summary=[],
+                                ).model_dump(mode="json"),
+                            },
+                        )
 
-                        yield f"data: {
-                            orjson.dumps(
-                                {
-                                    **base_event,
-                                    'type': 'response.content_part.added',
-                                    'output_index': current_index,
-                                    'part_index': 0,
-                                    'part': {'type': 'reasoning_text', 'text': ''},
-                                }
-                            ).decode()
-                        }\n\n"
-
+                        yield make_event(
+                            "response.reasoning_summary_part.added",
+                            {
+                                **base_event,
+                                "type": "response.reasoning_summary_part.added",
+                                "item_id": thought_item_id,
+                                "output_index": current_index,
+                                "summary_index": 0,
+                                "part": ResponseSummaryPart(text="").model_dump(mode="json"),
+                            },
+                        )
                         thought_open = True
 
                     full_thoughts += chunk.thoughts_delta
-
-                    yield f"data: {
-                        orjson.dumps(
-                            {
-                                **base_event,
-                                'type': 'response.output_text.delta',
-                                'output_index': current_index,
-                                'part_index': 0,
-                                'delta': chunk.thoughts_delta,
-                            }
-                        ).decode()
-                    }\n\n"
+                    yield make_event(
+                        "response.reasoning_summary_text.delta",
+                        {
+                            **base_event,
+                            "type": "response.reasoning_summary_text.delta",
+                            "item_id": thought_item_id,
+                            "output_index": current_index,
+                            "summary_index": 0,
+                            "delta": chunk.thoughts_delta,
+                        },
+                    )
 
                 if chunk.text_delta:
                     if thought_open:
-                        yield f"data: {
-                            orjson.dumps(
-                                {
-                                    **base_event,
-                                    'type': 'response.output_text.done',
-                                    'output_index': current_index,
-                                    'part_index': 0,
-                                }
-                            ).decode()
-                        }\n\n"
-
-                        yield f"data: {
-                            orjson.dumps(
-                                {
-                                    **base_event,
-                                    'type': 'response.content_part.done',
-                                    'output_index': current_index,
-                                    'part_index': 0,
-                                }
-                            ).decode()
-                        }\n\n"
-
-                        yield f"data: {
-                            orjson.dumps(
-                                {
-                                    **base_event,
-                                    'type': 'response.output_item.done',
-                                    'output_index': current_index,
-                                    'item': {
-                                        'id': thought_item_id,
-                                        'type': 'reasoning',
-                                        'status': 'completed',
-                                        'content': [
-                                            {'type': 'reasoning_text', 'text': full_thoughts}
-                                        ],
-                                    },
-                                }
-                            ).decode()
-                        }\n\n"
-
+                        yield make_event(
+                            "response.reasoning_summary_text.done",
+                            {
+                                **base_event,
+                                "type": "response.reasoning_summary_text.done",
+                                "item_id": thought_item_id,
+                                "output_index": current_index,
+                                "summary_index": 0,
+                                "text": full_thoughts,
+                            },
+                        )
+                        yield make_event(
+                            "response.reasoning_summary_part.done",
+                            {
+                                **base_event,
+                                "type": "response.reasoning_summary_part.done",
+                                "item_id": thought_item_id,
+                                "output_index": current_index,
+                                "summary_index": 0,
+                                "part": ResponseSummaryPart(text=full_thoughts).model_dump(
+                                    mode="json"
+                                ),
+                            },
+                        )
+                        yield make_event(
+                            "response.output_item.done",
+                            {
+                                **base_event,
+                                "type": "response.output_item.done",
+                                "output_index": current_index,
+                                "item": ResponseReasoning(
+                                    id=thought_item_id,
+                                    type="reasoning",
+                                    status="completed",
+                                    summary=[ResponseSummaryPart(text=full_thoughts)],
+                                ).model_dump(mode="json"),
+                            },
+                        )
                         current_index += 1
                         thought_open = False
 
                     if not message_open:
-                        yield f"data: {
-                            orjson.dumps(
-                                {
-                                    **base_event,
-                                    'type': 'response.output_item.added',
-                                    'output_index': current_index,
-                                    'item': {
-                                        'id': message_item_id,
-                                        'type': 'message',
-                                        'role': 'assistant',
-                                        'content': [],
-                                    },
-                                }
-                            ).decode()
-                        }\n\n"
+                        yield make_event(
+                            "response.output_item.added",
+                            {
+                                **base_event,
+                                "type": "response.output_item.added",
+                                "output_index": current_index,
+                                "item": ResponseOutputMessage(
+                                    id=message_item_id,
+                                    type="message",
+                                    status="in_progress",
+                                    role="assistant",
+                                    content=[],
+                                ).model_dump(mode="json"),
+                            },
+                        )
 
-                        yield f"data: {
-                            orjson.dumps(
-                                {
-                                    **base_event,
-                                    'type': 'response.content_part.added',
-                                    'output_index': current_index,
-                                    'part_index': 0,
-                                    'part': {'type': 'output_text', 'text': ''},
-                                }
-                            ).decode()
-                        }\n\n"
-
+                        yield make_event(
+                            "response.content_part.added",
+                            {
+                                **base_event,
+                                "type": "response.content_part.added",
+                                "item_id": message_item_id,
+                                "output_index": current_index,
+                                "content_index": 0,
+                                "part": ResponseOutputContent(
+                                    type="output_text", text=""
+                                ).model_dump(mode="json"),
+                            },
+                        )
                         message_open = True
 
                     full_text += chunk.text_delta
-
                     if visible := suppressor.process(chunk.text_delta):
-                        yield f"data: {
-                            orjson.dumps(
-                                {
-                                    **base_event,
-                                    'type': 'response.output_text.delta',
-                                    'output_index': current_index,
-                                    'part_index': 0,
-                                    'delta': visible,
-                                }
-                            ).decode()
-                        }\n\n"
+                        yield make_event(
+                            "response.output_text.delta",
+                            {
+                                **base_event,
+                                "type": "response.output_text.delta",
+                                "item_id": message_item_id,
+                                "output_index": current_index,
+                                "content_index": 0,
+                                "delta": visible,
+                                "logprobs": [],
+                            },
+                        )
 
         except Exception:
             logger.exception("Responses streaming error")
-            yield f"data: {
-                orjson.dumps(
-                    {
-                        **base_event,
-                        'type': 'error',
-                        'error': {'message': 'Streaming error.'},
-                    }
-                ).decode()
-            }\n\n"
+            yield make_event(
+                "error",
+                {**base_event, "type": "error", "error": {"message": "Streaming error."}},
+            )
             return
 
         if all_outputs:
@@ -1302,105 +1329,104 @@ def _create_responses_real_streaming_response(
             if last.thoughts:
                 full_thoughts = last.thoughts
 
-        if thought_open:
-            yield f"data: {
-                orjson.dumps(
-                    {
-                        **base_event,
-                        'type': 'response.output_text.done',
-                        'output_index': current_index,
-                        'part_index': 0,
-                    }
-                ).decode()
-            }\n\n"
-
-            yield f"data: {
-                orjson.dumps(
-                    {
-                        **base_event,
-                        'type': 'response.content_part.done',
-                        'output_index': current_index,
-                        'part_index': 0,
-                    }
-                ).decode()
-            }\n\n"
-
-            yield f"data: {
-                orjson.dumps(
-                    {
-                        **base_event,
-                        'type': 'response.output_item.done',
-                        'output_index': current_index,
-                        'item': {
-                            'id': thought_item_id,
-                            'type': 'reasoning',
-                            'status': 'completed',
-                            'content': [{'type': 'reasoning_text', 'text': full_thoughts}],
-                        },
-                    }
-                ).decode()
-            }\n\n"
-
-            current_index += 1
-
         remaining = suppressor.flush()
         if remaining and message_open:
-            yield f"data: {
-                orjson.dumps(
-                    {
-                        **base_event,
-                        'type': 'response.output_text.delta',
-                        'output_index': current_index,
-                        'part_index': 0,
-                        'delta': remaining,
-                    }
-                ).decode()
-            }\n\n"
+            yield make_event(
+                "response.output_text.delta",
+                {
+                    **base_event,
+                    "type": "response.output_text.delta",
+                    "item_id": message_item_id,
+                    "output_index": current_index,
+                    "content_index": 0,
+                    "delta": remaining,
+                    "logprobs": [],
+                },
+            )
 
-        if message_open:
-            yield f"data: {
-                orjson.dumps(
-                    {
-                        **base_event,
-                        'type': 'response.output_text.done',
-                        'output_index': current_index,
-                        'part_index': 0,
-                    }
-                ).decode()
-            }\n\n"
-
-            yield f"data: {
-                orjson.dumps(
-                    {
-                        **base_event,
-                        'type': 'response.content_part.done',
-                        'output_index': current_index,
-                        'part_index': 0,
-                    }
-                ).decode()
-            }\n\n"
-
-            yield f"data: {
-                orjson.dumps(
-                    {
-                        **base_event,
-                        'type': 'response.output_item.done',
-                        'output_index': current_index,
-                        'item': {
-                            'id': message_item_id,
-                            'type': 'message',
-                            'role': 'assistant',
-                            'content': [{'type': 'output_text', 'text': full_text}],
-                        },
-                    }
-                ).decode()
-            }\n\n"
-
+        if thought_open:
+            yield make_event(
+                "response.reasoning_summary_text.done",
+                {
+                    **base_event,
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": thought_item_id,
+                    "output_index": current_index,
+                    "summary_index": 0,
+                    "text": full_thoughts,
+                },
+            )
+            yield make_event(
+                "response.reasoning_summary_part.done",
+                {
+                    **base_event,
+                    "type": "response.reasoning_summary_part.done",
+                    "item_id": thought_item_id,
+                    "output_index": current_index,
+                    "summary_index": 0,
+                    "part": ResponseSummaryPart(text=full_thoughts).model_dump(mode="json"),
+                },
+            )
+            yield make_event(
+                "response.output_item.done",
+                {
+                    **base_event,
+                    "type": "response.output_item.done",
+                    "output_index": current_index,
+                    "item": ResponseReasoning(
+                        id=thought_item_id,
+                        type="reasoning",
+                        status="completed",
+                        summary=[ResponseSummaryPart(text=full_thoughts)],
+                    ).model_dump(mode="json"),
+                },
+            )
             current_index += 1
 
         _thoughts, assistant_text, storage_output, detected_tool_calls = _process_llm_output(
             full_thoughts, full_text, structured_requirement
         )
+
+        if message_open:
+            yield make_event(
+                "response.output_text.done",
+                {
+                    **base_event,
+                    "type": "response.output_text.done",
+                    "item_id": message_item_id,
+                    "output_index": current_index,
+                    "content_index": 0,
+                },
+            )
+            yield make_event(
+                "response.content_part.done",
+                {
+                    **base_event,
+                    "type": "response.content_part.done",
+                    "item_id": message_item_id,
+                    "output_index": current_index,
+                    "content_index": 0,
+                    "part": ResponseOutputContent(
+                        type="output_text", text=assistant_text
+                    ).model_dump(mode="json"),
+                },
+            )
+            yield make_event(
+                "response.output_item.done",
+                {
+                    **base_event,
+                    "type": "response.output_item.done",
+                    "output_index": current_index,
+                    "item": ResponseOutputMessage(
+                        id=message_item_id,
+                        type="message",
+                        status="completed",
+                        role="assistant",
+                        content=[ResponseOutputContent(type="output_text", text=assistant_text)],
+                    ).model_dump(mode="json"),
+                },
+            )
+            current_index += 1
 
         image_items: list[ResponseImageGenerationCall] = []
         final_response_contents: list[ResponseOutputContent] = []
@@ -1415,11 +1441,9 @@ def _create_responses_real_streaming_response(
                             continue
                         seen_hashes.add(fhash)
 
-                        if "." in fname:
-                            img_id, fmt = fname.rsplit(".", 1)
-                        else:
-                            img_id = fname
-                            fmt = "png"
+                        parts = fname.rsplit(".", 1)
+                        img_id = parts[0]
+                        fmt = parts[1] if len(parts) > 1 else "png"
 
                         img_item = ResponseImageGenerationCall(
                             id=img_id,
@@ -1435,89 +1459,67 @@ def _create_responses_real_streaming_response(
                             ResponseOutputContent(type="output_text", text=image_url)
                         )
 
-                        yield f"data: {
-                            orjson.dumps(
-                                {
-                                    **base_event,
-                                    'type': 'response.output_item.added',
-                                    'output_index': current_index,
-                                    'item': img_item.model_dump(mode='json'),
-                                }
-                            ).decode()
-                        }\n\n"
+                        yield make_event(
+                            "response.output_item.added",
+                            {
+                                **base_event,
+                                "type": "response.output_item.added",
+                                "output_index": current_index,
+                                "item": img_item.model_dump(mode="json"),
+                            },
+                        )
 
-                        yield f"data: {
-                            orjson.dumps(
-                                {
-                                    **base_event,
-                                    'type': 'response.output_item.done',
-                                    'output_index': current_index,
-                                    'item': img_item.model_dump(mode='json'),
-                                }
-                            ).decode()
-                        }\n\n"
-
+                        yield make_event(
+                            "response.output_item.done",
+                            {
+                                **base_event,
+                                "type": "response.output_item.done",
+                                "output_index": current_index,
+                                "item": img_item.model_dump(mode="json"),
+                            },
+                        )
                         current_index += 1
                         image_items.append(img_item)
-
+                        storage_output += f"\n\n{image_url}"
                     except Exception:
-                        logger.warning("Image processing failed")
-
-        if assistant_text:
-            final_response_contents.append(
-                ResponseOutputContent(type="output_text", text=assistant_text)
-            )
-
-        if not final_response_contents:
-            final_response_contents.append(ResponseOutputContent(type="output_text", text=""))
-
-        image_markdown = ""
-        for img_call in image_items:
-            fname = f"{img_call.id}.{img_call.output_format}"
-            img_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
-            image_markdown += f"\n\n{img_url}"
-
-        if image_markdown:
-            storage_output += image_markdown
+                        logger.warning("Image processing failed in stream")
 
         for call in detected_tool_calls:
             tc_item = ResponseToolCall(id=call.id, status="completed", function=call.function)
-
-            yield f"data: {
-                orjson.dumps(
-                    {
-                        **base_event,
-                        'type': 'response.output_item.added',
-                        'output_index': current_index,
-                        'item': tc_item.model_dump(mode='json'),
-                    }
-                ).decode()
-            }\n\n"
-
-            yield f"data: {
-                orjson.dumps(
-                    {
-                        **base_event,
-                        'type': 'response.output_item.done',
-                        'output_index': current_index,
-                        'item': tc_item.model_dump(mode='json'),
-                    }
-                ).decode()
-            }\n\n"
-
+            yield make_event(
+                "response.output_item.added",
+                {
+                    **base_event,
+                    "type": "response.output_item.added",
+                    "output_index": current_index,
+                    "item": tc_item.model_dump(mode="json"),
+                },
+            )
+            yield make_event(
+                "response.output_item.done",
+                {
+                    **base_event,
+                    "type": "response.output_item.done",
+                    "output_index": current_index,
+                    "item": tc_item.model_dump(mode="json"),
+                },
+            )
             current_index += 1
+
+        if assistant_text:
+            final_response_contents.insert(
+                0, ResponseOutputContent(type="output_text", text=assistant_text)
+            )
 
         p_tok, c_tok, t_tok, r_tok = _calculate_usage(
             messages, assistant_text, detected_tool_calls, full_thoughts
         )
-
         usage = ResponseUsage(
             input_tokens=p_tok,
             output_tokens=c_tok,
             total_tokens=t_tok,
             output_tokens_details={"reasoning_tokens": r_tok},
         )
-
         payload = _create_responses_standard_payload(
             response_id,
             created_time,
@@ -1530,7 +1532,6 @@ def _create_responses_real_streaming_response(
             None,
             full_thoughts,
         )
-
         _persist_conversation(
             db,
             model.model_name,
@@ -1542,15 +1543,14 @@ def _create_responses_real_streaming_response(
             full_thoughts,
         )
 
-        yield f"data: {
-            orjson.dumps(
-                {
-                    **base_event,
-                    'type': 'response.completed',
-                    'response': payload.model_dump(mode='json'),
-                }
-            ).decode()
-        }\n\n"
+        yield make_event(
+            "response.completed",
+            {
+                **base_event,
+                "type": "response.completed",
+                "response": payload.model_dump(mode="json"),
+            },
+        )
 
         yield "data: [DONE]\n\n"
 
@@ -1862,11 +1862,13 @@ async def create_response(
                 continue
             seen_hashes.add(fhash)
 
-            if "." in fname:
-                img_id, img_format = fname.rsplit(".", 1)
-            else:
-                img_id = fname
-                img_format = "png" if isinstance(img, GeneratedImage) else "jpeg"
+            parts = fname.rsplit(".", 1)
+            img_id = parts[0]
+            img_format = (
+                parts[1]
+                if len(parts) > 1
+                else ("png" if isinstance(img, GeneratedImage) else "jpeg")
+            )
 
             contents.append(
                 ResponseOutputContent(
