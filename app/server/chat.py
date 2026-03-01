@@ -37,6 +37,7 @@ from app.models import (
     ResponseOutputMessage,
     ResponseReasoning,
     ResponseSummaryPart,
+    ResponseTextConfig,
     ResponseToolCall,
     ResponseToolChoice,
     ResponseUsage,
@@ -171,6 +172,7 @@ def _create_responses_standard_payload(
     """Unified factory for building ResponseCreateResponse objects."""
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
     reason_id = f"rs_{uuid.uuid4().hex[:24]}"
+    now_ts = int(datetime.now(tz=UTC).timestamp())
 
     output_items: list[Any] = []
     if full_thoughts:
@@ -208,10 +210,15 @@ def _create_responses_standard_payload(
 
     output_items.extend(image_call_items)
 
+    text_config = ResponseTextConfig()
+    if request.response_format and request.response_format.get("type") == "json_schema":
+        text_config.format.type = "json_schema"
+
     return ResponseCreateResponse(
         id=response_id,
         object="response",
         created_at=created_time,
+        completed_at=now_ts,
         model=model_name,
         output=output_items,
         status="completed",
@@ -220,6 +227,7 @@ def _create_responses_standard_payload(
         metadata=request.metadata or {},
         tools=request.tools or [],
         tool_choice=request.tool_choice or "auto",
+        text=text_config,
     )
 
 
