@@ -13,7 +13,7 @@ from loguru import logger
 from app.utils import g_config
 
 # Persistent directory for storing generated images
-IMAGE_STORE_DIR = Path(tempfile.gettempdir()) / "ai_generated_images"
+IMAGE_STORE_DIR = Path(g_config.storage.images_path)
 IMAGE_STORE_DIR.mkdir(parents=True, exist_ok=True)
 
 

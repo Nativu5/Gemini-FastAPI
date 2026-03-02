@@ -42,9 +42,6 @@ class GeminiClientSettings(BaseModel):
     secure_1psid: str = Field(..., description="Gemini Secure 1PSID")
     secure_1psidts: str = Field(..., description="Gemini Secure 1PSIDTS")
     proxy: str | None = Field(default=None, description="Proxy URL for this Gemini client")
-    cookies: dict[str, str] | None = Field(
-        default=None, description="Optional custom cookies for this Gemini client"
-    )
 
     @field_validator("proxy", mode="before")
     @classmethod
@@ -53,16 +50,6 @@ class GeminiClientSettings(BaseModel):
             return None
         stripped = value.strip()
         return stripped or None
-
-    @field_validator("cookies", mode="before")
-    @classmethod
-    def _parse_cookies(cls, v: Any) -> Any:
-        if isinstance(v, str) and v.strip().startswith("{"):
-            try:
-                return orjson.loads(v)
-            except orjson.JSONDecodeError:
-                pass
-        return v
 
 
 class GeminiModelConfig(BaseModel):
@@ -163,6 +150,10 @@ class StorageConfig(BaseModel):
     path: str = Field(
         default="data/lmdb",
         description="Path to the storage directory where data will be saved",
+    )
+    images_path: str = Field(
+        default="data/images",
+        description="Path to the directory where generated images will be stored",
     )
     max_size: int = Field(
         default=1024**2 * 256,  # 256 MB

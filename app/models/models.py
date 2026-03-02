@@ -228,8 +228,8 @@ class ResponseUsage(BaseModel):
     input_tokens: int
     output_tokens: int
     total_tokens: int
-    input_tokens_details: dict[str, int] | None = Field(default=None)
-    output_tokens_details: dict[str, int] | None = Field(default=None)
+    input_tokens_details: dict[str, Any] = Field(default_factory=lambda: {"cached_tokens": 0})
+    output_tokens_details: dict[str, Any] = Field(default_factory=lambda: {"reasoning_tokens": 0})
 
 
 class ResponseOutputContent(BaseModel):
@@ -238,6 +238,7 @@ class ResponseOutputContent(BaseModel):
     type: Literal["output_text"]
     text: str | None = Field(default="")
     annotations: list[dict[str, Any]] = Field(default_factory=list)
+    logprobs: list[dict[str, Any]] | None = Field(default=None)
 
 
 class ResponseOutputMessage(BaseModel):
@@ -245,6 +246,7 @@ class ResponseOutputMessage(BaseModel):
 
     id: str
     type: Literal["message"]
+    status: Literal["in_progress", "completed", "incomplete"] = Field(default="completed")
     role: Literal["assistant"]
     content: list[ResponseOutputContent]
 
@@ -268,7 +270,7 @@ class ResponseReasoning(BaseModel):
 
     id: str
     type: Literal["reasoning"] = Field(default="reasoning")
-    status: Literal["in_progress", "completed", "incomplete"] = Field(default="completed")
+    status: Literal["in_progress", "completed", "incomplete"] | None = Field(default=None)
     summary: list[ResponseSummaryPart] | None = Field(default=None)
     content: list[ResponseReasoningContentPart] | None = Field(default=None)
 
@@ -296,12 +298,25 @@ class ResponseToolCall(BaseModel):
     function: FunctionCall
 
 
+class ResponseTextFormat(BaseModel):
+    """Text format configuration for Responses API."""
+
+    type: Literal["text", "json_schema"] = Field(default="text")
+
+
+class ResponseTextConfig(BaseModel):
+    """Text configuration for Responses API."""
+
+    format: ResponseTextFormat = Field(default_factory=ResponseTextFormat)
+
+
 class ResponseCreateResponse(BaseModel):
     """Responses API response payload."""
 
     id: str
     object: Literal["response"] = Field(default="response")
     created_at: int
+    completed_at: int | None = Field(default=None)
     model: str
     output: list[
         ResponseReasoning | ResponseOutputMessage | ResponseImageGenerationCall | ResponseToolCall
@@ -314,12 +329,13 @@ class ResponseCreateResponse(BaseModel):
         "cancelled",
         "requires_action",
     ] = Field(default="completed")
-    tool_choice: str | ResponseToolChoice | None = Field(default=None)
-    tools: list[Tool | ResponseImageTool] | None = Field(default=None)
-    usage: ResponseUsage
+    tool_choice: str | ToolChoiceFunction | ResponseToolChoice = Field(default="auto")
+    tools: list[Tool | ResponseImageTool] = Field(default_factory=list)
+    usage: ResponseUsage | None = Field(default=None)
     error: dict[str, Any] | None = Field(default=None)
-    metadata: dict[str, Any] | None = Field(default=None)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     input: str | list[ResponseInputItem] | None = Field(default=None)
+    text: ResponseTextConfig | None = Field(default_factory=ResponseTextConfig)
 
 
 # Rebuild models with forward references
