@@ -63,3 +63,6 @@ extend-immutable-calls = [
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.uv.sources]
+gemini-webapi = { git = "https://github.com/luuquangvu/Gemini-API.git", rev = "move-httpx-to-curl_cffi" }
