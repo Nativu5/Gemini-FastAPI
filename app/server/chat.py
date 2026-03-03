@@ -857,7 +857,7 @@ async def _find_reusable_session(
 async def _send_with_split(
     session: ChatSession,
     text: str,
-    files: list[str | Path | bytes | io.BytesIO] | None = None,
+    files: list[Any] | None = None,
     stream: bool = False,
 ) -> AsyncGenerator[ModelOutput] | ModelOutput:
     """Send text to Gemini, splitting or converting to attachment if too long."""
@@ -876,7 +876,7 @@ async def _send_with_split(
     file_obj = io.BytesIO(text.encode("utf-8"))
     file_obj.name = "message.txt"
     try:
-        final_files: list[str | Path | bytes | io.BytesIO] = list(files) if files else []
+        final_files: list[Any] = list(files) if files else []
         final_files.append(file_obj)
         instruction = (
             "The user's input exceeds the character limit and is provided in the attached file `message.txt`.\n\n"
