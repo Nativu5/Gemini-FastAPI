@@ -352,7 +352,7 @@ def initialize_config() -> Config:
         env_models_overrides = extract_gemini_models_env()
 
         # Then, initialize Config with pydantic_settings
-        config = Config()  # type: ignore
+        config = Config()
 
         # Synthesize clients
         config.gemini.clients = _merge_clients_with_env(

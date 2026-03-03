@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -19,32 +19,38 @@ from gemini_webapi.types.image import GeneratedImage, Image
 from loguru import logger
 
 from app.models import (
+    ChatCompletionChoice,
+    ChatCompletionContentItem,
+    ChatCompletionFunctionTool,
+    ChatCompletionMessage,
+    ChatCompletionMessageToolCall,
+    ChatCompletionNamedToolChoice,
     ChatCompletionRequest,
+    ChatCompletionRequestContentItem,
     ChatCompletionResponse,
-    Choice,
-    ContentItem,
+    CompletionUsage,
     ConversationInStore,
-    Message,
+    FunctionCall,
+    FunctionCallOutput,
+    FunctionTool,
+    ImageGeneration,
+    ImageGenerationCall,
     ModelData,
     ModelListResponse,
     ResponseCreateRequest,
     ResponseCreateResponse,
-    ResponseImageGenerationCall,
-    ResponseImageTool,
-    ResponseInputContent,
-    ResponseInputItem,
+    ResponseFormatTextJSONSchemaConfig,
+    ResponseFunctionToolCall,
+    ResponseInputMessage,
     ResponseOutputContent,
     ResponseOutputMessage,
-    ResponseReasoning,
-    ResponseSummaryPart,
+    ResponseOutputText,
+    ResponseReasoningItem,
     ResponseTextConfig,
-    ResponseToolCall,
-    ResponseToolChoice,
     ResponseUsage,
-    Tool,
-    ToolCall,
+    SummaryTextContent,
     ToolChoiceFunction,
-    Usage,
+    ToolChoiceTypes,
 )
 from app.server.middleware import (
     get_image_store_dir,
@@ -124,7 +130,7 @@ async def _image_to_base64(
 
 
 def _calculate_usage(
-    messages: list[Message],
+    messages: list[ChatCompletionMessage],
     assistant_text: str | None,
     tool_calls: list[Any] | None,
     thoughts: str | None = None,
@@ -162,11 +168,10 @@ def _create_responses_standard_payload(
     created_time: int,
     model_name: str,
     detected_tool_calls: list[Any] | None,
-    image_call_items: list[ResponseImageGenerationCall],
+    image_call_items: list[ImageGenerationCall],
     response_contents: list[ResponseOutputContent],
     usage: ResponseUsage,
     request: ResponseCreateRequest,
-    normalized_input: Any,
     full_thoughts: str | None = None,
 ) -> ResponseCreateResponse:
     """Unified factory for building ResponseCreateResponse objects."""
@@ -177,11 +182,11 @@ def _create_responses_standard_payload(
     output_items: list[Any] = []
     if full_thoughts:
         output_items.append(
-            ResponseReasoning(
+            ResponseReasoningItem(
                 id=reason_id,
                 type="reasoning",
                 status="completed",
-                summary=[ResponseSummaryPart(type="summary_text", text=full_thoughts)],
+                summary=[SummaryTextContent(type="summary_text", text=full_thoughts)],
             )
         )
 
@@ -198,11 +203,20 @@ def _create_responses_standard_payload(
     if detected_tool_calls:
         output_items.extend(
             [
-                ResponseToolCall(
+                ResponseFunctionToolCall(
                     id=call.id if hasattr(call, "id") else call["id"],
-                    type="tool_call",
+                    call_id=call.id if hasattr(call, "id") else call["id"],
+                    name=(
+                        call.function.name
+                        if hasattr(call, "function")
+                        else call["function"]["name"]
+                    ),
+                    arguments=(
+                        call.function.arguments
+                        if hasattr(call, "function")
+                        else call["function"]["arguments"]
+                    ),
                     status="completed",
-                    function=call.function if hasattr(call, "function") else call["function"],
                 )
                 for call in detected_tool_calls
             ]
@@ -212,7 +226,7 @@ def _create_responses_standard_payload(
 
     text_config = ResponseTextConfig()
     if request.response_format and request.response_format.get("type") == "json_schema":
-        text_config.format.type = "json_schema"
+        text_config.format = ResponseFormatTextJSONSchemaConfig()
 
     return ResponseCreateResponse(
         id=response_id,
@@ -223,10 +237,9 @@ def _create_responses_standard_payload(
         output=output_items,
         status="completed",
         usage=usage,
-        input=normalized_input or None,
         metadata=request.metadata or {},
         tools=request.tools or [],
-        tool_choice=request.tool_choice or "auto",
+        tool_choice=request.tool_choice if request.tool_choice is not None else "auto",
         text=text_config,
     )
 
@@ -237,7 +250,7 @@ def _create_chat_completion_standard_payload(
     model_name: str,
     visible_output: str | None,
     tool_calls_payload: list[dict] | None,
-    finish_reason: str,
+    finish_reason: Literal["stop", "length", "tool_calls", "content_filter"],
     usage: dict,
     reasoning_content: str | None = None,
 ) -> ChatCompletionResponse:
@@ -245,9 +258,9 @@ def _create_chat_completion_standard_payload(
     # Convert tool calls to Model objects if they are dicts
     tool_calls = None
     if tool_calls_payload:
-        tool_calls = [ToolCall.model_validate(tc) for tc in tool_calls_payload]
+        tool_calls = [ChatCompletionMessageToolCall.model_validate(tc) for tc in tool_calls_payload]
 
-    message = Message(
+    message = ChatCompletionMessage(
         role="assistant",
         content=visible_output or None,
         tool_calls=tool_calls,
@@ -260,13 +273,13 @@ def _create_chat_completion_standard_payload(
         created=created_time,
         model=model_name,
         choices=[
-            Choice(
+            ChatCompletionChoice(
                 index=0,
                 message=message,
                 finish_reason=finish_reason,
             )
         ],
-        usage=Usage(**usage),
+        usage=CompletionUsage(**usage),
     )
 
 
@@ -313,14 +326,14 @@ def _persist_conversation(
     model_name: str,
     client_id: str,
     metadata: list[str | None],
-    messages: list[Message],
+    messages: list[ChatCompletionMessage],
     storage_output: str | None,
     tool_calls: list[Any] | None,
     thoughts: str | None = None,
 ) -> str | None:
     """Unified logic to save conversation history to LMDB."""
     try:
-        current_assistant_message = Message(
+        current_assistant_message = ChatCompletionMessage(
             role="assistant",
             content=storage_output or None,
             tool_calls=tool_calls or None,
@@ -397,8 +410,14 @@ def _build_structured_requirement(
 
 
 def _build_tool_prompt(
-    tools: list[Tool],
-    tool_choice: str | ToolChoiceFunction | None,
+    tools: list[ChatCompletionFunctionTool],
+    tool_choice: (
+        Literal["none", "auto", "required"]
+        | ChatCompletionNamedToolChoice
+        | ToolChoiceFunction
+        | ToolChoiceTypes
+        | None
+    ),
 ) -> str:
     """Generate a system prompt describing available tools and the PascalCase protocol."""
     if not tools:
@@ -429,7 +448,7 @@ def _build_tool_prompt(
         lines.append(
             "You must call at least one tool before responding to the user. Do not provide a final user-facing answer until a tool call has been issued."
         )
-    elif isinstance(tool_choice, ToolChoiceFunction):
+    elif isinstance(tool_choice, ChatCompletionNamedToolChoice):
         target = tool_choice.function.name
         lines.append(
             f"You are required to call the tool named `{target}`. Do not call any other tool."
@@ -441,8 +460,8 @@ def _build_tool_prompt(
 
 
 def _build_image_generation_instruction(
-    tools: list[ResponseImageTool] | None,
-    tool_choice: ResponseToolChoice | None,
+    tools: list[ImageGeneration] | None,
+    tool_choice: ToolChoiceFunction | None,
 ) -> str | None:
     """Construct explicit guidance so Gemini emits images when requested."""
     has_forced_choice = tool_choice is not None and tool_choice.type == "image_generation"
@@ -467,7 +486,7 @@ def _build_image_generation_instruction(
     return "\n\n".join(instructions)
 
 
-def _append_tool_hint_to_last_user_message(messages: list[Message]) -> None:
+def _append_tool_hint_to_last_user_message(messages: list[ChatCompletionMessage]) -> None:
     """Ensure the last user message carries the tool wrap hint."""
     for msg in reversed(messages):
         if msg.role != "user" or msg.content is None:
@@ -482,24 +501,28 @@ def _append_tool_hint_to_last_user_message(messages: list[Message]) -> None:
             for part in reversed(msg.content):
                 if getattr(part, "type", None) != "text":
                     continue
-                text_value = part.text or ""
+                text_value = getattr(part, "text", "") or ""
                 if TOOL_HINT_STRIPPED in text_value:
                     return
                 part.text = f"{text_value}\n{TOOL_WRAP_HINT}"
                 return
 
             messages_text = TOOL_WRAP_HINT.strip()
-            msg.content.append(ContentItem(type="text", text=messages_text))
+            msg.content.append(ChatCompletionRequestContentItem(type="text", text=messages_text))
             return
 
 
 def _prepare_messages_for_model(
-    source_messages: list[Message],
-    tools: list[Tool] | None,
-    tool_choice: str | ToolChoiceFunction | None,
+    source_messages: list[ChatCompletionMessage],
+    tools: list[ChatCompletionFunctionTool] | None,
+    tool_choice: Literal["none", "auto", "required"]
+    | ChatCompletionNamedToolChoice
+    | ToolChoiceFunction
+    | ToolChoiceTypes
+    | None,
     extra_instructions: list[str] | None = None,
     inject_system_defaults: bool = True,
-) -> list[Message]:
+) -> list[ChatCompletionMessage]:
     """Return a copy of messages enriched with tool instructions when needed."""
     prepared = [msg.model_copy(deep=True) for msg in source_messages]
 
@@ -541,7 +564,7 @@ def _prepare_messages_for_model(
             separator = "\n\n" if existing else ""
             prepared[0].content = f"{existing}{separator}{combined_instructions}"
     else:
-        prepared.insert(0, Message(role="system", content=combined_instructions))
+        prepared.insert(0, ChatCompletionMessage(role="system", content=combined_instructions))
 
     if tools and tool_choice != "none" and not tool_prompt_injected:
         _append_tool_hint_to_last_user_message(prepared)
@@ -550,92 +573,134 @@ def _prepare_messages_for_model(
 
 
 def _response_items_to_messages(
-    items: str | list[ResponseInputItem],
-) -> tuple[list[Message], str | list[ResponseInputItem]]:
-    """Convert Responses API input items into internal Message objects and normalized input."""
-    messages: list[Message] = []
+    items: Any,
+) -> list[ChatCompletionMessage]:
+    """Convert Responses API input items into internal Message objects."""
+    messages: list[ChatCompletionMessage] = []
 
     if isinstance(items, str):
-        messages.append(Message(role="user", content=items))
+        messages.append(ChatCompletionMessage(role="user", content=items))
         logger.debug("Normalized Responses input: single string message.")
-        return messages, items
+        return messages
 
-    normalized_input: list[ResponseInputItem] = []
     for item in items:
-        role = item.role
-        content = item.content
-        normalized_contents: list[ResponseInputContent] = []
-        if isinstance(content, str):
-            normalized_contents.append(ResponseInputContent(type="input_text", text=content))
-            messages.append(Message(role=role, content=content))
+        if isinstance(item, (ResponseInputMessage, ResponseOutputMessage)):
+            role = item.role
+            content = item.content
+            if isinstance(content, str):
+                messages.append(ChatCompletionMessage(role=role, content=content))
+            else:
+                converted: list[ChatCompletionContentItem] = []
+                reasoning_parts: list[str] = []
+                for part in content:
+                    if part.type in ("input_text", "output_text"):
+                        text_value = getattr(part, "text", "") or ""
+                        if text_value:
+                            converted.append(
+                                ChatCompletionRequestContentItem(type="text", text=text_value)
+                            )
+                    elif part.type == "reasoning_text":
+                        text_value = getattr(part, "text", "") or ""
+                        if text_value:
+                            reasoning_parts.append(text_value)
+                    elif part.type == "input_image":
+                        image_url = getattr(part, "image_url", None)
+                        if image_url:
+                            converted.append(
+                                ChatCompletionRequestContentItem(
+                                    type="image_url",
+                                    image_url={
+                                        "url": image_url,
+                                        "detail": getattr(part, "detail", "auto") or "auto",
+                                    },
+                                )
+                            )
+                    elif part.type == "input_file":
+                        file_url = getattr(part, "file_url", None)
+                        file_data = getattr(part, "file_data", None)
+                        if file_url or file_data:
+                            file_info = {}
+                            if file_data:
+                                file_info["file_data"] = file_data
+                                file_info["filename"] = getattr(part, "filename", None)
+                            if file_url:
+                                file_info["url"] = file_url
+                            converted.append(
+                                ChatCompletionRequestContentItem(type="file", file=file_info)
+                            )
+                reasoning_val = "\n\n".join(reasoning_parts) if reasoning_parts else None
+                messages.append(
+                    ChatCompletionMessage(
+                        role=role,
+                        content=converted or None,
+                        reasoning_content=reasoning_val,
+                    )
+                )
+
+        elif isinstance(item, ResponseFunctionToolCall):
+            messages.append(
+                ChatCompletionMessage(
+                    role="assistant",
+                    tool_calls=[
+                        ChatCompletionMessageToolCall(
+                            id=item.call_id,
+                            type="function",
+                            function=FunctionCall(name=item.name, arguments=item.arguments),
+                        )
+                    ],
+                )
+            )
+        elif isinstance(item, FunctionCallOutput):
+            output_content = str(item.output) if isinstance(item.output, list) else item.output
+            messages.append(
+                ChatCompletionMessage(
+                    role="tool",
+                    tool_call_id=item.call_id,
+                    content=output_content,
+                )
+            )
+        elif isinstance(item, ResponseReasoningItem):
+            reasoning_val = None
+            if item.content:
+                reasoning_val = "\n\n".join(x.text for x in item.content if x.text)
+            messages.append(
+                ChatCompletionMessage(
+                    role="assistant",
+                    reasoning_content=reasoning_val,
+                )
+            )
+        elif isinstance(item, ImageGenerationCall):
+            messages.append(
+                ChatCompletionMessage(
+                    role="assistant",
+                    content=item.result or None,
+                )
+            )
+
         else:
-            converted: list[ContentItem] = []
-            reasoning_parts: list[str] = []
-            for part in content:
-                if part.type in ("input_text", "output_text"):
-                    text_value = part.text or ""
-                    normalized_contents.append(
-                        ResponseInputContent(type=part.type, text=text_value)
+            if hasattr(item, "role"):
+                messages.append(
+                    ChatCompletionMessage(
+                        role=item.role,
+                        content=str(getattr(item, "content", "")),
                     )
-                    if text_value:
-                        converted.append(ContentItem(type="text", text=text_value))
-                elif part.type == "reasoning_text":
-                    text_value = part.text or ""
-                    normalized_contents.append(
-                        ResponseInputContent(type="reasoning_text", text=text_value)
-                    )
-                    if text_value:
-                        reasoning_parts.append(text_value)
-                elif part.type == "input_image":
-                    image_url = part.image_url
-                    if image_url:
-                        normalized_contents.append(
-                            ResponseInputContent(
-                                type="input_image",
-                                image_url=image_url,
-                                detail=part.detail if part.detail else "auto",
-                            )
-                        )
-                        converted.append(
-                            ContentItem(
-                                type="image_url",
-                                image_url={
-                                    "url": image_url,
-                                    "detail": part.detail if part.detail else "auto",
-                                },
-                            )
-                        )
-                elif part.type == "input_file":
-                    if part.file_url or part.file_data:
-                        normalized_contents.append(part)
-                        file_info = {}
-                        if part.file_data:
-                            file_info["file_data"] = part.file_data
-                            file_info["filename"] = part.filename
-                        if part.file_url:
-                            file_info["url"] = part.file_url
-                        converted.append(ContentItem(type="file", file=file_info))
-            messages.append(Message(role=role, content=converted or None))
+                )
 
-        normalized_input.append(
-            ResponseInputItem(type="message", role=item.role, content=normalized_contents or [])
-        )
-
-    logger.debug(f"Normalized Responses input: {len(normalized_input)} message items.")
-    return messages, normalized_input
+    logger.debug(f"Normalized Responses input: {len(messages)} message items.")
+    return messages
 
 
 def _instructions_to_messages(
-    instructions: str | list[ResponseInputItem] | None,
-) -> list[Message]:
+    instructions: str | list[ResponseInputMessage] | None,
+) -> list[ChatCompletionMessage]:
     """Normalize instructions payload into Message objects."""
     if not instructions:
         return []
 
     if isinstance(instructions, str):
-        return [Message(role="system", content=instructions)]
+        return [ChatCompletionMessage(role="system", content=instructions)]
 
-    instruction_messages: list[Message] = []
+    instruction_messages: list[ChatCompletionMessage] = []
     for item in instructions:
         if item.type and item.type != "message":
             continue
@@ -643,42 +708,48 @@ def _instructions_to_messages(
         role = item.role
         content = item.content
         if isinstance(content, str):
-            instruction_messages.append(Message(role=role, content=content))
+            instruction_messages.append(ChatCompletionMessage(role=role, content=content))
         else:
-            converted: list[ContentItem] = []
+            converted: list[ChatCompletionContentItem] = []
             reasoning_parts: list[str] = []
             for part in content:
                 if part.type in ("input_text", "output_text"):
-                    text_value = part.text or ""
+                    text_value = getattr(part, "text", "") or ""
                     if text_value:
-                        converted.append(ContentItem(type="text", text=text_value))
+                        converted.append(
+                            ChatCompletionRequestContentItem(type="text", text=text_value)
+                        )
                 elif part.type == "reasoning_text":
-                    text_value = part.text or ""
+                    text_value = getattr(part, "text", "") or ""
                     if text_value:
                         reasoning_parts.append(text_value)
                 elif part.type == "input_image":
-                    image_url = part.image_url
+                    image_url = getattr(part, "image_url", None)
                     if image_url:
                         converted.append(
-                            ContentItem(
+                            ChatCompletionRequestContentItem(
                                 type="image_url",
                                 image_url={
                                     "url": image_url,
-                                    "detail": part.detail if part.detail else "auto",
+                                    "detail": getattr(part, "detail", "auto") or "auto",
                                 },
                             )
                         )
                 elif part.type == "input_file":
-                    file_info = {}
-                    if part.file_data:
-                        file_info["file_data"] = part.file_data
-                        file_info["filename"] = part.filename
-                    if part.file_url:
-                        file_info["url"] = part.file_url
-                    if file_info:
-                        converted.append(ContentItem(type="file", file=file_info))
+                    file_data = getattr(part, "file_data", None)
+                    file_url = getattr(part, "file_url", None)
+                    if file_data or file_url:
+                        file_info = {}
+                        if file_data:
+                            file_info["file_data"] = file_data
+                            file_info["filename"] = getattr(part, "filename", None)
+                        if file_url:
+                            file_info["url"] = file_url
+                        converted.append(
+                            ChatCompletionRequestContentItem(type="file", file=file_info)
+                        )
             instruction_messages.append(
-                Message(
+                ChatCompletionMessage(
                     role=role,
                     content=converted or None,
                     reasoning_content="\n".join(reasoning_parts) if reasoning_parts else None,
@@ -712,7 +783,7 @@ def _get_available_models() -> list[ModelData]:
     for m in custom_models:
         models_data.append(
             ModelData(
-                id=m.model_name,
+                id=m.model_name or "",
                 created=now,
                 owned_by="custom",
             )
@@ -742,8 +813,8 @@ async def _find_reusable_session(
     db: LMDBConversationStore,
     pool: GeminiClientPool,
     model: Model,
-    messages: list[Message],
-) -> tuple[ChatSession | None, GeminiClientWrapper | None, list[Message]]:
+    messages: list[ChatCompletionMessage],
+) -> tuple[ChatSession | None, GeminiClientWrapper | None, list[ChatCompletionMessage]]:
     """Find an existing chat session matching the longest suitable history prefix."""
     if len(messages) < 2:
         return None, None, messages
@@ -786,7 +857,7 @@ async def _find_reusable_session(
 async def _send_with_split(
     session: ChatSession,
     text: str,
-    files: list[Path | str | io.BytesIO] | None = None,
+    files: list[str | Path | bytes | io.BytesIO] | None = None,
     stream: bool = False,
 ) -> AsyncGenerator[ModelOutput] | ModelOutput:
     """Send text to Gemini, splitting or converting to attachment if too long."""
@@ -805,7 +876,7 @@ async def _send_with_split(
     file_obj = io.BytesIO(text.encode("utf-8"))
     file_obj.name = "message.txt"
     try:
-        final_files = list(files) if files else []
+        final_files: list[str | Path | bytes | io.BytesIO] = list(files) if files else []
         final_files.append(file_obj)
         instruction = (
             "The user's input exceeds the character limit and is provided in the attached file `message.txt`.\n\n"
@@ -874,7 +945,7 @@ class StreamingOutputFilter:
             if self._is_outputting():
                 output.append(pre_text)
 
-            if matched_group.endswith("_START"):
+            if matched_group and matched_group.endswith("_START"):
                 m_type = matched_group.split("_")[0]
                 if m_type == "TAG":
                     self.stack.append("IN_TAG_HEADER")
@@ -916,7 +987,7 @@ def _create_real_streaming_response(
     completion_id: str,
     created_time: int,
     model_name: str,
-    messages: list[Message],
+    messages: list[ChatCompletionMessage],
     db: LMDBConversationStore,
     model: Model,
     client_wrapper: GeminiClientWrapper,
@@ -1070,7 +1141,7 @@ def _create_real_streaming_response(
         p_tok, c_tok, t_tok, r_tok = _calculate_usage(
             messages, assistant_text, tool_calls, full_thoughts
         )
-        usage = Usage(
+        usage = CompletionUsage(
             prompt_tokens=p_tok,
             completion_tokens=c_tok,
             total_tokens=t_tok,
@@ -1107,7 +1178,7 @@ def _create_responses_real_streaming_response(
     response_id: str,
     created_time: int,
     model_name: str,
-    messages: list[Message],
+    messages: list[ChatCompletionMessage],
     db: LMDBConversationStore,
     model: Model,
     client_wrapper: GeminiClientWrapper,
@@ -1197,7 +1268,7 @@ def _create_responses_real_streaming_response(
                                 **base_event,
                                 "type": "response.output_item.added",
                                 "output_index": current_index,
-                                "item": ResponseReasoning(
+                                "item": ResponseReasoningItem(
                                     id=thought_item_id,
                                     type="reasoning",
                                     status="in_progress",
@@ -1214,7 +1285,7 @@ def _create_responses_real_streaming_response(
                                 "item_id": thought_item_id,
                                 "output_index": current_index,
                                 "summary_index": 0,
-                                "part": ResponseSummaryPart(text="").model_dump(mode="json"),
+                                "part": SummaryTextContent(text="").model_dump(mode="json"),
                             },
                         )
                         thought_open = True
@@ -1253,7 +1324,7 @@ def _create_responses_real_streaming_response(
                                 "item_id": thought_item_id,
                                 "output_index": current_index,
                                 "summary_index": 0,
-                                "part": ResponseSummaryPart(text=full_thoughts).model_dump(
+                                "part": SummaryTextContent(text=full_thoughts).model_dump(
                                     mode="json"
                                 ),
                             },
@@ -1264,11 +1335,11 @@ def _create_responses_real_streaming_response(
                                 **base_event,
                                 "type": "response.output_item.done",
                                 "output_index": current_index,
-                                "item": ResponseReasoning(
+                                "item": ResponseReasoningItem(
                                     id=thought_item_id,
                                     type="reasoning",
                                     status="completed",
-                                    summary=[ResponseSummaryPart(text=full_thoughts)],
+                                    summary=[SummaryTextContent(text=full_thoughts)],
                                 ).model_dump(mode="json"),
                             },
                         )
@@ -1300,9 +1371,9 @@ def _create_responses_real_streaming_response(
                                 "item_id": message_item_id,
                                 "output_index": current_index,
                                 "content_index": 0,
-                                "part": ResponseOutputContent(
-                                    type="output_text", text=""
-                                ).model_dump(mode="json"),
+                                "part": ResponseOutputText(type="output_text", text="").model_dump(
+                                    mode="json"
+                                ),
                             },
                         )
                         message_open = True
@@ -1372,7 +1443,7 @@ def _create_responses_real_streaming_response(
                     "item_id": thought_item_id,
                     "output_index": current_index,
                     "summary_index": 0,
-                    "part": ResponseSummaryPart(text=full_thoughts).model_dump(mode="json"),
+                    "part": SummaryTextContent(text=full_thoughts).model_dump(mode="json"),
                 },
             )
             yield make_event(
@@ -1381,11 +1452,11 @@ def _create_responses_real_streaming_response(
                     **base_event,
                     "type": "response.output_item.done",
                     "output_index": current_index,
-                    "item": ResponseReasoning(
+                    "item": ResponseReasoningItem(
                         id=thought_item_id,
                         type="reasoning",
                         status="completed",
-                        summary=[ResponseSummaryPart(text=full_thoughts)],
+                        summary=[SummaryTextContent(text=full_thoughts)],
                     ).model_dump(mode="json"),
                 },
             )
@@ -1414,9 +1485,9 @@ def _create_responses_real_streaming_response(
                     "item_id": message_item_id,
                     "output_index": current_index,
                     "content_index": 0,
-                    "part": ResponseOutputContent(
-                        type="output_text", text=assistant_text
-                    ).model_dump(mode="json"),
+                    "part": ResponseOutputText(type="output_text", text=assistant_text).model_dump(
+                        mode="json"
+                    ),
                 },
             )
             yield make_event(
@@ -1430,13 +1501,13 @@ def _create_responses_real_streaming_response(
                         type="message",
                         status="completed",
                         role="assistant",
-                        content=[ResponseOutputContent(type="output_text", text=assistant_text)],
+                        content=[ResponseOutputText(type="output_text", text=assistant_text)],
                     ).model_dump(mode="json"),
                 },
             )
             current_index += 1
 
-        image_items: list[ResponseImageGenerationCall] = []
+        image_items: list[ImageGenerationCall] = []
         final_response_contents: list[ResponseOutputContent] = []
         seen_hashes = set()
 
@@ -1453,7 +1524,7 @@ def _create_responses_real_streaming_response(
                         img_id = parts[0]
                         fmt = parts[1] if len(parts) > 1 else "png"
 
-                        img_item = ResponseImageGenerationCall(
+                        img_item = ImageGenerationCall(
                             id=img_id,
                             result=b64,
                             output_format=fmt,
@@ -1464,7 +1535,7 @@ def _create_responses_real_streaming_response(
                             f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
                         )
                         final_response_contents.append(
-                            ResponseOutputContent(type="output_text", text=image_url)
+                            ResponseOutputText(type="output_text", text=image_url)
                         )
 
                         yield make_event(
@@ -1493,7 +1564,13 @@ def _create_responses_real_streaming_response(
                         logger.warning("Image processing failed in stream")
 
         for call in detected_tool_calls:
-            tc_item = ResponseToolCall(id=call.id, status="completed", function=call.function)
+            tc_item = ResponseFunctionToolCall(
+                id=call.id,
+                call_id=call.id,
+                name=call.function.name,
+                arguments=call.function.arguments,
+                status="completed",
+            )
             yield make_event(
                 "response.output_item.added",
                 {
@@ -1516,7 +1593,7 @@ def _create_responses_real_streaming_response(
 
         if assistant_text:
             final_response_contents.insert(
-                0, ResponseOutputContent(type="output_text", text=assistant_text)
+                0, ResponseOutputText(type="output_text", text=assistant_text)
             )
 
         p_tok, c_tok, t_tok, r_tok = _calculate_usage(
@@ -1537,7 +1614,6 @@ def _create_responses_real_streaming_response(
             final_response_contents,
             usage,
             request,
-            None,
             full_thoughts,
         )
         _persist_conversation(
@@ -1643,13 +1719,15 @@ async def create_chat_completion(
             f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
         )
         resp_or_stream = await _send_with_split(
-            session, m_input, files=files, stream=request.stream
+            session, m_input, files=files, stream=bool(request.stream)
         )
     except Exception as e:
         logger.exception("Gemini API error")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     if request.stream:
+        # Narrow for type checker
+        assert not isinstance(resp_or_stream, ModelOutput)
         return _create_real_streaming_response(
             resp_or_stream,
             completion_id,
@@ -1663,6 +1741,9 @@ async def create_chat_completion(
             base_url,
             structured_requirement,
         )
+
+    # Narrow for type checker
+    assert isinstance(resp_or_stream, ModelOutput)
 
     try:
         thoughts = resp_or_stream.thoughts
@@ -1743,33 +1824,35 @@ async def create_response(
     image_store: Path = Depends(get_image_store_dir),
 ):
     base_url = str(raw_request.base_url)
-    base_messages, norm_input = _response_items_to_messages(request.input)
+    base_messages = _response_items_to_messages(request.input)
     struct_req = _build_structured_requirement(request.response_format)
     extra_instr = [struct_req.instruction] if struct_req else []
 
     standard_tools, image_tools = [], []
     if request.tools:
         for t in request.tools:
-            if isinstance(t, Tool):
+            if isinstance(t, FunctionTool):
                 standard_tools.append(t)
-            elif isinstance(t, ResponseImageTool):
+            elif isinstance(t, ImageGeneration):
                 image_tools.append(t)
             elif isinstance(t, dict):
                 if t.get("type") == "function":
-                    standard_tools.append(Tool.model_validate(t))
+                    standard_tools.append(FunctionTool.model_validate(t))
                 elif t.get("type") == "image_generation":
-                    image_tools.append(ResponseImageTool.model_validate(t))
+                    image_tools.append(ImageGeneration.model_validate(t))
 
     img_instr = _build_image_generation_instruction(
         image_tools,
-        request.tool_choice if isinstance(request.tool_choice, ResponseToolChoice) else None,
+        request.tool_choice if isinstance(request.tool_choice, ToolChoiceFunction) else None,
     )
     if img_instr:
         extra_instr.append(img_instr)
     preface = _instructions_to_messages(request.instructions)
     conv_messages = [*preface, *base_messages] if preface else base_messages
     model_tool_choice = (
-        request.tool_choice if isinstance(request.tool_choice, (str, ToolChoiceFunction)) else None
+        request.tool_choice
+        if isinstance(request.tool_choice, (str, ChatCompletionNamedToolChoice))
+        else None
     )
 
     messages = _prepare_messages_for_model(
@@ -1788,7 +1871,7 @@ async def create_response(
     if session:
         msgs = _prepare_messages_for_model(
             remain,
-            request.tools,
+            request.tools,  # type: ignore
             request.tool_choice,
             None,
             False,
@@ -1819,13 +1902,15 @@ async def create_response(
             f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
         )
         resp_or_stream = await _send_with_split(
-            session, m_input, files=files, stream=request.stream
+            session, m_input, files=files, stream=bool(request.stream)
         )
     except Exception as e:
         logger.exception("Gemini API error")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     if request.stream:
+        # Narrow for type checker
+        assert not isinstance(resp_or_stream, ModelOutput)
         return _create_responses_real_streaming_response(
             resp_or_stream,
             response_id,
@@ -1842,6 +1927,9 @@ async def create_response(
             struct_req,
         )
 
+    # Narrow for type checker
+    assert isinstance(resp_or_stream, ModelOutput)
+
     try:
         thoughts = resp_or_stream.thoughts
         raw_clean = GeminiClientWrapper.extract_output(resp_or_stream, include_thoughts=False)
@@ -1856,7 +1944,9 @@ async def create_response(
     )
     images = resp_or_stream.images or []
     if (
-        request.tool_choice is not None and request.tool_choice.type == "image_generation"
+        request.tool_choice is not None
+        and hasattr(request.tool_choice, "type")
+        and request.tool_choice.type == "image_generation"
     ) and not images:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No images returned.")
 
@@ -1879,13 +1969,13 @@ async def create_response(
             )
 
             contents.append(
-                ResponseOutputContent(
+                ResponseOutputText(
                     type="output_text",
                     text=f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})",
                 )
             )
             img_calls.append(
-                ResponseImageGenerationCall(
+                ImageGenerationCall(
                     id=img_id,
                     result=b64,
                     output_format=img_format,
@@ -1896,9 +1986,9 @@ async def create_response(
             logger.warning(f"Image error: {e}")
 
     if assistant_text:
-        contents.append(ResponseOutputContent(type="output_text", text=assistant_text))
+        contents.append(ResponseOutputText(type="output_text", text=assistant_text))
     if not contents:
-        contents.append(ResponseOutputContent(type="output_text", text=""))
+        contents.append(ResponseOutputText(type="output_text", text=""))
 
     # Aggregate images for storage
     image_markdown = ""
@@ -1926,7 +2016,6 @@ async def create_response(
         contents,
         usage,
         request,
-        norm_input,
         thoughts,
     )
     _persist_conversation(

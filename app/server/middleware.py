@@ -113,7 +113,7 @@ def add_cors_middleware(app: FastAPI):
     if g_config.cors.enabled:
         cors = g_config.cors
         app.add_middleware(
-            CORSMiddleware,
+            CORSMiddleware,  # type: ignore
             allow_origins=cors.allow_origins,
             allow_credentials=cors.allow_credentials,
             allow_methods=cors.allow_methods,

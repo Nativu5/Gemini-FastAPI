@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 from typing import Any, cast
 
@@ -5,7 +6,7 @@ import orjson
 from gemini_webapi import GeminiClient, ModelOutput
 from loguru import logger
 
-from app.models import Message
+from app.models import ChatCompletionMessage
 from app.utils import g_config
 from app.utils.helper import (
     add_tag,
@@ -28,7 +29,7 @@ class GeminiClientWrapper(GeminiClient):
         super().__init__(**kwargs)
         self.id = client_id
 
-    async def init(
+    async def init(  # type: ignore
         self,
         timeout: float = cast(float, _UNSET),
         watchdog_timeout: float = cast(float, _UNSET),
@@ -68,7 +69,10 @@ class GeminiClientWrapper(GeminiClient):
 
     @staticmethod
     async def process_message(
-        message: Message, tempdir: Path | None = None, tagged: bool = True, wrap_tool: bool = True
+        message: ChatCompletionMessage,
+        tempdir: Path | None = None,
+        tagged: bool = True,
+        wrap_tool: bool = True,
     ) -> tuple[str, list[Path | str]]:
         """
         Process a Message into Gemini API format using the PascalCase technical protocol.
@@ -83,22 +87,25 @@ class GeminiClientWrapper(GeminiClient):
         elif isinstance(message.content, list):
             for item in message.content:
                 if item.type == "text":
-                    if item.text or message.role == "tool":
-                        text_fragments.append(item.text or "")
+                    item_text = getattr(item, "text", "") or ""
+                    if item_text or message.role == "tool":
+                        text_fragments.append(item_text)
                 elif item.type == "image_url":
-                    if not item.image_url:
+                    item_image_url = getattr(item, "image_url", None)
+                    if not item_image_url:
                         raise ValueError("Image URL cannot be empty")
-                    if url := item.image_url.get("url", None):
+                    if url := item_image_url.get("url", None):
                         files.append(await save_url_to_tempfile(url, tempdir))
                     else:
                         raise ValueError("Image URL must contain 'url' key")
                 elif item.type == "file":
-                    if not item.file:
+                    item_file = getattr(item, "file", None)
+                    if not item_file:
                         raise ValueError("File cannot be empty")
-                    if file_data := item.file.get("file_data", None):
-                        filename = item.file.get("filename", "")
+                    if file_data := item_file.get("file_data", None):
+                        filename = item_file.get("filename", "")
                         files.append(await save_file_to_tempfile(file_data, filename, tempdir))
-                    elif url := item.file.get("url", None):
+                    elif url := item_file.get("url", None):
                         files.append(await save_url_to_tempfile(url, tempdir))
                     else:
                         raise ValueError("File must contain 'file_data' or 'url' key")
@@ -154,10 +161,10 @@ class GeminiClientWrapper(GeminiClient):
 
     @staticmethod
     async def process_conversation(
-        messages: list[Message], tempdir: Path | None = None
-    ) -> tuple[str, list[Path | str]]:
+        messages: list[ChatCompletionMessage], tempdir: Path | None = None
+    ) -> tuple[str, list[str | Path | bytes | io.BytesIO]]:
         conversation: list[str] = []
-        files: list[Path | str] = []
+        files: list[str | Path | bytes | io.BytesIO] = []
 
         i = 0
         while i < len(messages):
