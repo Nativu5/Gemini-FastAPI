@@ -150,14 +150,14 @@ class ChatCompletionResponse(BaseModel):
 class ResponseInputText(BaseModel):
     """Text content item in a Responses API input message."""
 
-    type: Literal["input_text"]
+    type: Literal["input_text"] | None = Field(default="input_text")
     text: str | None = Field(default=None)
 
 
 class ResponseInputImage(BaseModel):
     """Image content item in a Responses API input message."""
 
-    type: Literal["input_image"]
+    type: Literal["input_image"] | None = Field(default="input_image")
     detail: Literal["auto", "low", "high"] | None = Field(default=None)
     file_id: str | None = Field(default=None)
     image_url: str | None = Field(default=None)
@@ -166,7 +166,7 @@ class ResponseInputImage(BaseModel):
 class ResponseInputFile(BaseModel):
     """File content item in a Responses API input message."""
 
-    type: Literal["input_file"]
+    type: Literal["input_file"] | None = Field(default="input_file")
     file_id: str | None = Field(default=None)
     file_url: str | None = Field(default=None)
     file_data: str | None = Field(default=None)
@@ -204,10 +204,10 @@ class ResponseFunctionToolCall(BaseModel):
 
     type: Literal["function_call"] | None = Field(default="function_call")
     id: str | None = Field(default=None)
-    call_id: str
-    name: str
-    arguments: str
-    status: Literal["in_progress", "completed", "incomplete"] = Field(default="completed")
+    call_id: str | None = Field(default=None)
+    name: str | None = Field(default=None)
+    arguments: str | None = Field(default=None)
+    status: Literal["in_progress", "completed", "incomplete"] | None = Field(default="completed")
 
 
 class FunctionCallOutput(BaseModel):
@@ -215,9 +215,11 @@ class FunctionCallOutput(BaseModel):
 
     type: Literal["function_call_output"] | None = Field(default="function_call_output")
     id: str | None = Field(default=None)
-    call_id: str
-    output: str | list[ResponseInputText | ResponseInputImage | ResponseInputFile]
-    status: Literal["in_progress", "completed", "incomplete"] = Field(default="completed")
+    call_id: str | None = Field(default=None)
+    output: str | list[ResponseInputText | ResponseInputImage | ResponseInputFile] | None = Field(
+        default=None
+    )
+    status: Literal["in_progress", "completed", "incomplete"] | None = Field(default="completed")
 
 
 class FunctionTool(BaseModel):
@@ -267,7 +269,7 @@ class ResponseUsage(BaseModel):
 class ResponseOutputText(BaseModel):
     """Text content part inside a Responses API output message."""
 
-    type: Literal["output_text"]
+    type: Literal["output_text"] | None = Field(default="output_text")
     text: str | None = Field(default=None)
     annotations: list[dict[str, Any]] = Field(default_factory=list)
     logprobs: list[dict[str, Any]] | None = Field(default=None)
@@ -276,7 +278,7 @@ class ResponseOutputText(BaseModel):
 class ResponseOutputRefusal(BaseModel):
     """Refusal content part inside a Responses API output message."""
 
-    type: Literal["refusal"]
+    type: Literal["refusal"] | None = Field(default="refusal")
     refusal: str | None = Field(default=None)
 
 
@@ -286,8 +288,8 @@ ResponseOutputContent = ResponseOutputText | ResponseOutputRefusal
 class ResponseOutputMessage(BaseModel):
     """Assistant message output item in a Responses API response."""
 
-    id: str
-    type: Literal["message"]
+    id: str | None = Field(default=None)
+    type: Literal["message"] | None = Field(default="message")
     status: Literal["in_progress", "completed", "incomplete"] = Field(default="completed")
     role: Literal["assistant"]
     content: list[ResponseOutputText | ResponseOutputRefusal]
@@ -296,22 +298,22 @@ class ResponseOutputMessage(BaseModel):
 class SummaryTextContent(BaseModel):
     """Summary text part inside a reasoning item."""
 
-    type: Literal["summary_text"] = Field(default="summary_text")
-    text: str
+    type: Literal["summary_text"] | None = Field(default="summary_text")
+    text: str | None = Field(default=None)
 
 
 class ReasoningTextContent(BaseModel):
     """Full reasoning text part inside a reasoning item."""
 
-    type: Literal["reasoning_text"] = Field(default="reasoning_text")
-    text: str
+    type: Literal["reasoning_text"] | None = Field(default="reasoning_text")
+    text: str | None = Field(default=None)
 
 
 class ResponseReasoningItem(BaseModel):
     """A reasoning output item emitted by a thinking model."""
 
-    id: str
-    type: Literal["reasoning"] = Field(default="reasoning")
+    id: str | None = Field(default=None)
+    type: Literal["reasoning"] | None = Field(default="reasoning")
     status: Literal["in_progress", "completed", "incomplete"] | None = Field(default=None)
     summary: list[SummaryTextContent] | None = Field(default=None)
     content: list[ReasoningTextContent] | None = Field(default=None)
@@ -321,19 +323,19 @@ class ResponseReasoningItem(BaseModel):
 class ResponseToolCall(BaseModel):
     """A function-call output item emitted by the model."""
 
-    id: str
-    type: Literal["function_call"] = Field(default="function_call")
-    call_id: str
-    name: str
-    arguments: str
-    status: Literal["in_progress", "completed", "incomplete"] = Field(default="completed")
+    id: str | None = Field(default=None)
+    type: Literal["function_call"] | None = Field(default="function_call")
+    call_id: str | None = Field(default=None)
+    name: str | None = Field(default=None)
+    arguments: str | None = Field(default=None)
+    status: Literal["in_progress", "completed", "incomplete"] | None = Field(default="completed")
 
 
 class ImageGenerationCall(BaseModel):
     """An image-generation output item emitted by the Responses API."""
 
-    id: str
-    type: Literal["image_generation_call"] = Field(default="image_generation_call")
+    id: str | None = Field(default=None)
+    type: Literal["image_generation_call"] | None = Field(default="image_generation_call")
     status: Literal["completed", "in_progress", "generating", "failed"] = Field(default="completed")
     result: str | None = Field(default=None)
     output_format: str | None = Field(default=None)
