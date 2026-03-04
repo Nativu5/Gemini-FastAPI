@@ -176,7 +176,7 @@ dev = [{ name = "gemini-fastapi", extras = ["dev"] }]
 
 [[package]]
 name = "gemini-webapi"
-version = "1.19.2"
+version = "1.20.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx", extra = ["http2"] },
@@ -184,9 +184,9 @@ dependencies = [
     { name = "orjson" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d4/d3/b4ff659bfb0fff378b16f934429d53b7f78451ac184406ab2f9ddda9357e/gemini_webapi-1.19.2.tar.gz", hash = "sha256:f6e96e28f3f1e78be6176fbb8b2eca25ad509aec6cfacf99c415559f27691b71", size = 266805, upload-time = "2026-02-14T05:26:04.103Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ad/65/4c283c0c7a1004a92ef575fa3deb5d2cab8d66fa3a8de6500031491d2d6b/gemini_webapi-1.20.0.tar.gz", hash = "sha256:540e77aee4c28f57be4a9a3cb7845f509411763fc6958dc0af984822e2dd3bc1", size = 267233, upload-time = "2026-03-03T22:48:14.046Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2d/e7/a676f721980e3daa43e05abe94884a84648efdc6203889e7a0f5c8ca2e98/gemini_webapi-1.19.2-py3-none-any.whl", hash = "sha256:fdc088ca35361301f40ea807a58c4bec18886b17a54164a1a8f3d639eadc6a66", size = 63524, upload-time = "2026-02-14T05:26:02.173Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/93/bd3f3bc00da483fbc8d4c329a602b037dcf410cd63d42d1d5c3ee81ec9e4/gemini_webapi-1.20.0-py3-none-any.whl", hash = "sha256:49fe29d7ce80c686c20f45a3218d1832bdd0673978e18ea86d8fb8c3ebff6c18", size = 63759, upload-time = "2026-03-03T22:48:12.769Z" },
 ]
 
 [[package]]
