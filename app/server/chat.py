@@ -1076,7 +1076,7 @@ class StreamingOutputFilter:
 # --- Response Builders & Streaming ---
 
 
-async def _create_real_streaming_response(
+def _create_real_streaming_response(
     resp_or_stream: AsyncGenerator[ModelOutput] | ModelOutput,
     completion_id: str,
     created_time: int,
@@ -1233,7 +1233,7 @@ async def _create_real_streaming_response(
     return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
 
-async def _create_responses_real_streaming_response(
+def _create_responses_real_streaming_response(
     resp_or_stream: AsyncGenerator[ModelOutput] | ModelOutput,
     response_id: str,
     created_time: int,
@@ -1753,8 +1753,6 @@ async def create_chat_completion(
         if not remain:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
 
-        # For reused sessions, we only need to process the remaining messages.
-        # We don't re-inject system defaults to avoid duplicating instructions already in history.
         input_msgs = _prepare_messages_for_model(
             remain,
             request.tools,
@@ -1771,7 +1769,6 @@ async def create_chat_completion(
         try:
             client = await pool.acquire()
             session = client.start_chat(model=model)
-            # Use the already prepared 'msgs' for a fresh session
             m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
         except Exception as e:
             logger.exception("Error in preparing conversation")
@@ -1795,14 +1792,13 @@ async def create_chat_completion(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     if request.stream:
-        # Narrow for type checker
         assert not isinstance(resp_or_stream, ModelOutput)
         return _create_real_streaming_response(
             resp_or_stream,
             completion_id,
             created_time,
             request.model,
-            msgs,  # Use prepared 'msgs'
+            msgs,
             db,
             model,
             client,
@@ -1811,7 +1807,6 @@ async def create_chat_completion(
             structured_requirement,
         )
 
-    # Narrow for type checker
     assert isinstance(resp_or_stream, ModelOutput)
 
     try:
@@ -1876,7 +1871,7 @@ async def create_chat_completion(
         model.model_name,
         client.id,
         session.metadata,
-        msgs,  # Use prepared messages 'msgs'
+        msgs,
         storage_output,
         tool_calls,
     )
@@ -1977,7 +1972,6 @@ async def create_response(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     if request.stream:
-        # Narrow for type checker
         assert not isinstance(resp_or_stream, ModelOutput)
         return _create_responses_real_streaming_response(
             resp_or_stream,
@@ -1995,7 +1989,6 @@ async def create_response(
             struct_req,
         )
 
-    # Narrow for type checker
     assert isinstance(resp_or_stream, ModelOutput)
 
     try:
@@ -2058,7 +2051,6 @@ async def create_response(
     if not contents:
         contents.append(ResponseOutputText(type="output_text", text=""))
 
-    # Aggregate images for storage
     image_markdown = ""
     for img_call in img_calls:
         fname = f"{img_call.id}.{img_call.output_format}"
