@@ -6,7 +6,7 @@ LABEL org.opencontainers.image.title="Gemini-FastAPI" \
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini \
+    tini git \
     && rm -rf /var/lib/apt/lists/*
 
 ENV UV_COMPILE_BYTECODE=1 \
