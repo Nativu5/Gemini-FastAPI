@@ -12,17 +12,13 @@ from lmdb import Environment, Error, Transaction
 from loguru import logger
 
 from app.models import (
-    ChatCompletionAssistantContentItem,
-    ChatCompletionMessage,
-    ChatCompletionRequestContentItem,
+    AppMessage,
     ConversationInStore,
 )
 from app.utils import g_config
 from app.utils.helper import (
-    extract_tool_calls,
     normalize_llm_text,
     remove_tool_call_blocks,
-    strip_system_hints,
     unescape_text,
 )
 from app.utils.singleton import Singleton
@@ -57,17 +53,14 @@ def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
     return text.strip() if text.strip() else None
 
 
-def _hash_message(message: ChatCompletionMessage, fuzzy: bool = False) -> str:
+def _hash_message(message: AppMessage, fuzzy: bool = False) -> str:
     """
     Generate a stable, canonical hash for a single message.
     """
     core_data: dict[str, Any] = {
         "role": message.role,
-        "name": message.name or None,
-        "tool_call_id": message.tool_call_id or None,
-        "reasoning_content": _normalize_text(message.reasoning_content)
-        if message.reasoning_content
-        else None,
+        "name": message.name,
+        "tool_call_id": message.tool_call_id,
     }
 
     content = message.content
@@ -76,44 +69,22 @@ def _hash_message(message: ChatCompletionMessage, fuzzy: bool = False) -> str:
     elif isinstance(content, str):
         core_data["content"] = _normalize_text(content, fuzzy=fuzzy)
     elif isinstance(content, list):
-        _ContentItem = (ChatCompletionRequestContentItem, ChatCompletionAssistantContentItem)
         text_parts = []
         for item in content:
-            text_val = ""
-            if isinstance(item, _ContentItem) and item.type == "text":
-                text_val = item.text or ""
-            elif isinstance(item, dict) and item.get("type") == "text":
-                text_val = item.get("text") or ""
-
-            if text_val:
-                normalized_part = _normalize_text(text_val, fuzzy=fuzzy)
+            if item.type == "text" and item.text:
+                normalized_part = _normalize_text(item.text, fuzzy=fuzzy)
                 if normalized_part:
                     text_parts.append(normalized_part)
-            elif isinstance(item, _ContentItem):
-                item_type = item.type
-                if item_type == "image_url":
-                    item_image_url = getattr(item, "image_url", None)
-                    url = item_image_url.get("url") if item_image_url else None
-                    text_parts.append(f"[image_url:{url}]")
-                elif item_type == "file":
-                    item_file = getattr(item, "file", None)
-                    url = (item_file.get("url") or item_file.get("filename")) if item_file else None
-                    text_parts.append(f"[file:{url}]")
-            elif isinstance(item, dict):
-                item_type = item.get("type")
-                if item_type == "image_url":
-                    url = item.get("image_url", {}).get("url")
-                    text_parts.append(f"[image_url:{url}]")
-                elif item_type == "file":
-                    url = item.get("file", {}).get("url") or item.get("file", {}).get("filename")
-                    text_parts.append(f"[file:{url}]")
+            elif item.type != "text" and item.url:
+                text_parts.append(f"[{item.type}:{item.url}]")
 
         core_data["content"] = "\n".join(text_parts) if text_parts else None
 
     if message.tool_calls:
         calls_data = []
         for tc in message.tool_calls:
-            args = tc.function.arguments or "{}"
+            args = tc.function.arguments
+            name = tc.function.name
             try:
                 parsed = orjson.loads(args)
                 canon_args = orjson.dumps(parsed, option=orjson.OPT_SORT_KEYS).decode("utf-8")
@@ -122,7 +93,7 @@ def _hash_message(message: ChatCompletionMessage, fuzzy: bool = False) -> str:
 
             calls_data.append(
                 {
-                    "name": tc.function.name,
+                    "name": name,
                     "arguments": canon_args,
                 }
             )
@@ -136,7 +107,7 @@ def _hash_message(message: ChatCompletionMessage, fuzzy: bool = False) -> str:
 
 
 def _hash_conversation(
-    client_id: str, model: str, messages: list[ChatCompletionMessage], fuzzy: bool = False
+    client_id: str, model: str, messages: list[AppMessage], fuzzy: bool = False
 ) -> str:
     """Generate a hash for a list of messages and model name, tied to a specific client_id."""
     combined_hash = hashlib.sha256()
@@ -271,29 +242,35 @@ class LMDBConversationStore(metaclass=Singleton):
 
     def store(
         self,
-        conv: ConversationInStore,
-        custom_key: str | None = None,
-    ) -> str:
+        client_id: str,
+        model: str,
+        messages: list[AppMessage],
+        metadata: list[str | None],
+    ) -> None:
         """
         Store a conversation model in LMDB.
 
         Args:
-            conv: Conversation model to store
-            custom_key: Optional custom key, if not provided, hash will be used
-
-        Returns:
-            str: The key used to store the messages (hash or custom key)
+            client_id: The client identifier
+            model: The model name
+            messages: Unsanitized API messages
+            metadata: Session metadata
         """
-        if not conv:
+        if not messages:
             raise ValueError("Messages list cannot be empty")
 
-        # Ensure consistent sanitization before hashing and storage
-        sanitized_messages = self.sanitize_messages(conv.messages)
-        conv.messages = sanitized_messages
-
+        now = datetime.now()
+        conv = ConversationInStore(
+            model=model,
+            client_id=client_id,
+            metadata=metadata,
+            messages=messages,
+            created_at=now,
+            updated_at=now,
+        )
         message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
         fuzzy_hash = _hash_conversation(conv.client_id, conv.model, conv.messages, fuzzy=True)
-        storage_key = custom_key or message_hash
+        storage_key = message_hash
 
         now = datetime.now()
         if conv.created_at is None:
@@ -310,7 +287,6 @@ class LMDBConversationStore(metaclass=Singleton):
                 self._update_index(txn, self.FUZZY_LOOKUP_PREFIX, fuzzy_hash, storage_key)
 
                 logger.debug(f"Stored {len(conv.messages)} messages with key: {storage_key[:12]}")
-                return storage_key
 
         except Error as e:
             logger.error(f"LMDB error while storing messages with key {storage_key[:12]}: {e}")
@@ -349,10 +325,10 @@ class LMDBConversationStore(metaclass=Singleton):
             logger.error(f"Unexpected error retrieving messages with key {key[:12]}: {e}")
             return None
 
-    def find(self, model: str, messages: list[ChatCompletionMessage]) -> ConversationInStore | None:
+    def find(self, model: str, messages: list[AppMessage]) -> ConversationInStore | None:
         """
         Search conversation data by message list.
-        Tries raw matching, then sanitized matching, and finally fuzzy matching.
+        Tries sanitized matching, and finally fuzzy matching.
 
         Args:
             model: Model name
@@ -365,16 +341,7 @@ class LMDBConversationStore(metaclass=Singleton):
             return None
 
         if conv := self._find_by_message_list(model, messages):
-            logger.debug(f"Session found for '{model}' with {len(messages)} raw messages.")
-            return conv
-
-        cleaned_messages = self.sanitize_messages(messages)
-        if cleaned_messages != messages and (
-            conv := self._find_by_message_list(model, cleaned_messages)
-        ):
-            logger.debug(
-                f"Session found for '{model}' with {len(cleaned_messages)} cleaned messages."
-            )
+            logger.debug(f"Session found for '{model}' with {len(messages)} cleaned messages.")
             return conv
 
         if conv := self._find_by_message_list(model, messages, fuzzy=True):
@@ -389,7 +356,7 @@ class LMDBConversationStore(metaclass=Singleton):
     def _find_by_message_list(
         self,
         model: str,
-        messages: list[ChatCompletionMessage],
+        messages: list[AppMessage],
         fuzzy: bool = False,
     ) -> ConversationInStore | None:
         """
@@ -592,98 +559,3 @@ class LMDBConversationStore(metaclass=Singleton):
     def __del__(self):
         """Cleanup on destruction."""
         self.close()
-
-    @staticmethod
-    def sanitize_messages(messages: list[ChatCompletionMessage]) -> list[ChatCompletionMessage]:
-        """Clean all messages of internal markers, hints and normalize tool calls."""
-        cleaned_messages = []
-        for msg in messages:
-            update_data = {}
-            content_changed = False
-
-            # Normalize reasoning_content
-            if msg.reasoning_content:
-                norm_reasoning = _normalize_text(msg.reasoning_content)
-                if norm_reasoning != msg.reasoning_content:
-                    update_data["reasoning_content"] = norm_reasoning
-                    content_changed = True
-
-            if isinstance(msg.content, str):
-                text = msg.content
-                tool_calls = msg.tool_calls
-
-                if msg.role == "assistant" and not tool_calls:
-                    text, tool_calls = extract_tool_calls(text)
-                else:
-                    text = strip_system_hints(text)
-
-                normalized_content = text.strip() or None
-
-                if normalized_content != msg.content:
-                    update_data["content"] = normalized_content
-                    content_changed = True
-                if tool_calls != msg.tool_calls:
-                    update_data["tool_calls"] = tool_calls or None
-                    content_changed = True
-
-            elif isinstance(msg.content, list):
-                new_content = []
-                all_extracted_calls = list(msg.tool_calls or [])
-                list_changed = False
-                reasoning_parts = []
-
-                for item in msg.content:
-                    # Extract reasoning items and move them to reasoning_content
-                    if (
-                        isinstance(item, ChatCompletionAssistantContentItem)
-                        and item.type == "reasoning"
-                    ):
-                        val = item.text
-                        if val:
-                            norm_val = _normalize_text(val)
-                            if norm_val:
-                                reasoning_parts.append(norm_val)
-                        list_changed = True
-                        continue
-
-                    if (
-                        isinstance(
-                            item,
-                            (ChatCompletionRequestContentItem, ChatCompletionAssistantContentItem),
-                        )
-                        and item.type == "text"
-                        and item.text
-                    ):
-                        text = item.text
-                        if msg.role == "assistant" and not msg.tool_calls:
-                            text, extracted = extract_tool_calls(text)
-                            if extracted:
-                                all_extracted_calls.extend(extracted)
-                                list_changed = True
-                        else:
-                            text = strip_system_hints(text)
-
-                        if text != item.text:
-                            list_changed = True
-                            item = item.model_copy(update={"text": text.strip() or None})
-                    new_content.append(item)
-
-                if reasoning_parts:
-                    existing_reason = update_data.get("reasoning_content") or msg.reasoning_content
-                    all_reasoning = "\n\n".join(
-                        r for r in ([existing_reason, *reasoning_parts]) if r
-                    )
-                    if all_reasoning:
-                        update_data["reasoning_content"] = all_reasoning
-                        content_changed = True
-
-                if list_changed:
-                    update_data["content"] = new_content if new_content else None
-                    update_data["tool_calls"] = all_extracted_calls or None
-                    content_changed = True
-
-            if content_changed:
-                cleaned_messages.append(msg.model_copy(update=update_data))
-            else:
-                cleaned_messages.append(msg)
-        return cleaned_messages

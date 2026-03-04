@@ -14,7 +14,7 @@ import orjson
 from curl_cffi.requests import AsyncSession
 from loguru import logger
 
-from app.models import ChatCompletionMessage, ChatCompletionMessageToolCall, FunctionCall
+from app.models import AppMessage, ChatCompletionMessageToolCall, FunctionCall
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
@@ -180,7 +180,7 @@ def estimate_tokens(text: str | None) -> int:
 
 
 async def save_file_to_tempfile(
-    file_in_base64: str, file_name: str = "", tempdir: Path | None = None
+    file_in_base64: str | bytes, file_name: str = "", tempdir: Path | None = None
 ) -> Path:
     """Decode base64 file data and save to a temporary file."""
     with tempfile.NamedTemporaryFile(
@@ -195,11 +195,15 @@ async def save_url_to_tempfile(url: str, tempdir: Path | None = None) -> Path:
     """Download content from a URL and save to a temporary file."""
     data: bytes | None = None
     suffix: str | None = None
-    if url.startswith("data:image/"):
+    if url.startswith("data:"):
         metadata_part = url.split(",")[0]
         mime_type = metadata_part.split(":")[1].split(";")[0]
         data = base64.b64decode(url.split(",")[1])
-        suffix = mimetypes.guess_extension(mime_type) or f".{mime_type.split('/')[1]}"
+        suffix = mimetypes.guess_extension(mime_type)
+        if not suffix and "/" in mime_type:
+            suffix = f".{mime_type.split('/')[1]}"
+        elif not suffix:
+            suffix = ".bin"
     else:
         async with AsyncSession(impersonate="chrome", allow_redirects=True) as client:
             resp = await client.get(url)
@@ -348,7 +352,7 @@ def extract_tool_calls(text: str) -> tuple[str, list[ChatCompletionMessageToolCa
     return _process_tools_internal(text, extract=True)
 
 
-def text_from_message(message: ChatCompletionMessage) -> str:
+def text_from_message(message: AppMessage) -> str:
     """Concatenate text and tool arguments from a message for token estimation."""
     base_text = ""
     if isinstance(message.content, str):

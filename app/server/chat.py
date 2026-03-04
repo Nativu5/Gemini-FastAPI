@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -19,18 +19,18 @@ from gemini_webapi.types.image import GeneratedImage, Image
 from loguru import logger
 
 from app.models import (
+    AppContentItem,
+    AppMessage,
+    AppToolCall,
+    AppToolCallFunction,
     ChatCompletionChoice,
-    ChatCompletionContentItem,
     ChatCompletionFunctionTool,
     ChatCompletionMessage,
     ChatCompletionMessageToolCall,
     ChatCompletionNamedToolChoice,
     ChatCompletionRequest,
-    ChatCompletionRequestContentItem,
     ChatCompletionResponse,
     CompletionUsage,
-    ConversationInStore,
-    FunctionCall,
     FunctionCallOutput,
     FunctionTool,
     ImageGeneration,
@@ -130,7 +130,7 @@ async def _image_to_base64(
 
 
 def _calculate_usage(
-    messages: list[ChatCompletionMessage],
+    messages: list[AppMessage],
     assistant_text: str | None,
     tool_calls: list[Any] | None,
     thoughts: str | None = None,
@@ -321,36 +321,109 @@ def _process_llm_output(
     return thoughts, visible_output, storage_output, tool_calls
 
 
+def _convert_to_app_messages(messages: list[ChatCompletionMessage]) -> list[AppMessage]:
+    """Convert ChatCompletionMessage (OpenAI format) to generic internal AppMessage."""
+    app_messages = []
+    for msg in messages:
+        app_content = None
+        if isinstance(msg.content, str):
+            app_content = msg.content
+        elif isinstance(msg.content, list):
+            app_content = []
+            for item in msg.content:
+                if item.type == "text":
+                    app_content.append(AppContentItem(type="text", text=item.text))
+                elif item.type == "image_url":
+                    media_dict = getattr(item, "image_url", None)
+                    url = media_dict.get("url") if media_dict else None
+                    if url and url.startswith("data:"):
+                        # image_url can be either a regular url or base64 data url
+                        app_content.append(AppContentItem(type="image_url", url=url))
+                    else:
+                        app_content.append(AppContentItem(type="image_url", url=url))
+                elif item.type == "file":
+                    file_dict = getattr(item, "file", None)
+                    filename = file_dict.get("filename") if file_dict else None
+                    file_data = file_dict.get("file_data") if file_dict else None
+                    app_content.append(
+                        AppContentItem(type="file", filename=filename, file_data=file_data)
+                    )
+                elif item.type == "input_audio":
+                    audio_dict = getattr(item, "input_audio", None)
+                    audio_data = audio_dict.get("data") if audio_dict else None
+                    app_content.append(
+                        AppContentItem(
+                            type="input_audio",
+                            file_data=audio_data,
+                            raw_data=audio_dict,
+                        )
+                    )
+                elif item.type in ("refusal", "reasoning"):
+                    text_val = getattr(item, "text", None) or getattr(item, item.type, None)
+                    app_content.append(AppContentItem(type=item.type, text=text_val))
+
+        tool_calls = None
+        if msg.tool_calls:
+            tool_calls = [
+                AppToolCall(
+                    id=tc.id if hasattr(tc, "id") else tc.get("id", ""),
+                    type="function",
+                    function=AppToolCallFunction(
+                        name=tc.function.name
+                        if hasattr(tc, "function")
+                        else tc.get("function", {}).get("name", ""),
+                        arguments=tc.function.arguments
+                        if hasattr(tc, "function")
+                        else tc.get("function", {}).get("arguments", ""),
+                    ),
+                )
+                for tc in msg.tool_calls
+            ]
+
+        role = {"developer": "system", "function": "tool"}.get(msg.role, msg.role)
+        if role not in ("system", "user", "assistant", "tool"):
+            role = "system"
+
+        app_messages.append(
+            AppMessage(
+                role=role,  # type: ignore
+                content=app_content,
+                tool_calls=tool_calls,
+                tool_call_id=msg.tool_call_id,
+                name=msg.name,
+                reasoning_content=getattr(msg, "reasoning_content", None),
+            )
+        )
+    return app_messages
+
+
 def _persist_conversation(
     db: LMDBConversationStore,
     model_name: str,
     client_id: str,
     metadata: list[str | None],
-    messages: list[ChatCompletionMessage],
+    messages: list[AppMessage],
     storage_output: str | None,
     tool_calls: list[Any] | None,
-    thoughts: str | None = None,
 ) -> str | None:
     """Unified logic to save conversation history to LMDB."""
     try:
-        current_assistant_message = ChatCompletionMessage(
+        current_assistant_message = AppMessage(
             role="assistant",
             content=storage_output or None,
             tool_calls=tool_calls or None,
-            reasoning_content=thoughts or None,
+            reasoning_content=None,
         )
         full_history = [*messages, current_assistant_message]
-        cleaned_history = db.sanitize_messages(full_history)
 
-        conv = ConversationInStore(
-            model=model_name,
+        db.store(
             client_id=client_id,
+            model=model_name,
+            messages=full_history,
             metadata=metadata,
-            messages=cleaned_history,
         )
-        key = db.store(conv)
-        logger.debug(f"Conversation saved to LMDB with key: {key[:12]}")
-        return key
+        logger.debug("Conversation saved to LMDB.")
+        return "success"
     except Exception as e:
         logger.warning(f"Failed to save {len(messages) + 1} messages to LMDB: {e}")
         return None
@@ -486,7 +559,7 @@ def _build_image_generation_instruction(
     return "\n\n".join(instructions)
 
 
-def _append_tool_hint_to_last_user_message(messages: list[ChatCompletionMessage]) -> None:
+def _append_tool_hint_to_last_user_message(messages: list[AppMessage]) -> None:
     """Ensure the last user message carries the tool wrap hint."""
     for msg in reversed(messages):
         if msg.role != "user" or msg.content is None:
@@ -508,12 +581,12 @@ def _append_tool_hint_to_last_user_message(messages: list[ChatCompletionMessage]
                 return
 
             messages_text = TOOL_WRAP_HINT.strip()
-            msg.content.append(ChatCompletionRequestContentItem(type="text", text=messages_text))
+            msg.content.append(AppContentItem(type="text", text=messages_text))
             return
 
 
 def _prepare_messages_for_model(
-    source_messages: list[ChatCompletionMessage],
+    source_messages: list[AppMessage],
     tools: list[ChatCompletionFunctionTool] | None,
     tool_choice: Literal["none", "auto", "required"]
     | ChatCompletionNamedToolChoice
@@ -522,7 +595,7 @@ def _prepare_messages_for_model(
     | None,
     extra_instructions: list[str] | None = None,
     inject_system_defaults: bool = True,
-) -> list[ChatCompletionMessage]:
+) -> list[AppMessage]:
     """Return a copy of messages enriched with tool instructions when needed."""
     prepared = [msg.model_copy(deep=True) for msg in source_messages]
 
@@ -564,7 +637,7 @@ def _prepare_messages_for_model(
             separator = "\n\n" if existing else ""
             prepared[0].content = f"{existing}{separator}{combined_instructions}"
     else:
-        prepared.insert(0, ChatCompletionMessage(role="system", content=combined_instructions))
+        prepared.insert(0, AppMessage(role="system", content=combined_instructions))
 
     if tools and tool_choice != "none" and not tool_prompt_injected:
         _append_tool_hint_to_last_user_message(prepared)
@@ -572,33 +645,36 @@ def _prepare_messages_for_model(
     return prepared
 
 
-def _response_items_to_messages(
+def _convert_responses_to_app_messages(
     items: Any,
-) -> list[ChatCompletionMessage]:
-    """Convert Responses API input items into internal Message objects."""
-    messages: list[ChatCompletionMessage] = []
+) -> list[AppMessage]:
+    """Convert Responses API input items into internal AppMessage objects."""
+    messages: list[AppMessage] = []
 
     if isinstance(items, str):
-        messages.append(ChatCompletionMessage(role="user", content=items))
+        messages.append(AppMessage(role="user", content=items))
         logger.debug("Normalized Responses input: single string message.")
         return messages
 
     for item in items:
         if isinstance(item, (ResponseInputMessage, ResponseOutputMessage)):
-            role = item.role
+            raw_role = getattr(item, "role", "user")
+            normalized_role = {"developer": "system", "function": "tool"}.get(raw_role, raw_role)
+            if normalized_role not in ("system", "user", "assistant", "tool"):
+                normalized_role = "system"
+            role = cast(Literal["system", "user", "assistant", "tool"], normalized_role)
+
             content = item.content
             if isinstance(content, str):
-                messages.append(ChatCompletionMessage(role=role, content=content))
+                messages.append(AppMessage(role=role, content=content))
             else:
-                converted: list[ChatCompletionContentItem] = []
+                converted: list[AppContentItem] = []
                 reasoning_parts: list[str] = []
                 for part in content:
                     if part.type in ("input_text", "output_text"):
                         text_value = getattr(part, "text", "") or ""
                         if text_value:
-                            converted.append(
-                                ChatCompletionRequestContentItem(type="text", text=text_value)
-                            )
+                            converted.append(AppContentItem(type="text", text=text_value))
                     elif part.type == "reasoning_text":
                         text_value = getattr(part, "text", "") or ""
                         if text_value:
@@ -606,31 +682,22 @@ def _response_items_to_messages(
                     elif part.type == "input_image":
                         image_url = getattr(part, "image_url", None)
                         if image_url:
-                            converted.append(
-                                ChatCompletionRequestContentItem(
-                                    type="image_url",
-                                    image_url={
-                                        "url": image_url,
-                                        "detail": getattr(part, "detail", "auto") or "auto",
-                                    },
-                                )
-                            )
+                            converted.append(AppContentItem(type="image_url", url=image_url))
                     elif part.type == "input_file":
                         file_url = getattr(part, "file_url", None)
                         file_data = getattr(part, "file_data", None)
                         if file_url or file_data:
-                            file_info = {}
-                            if file_data:
-                                file_info["file_data"] = file_data
-                                file_info["filename"] = getattr(part, "filename", None)
-                            if file_url:
-                                file_info["url"] = file_url
                             converted.append(
-                                ChatCompletionRequestContentItem(type="file", file=file_info)
+                                AppContentItem(
+                                    type="file",
+                                    url=file_url,
+                                    file_data=file_data,
+                                    filename=getattr(part, "filename", None),
+                                )
                             )
                 reasoning_val = "\n\n".join(reasoning_parts) if reasoning_parts else None
                 messages.append(
-                    ChatCompletionMessage(
+                    AppMessage(
                         role=role,
                         content=converted or None,
                         reasoning_content=reasoning_val,
@@ -639,13 +706,13 @@ def _response_items_to_messages(
 
         elif isinstance(item, ResponseFunctionToolCall):
             messages.append(
-                ChatCompletionMessage(
+                AppMessage(
                     role="assistant",
                     tool_calls=[
-                        ChatCompletionMessageToolCall(
+                        AppToolCall(
                             id=item.call_id,
                             type="function",
-                            function=FunctionCall(name=item.name, arguments=item.arguments),
+                            function=AppToolCallFunction(name=item.name, arguments=item.arguments),
                         )
                     ],
                 )
@@ -653,7 +720,7 @@ def _response_items_to_messages(
         elif isinstance(item, FunctionCallOutput):
             output_content = str(item.output) if isinstance(item.output, list) else item.output
             messages.append(
-                ChatCompletionMessage(
+                AppMessage(
                     role="tool",
                     tool_call_id=item.call_id,
                     content=output_content,
@@ -664,14 +731,14 @@ def _response_items_to_messages(
             if item.content:
                 reasoning_val = "\n\n".join(x.text for x in item.content if x.text)
             messages.append(
-                ChatCompletionMessage(
+                AppMessage(
                     role="assistant",
                     reasoning_content=reasoning_val,
                 )
             )
         elif isinstance(item, ImageGenerationCall):
             messages.append(
-                ChatCompletionMessage(
+                AppMessage(
                     role="assistant",
                     content=item.result or None,
                 )
@@ -679,82 +746,109 @@ def _response_items_to_messages(
 
         else:
             if hasattr(item, "role"):
+                raw_role = getattr(item, "role", "user")
+                normalized_role = {"developer": "system", "function": "tool"}.get(
+                    raw_role, raw_role
+                )
+                if normalized_role not in ("system", "user", "assistant", "tool"):
+                    normalized_role = "system"
+                role = cast(Literal["system", "user", "assistant", "tool"], normalized_role)
                 messages.append(
-                    ChatCompletionMessage(
-                        role=item.role,
+                    AppMessage(
+                        role=role,
                         content=str(getattr(item, "content", "")),
                     )
                 )
 
-    logger.debug(f"Normalized Responses input: {len(messages)} message items.")
-    return messages
+    compacted_messages: list[AppMessage] = []
+    for msg in messages:
+        if not compacted_messages:
+            compacted_messages.append(msg)
+            continue
+
+        last_msg = compacted_messages[-1]
+        if last_msg.role == "assistant" and msg.role == "assistant":
+            reasoning_parts = []
+            if last_msg.reasoning_content:
+                reasoning_parts.append(last_msg.reasoning_content)
+            if msg.reasoning_content:
+                reasoning_parts.append(msg.reasoning_content)
+
+            merged_content = []
+            if isinstance(last_msg.content, str):
+                merged_content.append(AppContentItem(type="text", text=last_msg.content))
+            elif isinstance(last_msg.content, list):
+                merged_content.extend(last_msg.content)
+
+            if isinstance(msg.content, str):
+                merged_content.append(AppContentItem(type="text", text=msg.content))
+            elif isinstance(msg.content, list):
+                merged_content.extend(msg.content)
+
+            merged_tools = []
+            if last_msg.tool_calls:
+                merged_tools.extend(last_msg.tool_calls)
+            if msg.tool_calls:
+                merged_tools.extend(msg.tool_calls)
+
+            last_msg.reasoning_content = "\n\n".join(reasoning_parts) if reasoning_parts else None
+            last_msg.content = merged_content if merged_content else None
+            last_msg.tool_calls = merged_tools if merged_tools else None
+        else:
+            compacted_messages.append(msg)
+
+    logger.debug(f"Normalized Responses input: {len(compacted_messages)} message items.")
+    return compacted_messages
 
 
-def _instructions_to_messages(
+def _convert_instructions_to_app_messages(
     instructions: str | list[ResponseInputMessage] | None,
-) -> list[ChatCompletionMessage]:
-    """Normalize instructions payload into Message objects."""
+) -> list[AppMessage]:
+    """Normalize instructions payload into AppMessage objects."""
     if not instructions:
         return []
 
     if isinstance(instructions, str):
-        return [ChatCompletionMessage(role="system", content=instructions)]
+        return [AppMessage(role="system", content=instructions)]
 
-    instruction_messages: list[ChatCompletionMessage] = []
-    for item in instructions:
-        if item.type and item.type != "message":
+    instruction_messages: list[AppMessage] = []
+    for instruction in instructions:
+        if instruction.type and instruction.type != "message":
             continue
 
-        role = item.role
-        content = item.content
+        raw_role = instruction.role
+        normalized_role = {"developer": "system", "function": "tool"}.get(raw_role, raw_role)
+        if normalized_role not in ("system", "user", "assistant", "tool"):
+            normalized_role = "system"
+        role = cast(Literal["system", "user", "assistant", "tool"], normalized_role)
+
+        content = instruction.content
         if isinstance(content, str):
-            instruction_messages.append(ChatCompletionMessage(role=role, content=content))
+            instruction_messages.append(AppMessage(role=role, content=content))
         else:
-            converted: list[ChatCompletionContentItem] = []
-            reasoning_parts: list[str] = []
+            converted: list[AppContentItem] = []
             for part in content:
                 if part.type in ("input_text", "output_text"):
                     text_value = getattr(part, "text", "") or ""
                     if text_value:
-                        converted.append(
-                            ChatCompletionRequestContentItem(type="text", text=text_value)
-                        )
-                elif part.type == "reasoning_text":
-                    text_value = getattr(part, "text", "") or ""
-                    if text_value:
-                        reasoning_parts.append(text_value)
+                        converted.append(AppContentItem(type="text", text=text_value))
                 elif part.type == "input_image":
                     image_url = getattr(part, "image_url", None)
                     if image_url:
+                        converted.append(AppContentItem(type="image_url", url=image_url))
+                elif part.type == "input_file":
+                    file_url = getattr(part, "file_url", None)
+                    file_data = getattr(part, "file_data", None)
+                    if file_url or file_data:
                         converted.append(
-                            ChatCompletionRequestContentItem(
-                                type="image_url",
-                                image_url={
-                                    "url": image_url,
-                                    "detail": getattr(part, "detail", "auto") or "auto",
-                                },
+                            AppContentItem(
+                                type="file",
+                                url=file_url,
+                                file_data=file_data,
+                                filename=getattr(part, "filename", None),
                             )
                         )
-                elif part.type == "input_file":
-                    file_data = getattr(part, "file_data", None)
-                    file_url = getattr(part, "file_url", None)
-                    if file_data or file_url:
-                        file_info = {}
-                        if file_data:
-                            file_info["file_data"] = file_data
-                            file_info["filename"] = getattr(part, "filename", None)
-                        if file_url:
-                            file_info["url"] = file_url
-                        converted.append(
-                            ChatCompletionRequestContentItem(type="file", file=file_info)
-                        )
-            instruction_messages.append(
-                ChatCompletionMessage(
-                    role=role,
-                    content=converted or None,
-                    reasoning_content="\n".join(reasoning_parts) if reasoning_parts else None,
-                )
-            )
+            instruction_messages.append(AppMessage(role=role, content=converted or None))
 
     return instruction_messages
 
@@ -813,8 +907,8 @@ async def _find_reusable_session(
     db: LMDBConversationStore,
     pool: GeminiClientPool,
     model: Model,
-    messages: list[ChatCompletionMessage],
-) -> tuple[ChatSession | None, GeminiClientWrapper | None, list[ChatCompletionMessage]]:
+    messages: list[AppMessage],
+) -> tuple[ChatSession | None, GeminiClientWrapper | None, list[AppMessage]]:
     """Find an existing chat session matching the longest suitable history prefix."""
     if len(messages) < 2:
         return None, None, messages
@@ -982,12 +1076,12 @@ class StreamingOutputFilter:
 # --- Response Builders & Streaming ---
 
 
-def _create_real_streaming_response(
-    generator: AsyncGenerator[ModelOutput],
+async def _create_real_streaming_response(
+    resp_or_stream: AsyncGenerator[ModelOutput] | ModelOutput,
     completion_id: str,
     created_time: int,
     model_name: str,
-    messages: list[ChatCompletionMessage],
+    messages: list[AppMessage],
     db: LMDBConversationStore,
     model: Model,
     client_wrapper: GeminiClientWrapper,
@@ -1005,56 +1099,44 @@ def _create_real_streaming_response(
         has_started = False
         all_outputs: list[ModelOutput] = []
         suppressor = StreamingOutputFilter()
+
+        async def _make_async_gen(item: ModelOutput) -> AsyncGenerator[ModelOutput]:
+            yield item
+
+        def make_chunk(delta_content: dict) -> str:
+            data = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_time,
+                "model": model_name,
+                "choices": [{"index": 0, **delta_content}],
+            }
+            return f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+
         try:
+            if hasattr(resp_or_stream, "__aiter__"):
+                generator = cast(AsyncGenerator[ModelOutput], resp_or_stream)
+            else:
+                generator = _make_async_gen(cast(ModelOutput, resp_or_stream))
+
             async for chunk in generator:
                 all_outputs.append(chunk)
                 if not has_started:
-                    data = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_time,
-                        "model": model_name,
-                        "choices": [
-                            {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
-                        ],
-                    }
-                    yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+                    yield make_chunk({"delta": {"role": "assistant"}, "finish_reason": None})
                     has_started = True
 
                 if t_delta := chunk.thoughts_delta:
                     full_thoughts += t_delta
-                    data = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_time,
-                        "model": model_name,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"reasoning_content": t_delta},
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-                    yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+                    yield make_chunk(
+                        {"delta": {"reasoning_content": t_delta}, "finish_reason": None}
+                    )
 
                 if text_delta := chunk.text_delta:
                     full_text += text_delta
                     if visible_delta := suppressor.process(text_delta):
-                        data = {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created_time,
-                            "model": model_name,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"content": visible_delta},
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                        yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+                        yield make_chunk(
+                            {"delta": {"content": visible_delta}, "finish_reason": None}
+                        )
         except Exception as e:
             logger.exception(f"Error during OpenAI streaming: {e}")
             yield f"data: {orjson.dumps({'error': {'message': 'Streaming error occurred.', 'type': 'server_error', 'param': None, 'code': None}}).decode('utf-8')}\n\n"
@@ -1068,18 +1150,9 @@ def _create_real_streaming_response(
                 full_thoughts = final_chunk.thoughts
 
         if remaining_text := suppressor.flush():
-            data = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created_time,
-                "model": model_name,
-                "choices": [
-                    {"index": 0, "delta": {"content": remaining_text}, "finish_reason": None}
-                ],
-            }
-            yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+            yield make_chunk({"delta": {"content": remaining_text}, "finish_reason": None})
 
-        _thoughts, assistant_text, storage_output, tool_calls = _process_llm_output(
+        _thoughts, assistant_text, storage_output, detected_tool_calls = _process_llm_output(
             full_thoughts, full_text, structured_requirement
         )
 
@@ -1092,7 +1165,7 @@ def _create_real_streaming_response(
                         images.append(img)
                         seen_urls.add(img.url)
 
-        image_markdown = ""
+        image_results = []
         seen_hashes = set()
         for image in images:
             try:
@@ -1103,43 +1176,35 @@ def _create_real_streaming_response(
                     continue
                 seen_hashes.add(fhash)
 
-                img_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
-                image_markdown += f"\n\n{img_url}"
+                img_url = f"{base_url}images/{fname}?token={get_image_token(fname)}"
+                image_results.append(img_url)
             except Exception as exc:
                 logger.warning(f"Failed to process image in OpenAI stream: {exc}")
 
-        if image_markdown:
-            assistant_text += image_markdown
-            storage_output += image_markdown
-            data = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created_time,
-                "model": model_name,
-                "choices": [
-                    {"index": 0, "delta": {"content": image_markdown}, "finish_reason": None}
-                ],
-            }
-            yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+        if detected_tool_calls:
+            for call in detected_tool_calls:
+                tc_dict = {
+                    "index": call.id,
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.function.name, "arguments": call.function.arguments},
+                }
 
-        tool_calls_payload = [call.model_dump(mode="json") for call in tool_calls]
-        if tool_calls_payload:
-            tool_calls_delta = [
-                {**call, "index": idx} for idx, call in enumerate(tool_calls_payload)
-            ]
-            data = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created_time,
-                "model": model_name,
-                "choices": [
-                    {"index": 0, "delta": {"tool_calls": tool_calls_delta}, "finish_reason": None}
-                ],
-            }
-            yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+                yield make_chunk(
+                    {
+                        "delta": {
+                            "tool_calls": [tc_dict],
+                        }
+                    }
+                )
+
+        for image_url in image_results:
+            yield make_chunk({"delta": {"content": f"\n\n![Generated Image]({image_url})"}})
+
+        yield make_chunk({"delta": {}, "finish_reason": "stop"})
 
         p_tok, c_tok, t_tok, r_tok = _calculate_usage(
-            messages, assistant_text, tool_calls, full_thoughts
+            messages, assistant_text, detected_tool_calls, full_thoughts
         )
         usage = CompletionUsage(
             prompt_tokens=p_tok,
@@ -1147,16 +1212,6 @@ def _create_real_streaming_response(
             total_tokens=t_tok,
             completion_tokens_details={"reasoning_tokens": r_tok},
         )
-        data = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created_time,
-            "model": model_name,
-            "choices": [
-                {"index": 0, "delta": {}, "finish_reason": "tool_calls" if tool_calls else "stop"}
-            ],
-            "usage": usage.model_dump(mode="json"),
-        }
         _persist_conversation(
             db,
             model.model_name,
@@ -1164,21 +1219,26 @@ def _create_real_streaming_response(
             session.metadata,
             messages,
             storage_output,
-            tool_calls,
-            full_thoughts,
+            detected_tool_calls,
         )
-        yield f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
+        yield make_chunk(
+            {
+                "delta": {},
+                "finish_reason": "tool_calls" if detected_tool_calls else "stop",
+                "usage": usage.model_dump(mode="json"),
+            }
+        )
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
 
-def _create_responses_real_streaming_response(
-    generator: AsyncGenerator[ModelOutput],
+async def _create_responses_real_streaming_response(
+    resp_or_stream: AsyncGenerator[ModelOutput] | ModelOutput,
     response_id: str,
     created_time: int,
     model_name: str,
-    messages: list[ChatCompletionMessage],
+    messages: list[AppMessage],
     db: LMDBConversationStore,
     model: Model,
     client_wrapper: GeminiClientWrapper,
@@ -1257,6 +1317,15 @@ def _create_responses_real_streaming_response(
         suppressor = StreamingOutputFilter()
 
         try:
+            if hasattr(resp_or_stream, "__aiter__"):
+                generator = cast(AsyncGenerator[ModelOutput], resp_or_stream)
+            else:
+
+                async def _make_async_gen(item: ModelOutput) -> AsyncGenerator[ModelOutput]:
+                    yield item
+
+                generator = _make_async_gen(cast(ModelOutput, resp_or_stream))
+
             async for chunk in generator:
                 all_outputs.append(chunk)
 
@@ -1624,7 +1693,6 @@ def _create_responses_real_streaming_response(
             messages,
             storage_output,
             detected_tool_calls,
-            full_thoughts,
         )
 
         yield make_event(
@@ -1670,9 +1738,10 @@ async def create_chat_completion(
     structured_requirement = _build_structured_requirement(request.response_format)
     extra_instr = [structured_requirement.instruction] if structured_requirement else None
 
-    # This ensures that server-injected system instructions are part of the history
+    app_messages = _convert_to_app_messages(request.messages)
+
     msgs = _prepare_messages_for_model(
-        request.messages,
+        app_messages,
         request.tools,
         request.tool_choice,
         extra_instr,
@@ -1784,7 +1853,7 @@ async def create_chat_completion(
         logger.debug(f"Detected tool calls: {reprlib.repr(tool_calls_payload)}")
 
     p_tok, c_tok, t_tok, r_tok = _calculate_usage(
-        request.messages, visible_output, tool_calls, thoughts
+        app_messages, visible_output, tool_calls, thoughts
     )
     usage = {
         "prompt_tokens": p_tok,
@@ -1810,7 +1879,6 @@ async def create_chat_completion(
         msgs,  # Use prepared messages 'msgs'
         storage_output,
         tool_calls,
-        thoughts,
     )
     return payload
 
@@ -1824,7 +1892,7 @@ async def create_response(
     image_store: Path = Depends(get_image_store_dir),
 ):
     base_url = str(raw_request.base_url)
-    base_messages = _response_items_to_messages(request.input)
+    base_messages = _convert_responses_to_app_messages(request.input)
     struct_req = _build_structured_requirement(request.response_format)
     extra_instr = [struct_req.instruction] if struct_req else []
 
@@ -1847,7 +1915,7 @@ async def create_response(
     )
     if img_instr:
         extra_instr.append(img_instr)
-    preface = _instructions_to_messages(request.instructions)
+    preface = _convert_instructions_to_app_messages(request.instructions)
     conv_messages = [*preface, *base_messages] if preface else base_messages
     model_tool_choice = (
         request.tool_choice
@@ -2026,6 +2094,5 @@ async def create_response(
         messages,
         storage_output,
         tool_calls,
-        thoughts,
     )
     return payload

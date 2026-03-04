@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -452,21 +451,6 @@ class HealthCheckResponse(BaseModel):
     storage: dict[str, Any] | None = Field(default=None)
     clients: dict[str, bool] | None = Field(default=None)
     error: str | None = Field(default=None)
-
-
-class ConversationInStore(BaseModel):
-    """Persisted conversation record stored in LMDB."""
-
-    created_at: datetime | None = Field(default=None)
-    updated_at: datetime | None = Field(default=None)
-    model: str = Field(..., description="Model used for the conversation")
-    client_id: str = Field(..., description="Identifier of the Gemini client")
-    metadata: list[str | None] = Field(
-        ..., description="Metadata for Gemini API to locate the conversation"
-    )
-    messages: list[ChatCompletionMessage] = Field(
-        ..., description="Message contents in the conversation"
-    )
 
 
 ChatCompletionMessage.model_rebuild()

@@ -6,7 +6,7 @@ import orjson
 from gemini_webapi import GeminiClient, ModelOutput
 from loguru import logger
 
-from app.models import ChatCompletionMessage
+from app.models import AppMessage
 from app.utils import g_config
 from app.utils.helper import (
     add_tag,
@@ -69,7 +69,7 @@ class GeminiClientWrapper(GeminiClient):
 
     @staticmethod
     async def process_message(
-        message: ChatCompletionMessage,
+        message: AppMessage,
         tempdir: Path | None = None,
         tagged: bool = True,
         wrap_tool: bool = True,
@@ -91,28 +91,27 @@ class GeminiClientWrapper(GeminiClient):
                     if item_text or message.role == "tool":
                         text_fragments.append(item_text)
                 elif item.type == "image_url":
-                    item_image_url = getattr(item, "image_url", None)
-                    if not item_image_url:
-                        raise ValueError("Image URL cannot be empty")
-                    if url := item_image_url.get("url", None):
-                        files.append(await save_url_to_tempfile(url, tempdir))
-                    else:
-                        raise ValueError("Image URL must contain 'url' key")
+                    item_media_url = getattr(item, "url", None)
+                    if not item_media_url:
+                        raise ValueError(f"{item.type} cannot be empty")
+                    files.append(await save_url_to_tempfile(item_media_url, tempdir))
                 elif item.type == "file":
-                    item_file = getattr(item, "file", None)
-                    if not item_file:
-                        raise ValueError("File cannot be empty")
-                    if file_data := item_file.get("file_data", None):
-                        filename = item_file.get("filename", "")
+                    file_data = getattr(item, "file_data", None)
+                    if file_data:
+                        filename = getattr(item, "filename", "") or ""
                         files.append(await save_file_to_tempfile(file_data, filename, tempdir))
-                    elif url := item_file.get("url", None):
-                        files.append(await save_url_to_tempfile(url, tempdir))
                     else:
-                        raise ValueError("File must contain 'file_data' or 'url' key")
+                        raise ValueError("File must contain 'file_data'")
+                elif item.type == "input_audio":
+                    file_data = getattr(item, "file_data", None)
+                    if file_data:
+                        files.append(await save_file_to_tempfile(file_data, "audio.wav", tempdir))
+                    else:
+                        raise ValueError("input_audio must contain 'file_data' key")
         elif message.content is None and message.role == "tool":
             text_fragments.append("")
         elif message.content is not None:
-            raise ValueError("Unsupported message content type.")
+            raise ValueError(f"Unsupported message content type: {type(message.content)}")
 
         if message.role == "tool":
             tool_name = message.name or "unknown"
@@ -161,7 +160,7 @@ class GeminiClientWrapper(GeminiClient):
 
     @staticmethod
     async def process_conversation(
-        messages: list[ChatCompletionMessage], tempdir: Path | None = None
+        messages: list[AppMessage], tempdir: Path | None = None
     ) -> tuple[str, list[str | Path | bytes | io.BytesIO]]:
         conversation: list[str] = []
         files: list[str | Path | bytes | io.BytesIO] = []
