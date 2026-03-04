@@ -14,7 +14,7 @@ import orjson
 from curl_cffi.requests import AsyncSession
 from loguru import logger
 
-from app.models import AppMessage, ChatCompletionMessageToolCall, FunctionCall
+from app.models import AppMessage, AppToolCall, AppToolCallFunction
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
@@ -282,9 +282,7 @@ def strip_system_hints(text: str) -> str:
     return cleaned
 
 
-def _process_tools_internal(
-    text: str, extract: bool = True
-) -> tuple[str, list[ChatCompletionMessageToolCall]]:
+def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[AppToolCall]]:
     """
     Extract tool metadata and return text stripped of technical markers.
     Arguments are parsed into JSON and assigned deterministic call IDs.
@@ -292,7 +290,7 @@ def _process_tools_internal(
     if not text:
         return text, []
 
-    tool_calls: list[ChatCompletionMessageToolCall] = []
+    tool_calls: list[AppToolCall] = []
 
     def _create_tool_call(name: str, raw_args: str) -> None:
         if not extract:
@@ -327,10 +325,10 @@ def _process_tools_internal(
         call_id = f"call_{hashlib.sha256(seed).hexdigest()[:24]}"
 
         tool_calls.append(
-            ChatCompletionMessageToolCall(
+            AppToolCall(
                 id=call_id,
                 type="function",
-                function=FunctionCall(name=name, arguments=arguments),
+                function=AppToolCallFunction(name=name, arguments=arguments),
             )
         )
 
@@ -347,7 +345,7 @@ def remove_tool_call_blocks(text: str) -> str:
     return cleaned
 
 
-def extract_tool_calls(text: str) -> tuple[str, list[ChatCompletionMessageToolCall]]:
+def extract_tool_calls(text: str) -> tuple[str, list[AppToolCall]]:
     """Extract tool calls and return cleaned text."""
     return _process_tools_internal(text, extract=True)
 

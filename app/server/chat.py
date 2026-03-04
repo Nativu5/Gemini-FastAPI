@@ -31,6 +31,7 @@ from app.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     CompletionUsage,
+    FunctionCall,
     FunctionCallOutput,
     FunctionTool,
     ImageGeneration,
@@ -132,7 +133,7 @@ async def _image_to_base64(
 def _calculate_usage(
     messages: list[AppMessage],
     assistant_text: str | None,
-    tool_calls: list[Any] | None,
+    tool_calls: list[AppToolCall] | None,
     thoughts: str | None = None,
 ) -> tuple[int, int, int, int]:
     """Calculate prompt, completion, total and reasoning tokens consistently."""
@@ -140,10 +141,7 @@ def _calculate_usage(
     tool_args_text = ""
     if tool_calls:
         for call in tool_calls:
-            if hasattr(call, "function"):
-                tool_args_text += call.function.arguments or ""
-            elif isinstance(call, dict):
-                tool_args_text += call.get("function", {}).get("arguments", "")
+            tool_args_text += call.function.arguments or ""
 
     completion_basis = assistant_text or ""
     if tool_args_text:
@@ -167,7 +165,7 @@ def _create_responses_standard_payload(
     response_id: str,
     created_time: int,
     model_name: str,
-    detected_tool_calls: list[Any] | None,
+    detected_tool_calls: list[AppToolCall] | None,
     image_call_items: list[ImageGenerationCall],
     response_contents: list[ResponseOutputContent],
     usage: ResponseUsage,
@@ -204,18 +202,10 @@ def _create_responses_standard_payload(
         output_items.extend(
             [
                 ResponseFunctionToolCall(
-                    id=call.id if hasattr(call, "id") else call["id"],
-                    call_id=call.id if hasattr(call, "id") else call["id"],
-                    name=(
-                        call.function.name
-                        if hasattr(call, "function")
-                        else call["function"]["name"]
-                    ),
-                    arguments=(
-                        call.function.arguments
-                        if hasattr(call, "function")
-                        else call["function"]["arguments"]
-                    ),
+                    id=call.id,
+                    call_id=call.id,
+                    name=call.function.name,
+                    arguments=call.function.arguments,
                     status="completed",
                 )
                 for call in detected_tool_calls
@@ -249,21 +239,27 @@ def _create_chat_completion_standard_payload(
     created_time: int,
     model_name: str,
     visible_output: str | None,
-    tool_calls_payload: list[dict] | None,
+    tool_calls: list[AppToolCall] | None,
     finish_reason: Literal["stop", "length", "tool_calls", "content_filter"],
     usage: dict,
     reasoning_content: str | None = None,
 ) -> ChatCompletionResponse:
     """Unified factory for building Chat Completion response objects."""
-    # Convert tool calls to Model objects if they are dicts
-    tool_calls = None
-    if tool_calls_payload:
-        tool_calls = [ChatCompletionMessageToolCall.model_validate(tc) for tc in tool_calls_payload]
+    tc_converted = None
+    if tool_calls:
+        tc_converted = [
+            ChatCompletionMessageToolCall(
+                id=tc.id,
+                type="function",
+                function=FunctionCall(name=tc.function.name, arguments=tc.function.arguments),
+            )
+            for tc in tool_calls
+        ]
 
     message = ChatCompletionMessage(
         role="assistant",
         content=visible_output or None,
-        tool_calls=tool_calls,
+        tool_calls=tc_converted,
         reasoning_content=reasoning_content or None,
     )
 
@@ -287,7 +283,7 @@ def _process_llm_output(
     thoughts: str | None,
     raw_text: str,
     structured_requirement: StructuredOutputRequirement | None,
-) -> tuple[str | None, str, str, list[Any]]:
+) -> tuple[str | None, str, str, list[AppToolCall]]:
     """
     Post-process Gemini output to extract tool calls and prepare clean text for display and storage.
     Returns: (thoughts, visible_text, storage_output, tool_calls)
@@ -366,15 +362,11 @@ def _convert_to_app_messages(messages: list[ChatCompletionMessage]) -> list[AppM
         if msg.tool_calls:
             tool_calls = [
                 AppToolCall(
-                    id=tc.id if hasattr(tc, "id") else tc.get("id", ""),
+                    id=tc.id,
                     type="function",
                     function=AppToolCallFunction(
-                        name=tc.function.name
-                        if hasattr(tc, "function")
-                        else tc.get("function", {}).get("name", ""),
-                        arguments=tc.function.arguments
-                        if hasattr(tc, "function")
-                        else tc.get("function", {}).get("arguments", ""),
+                        name=tc.function.name,
+                        arguments=tc.function.arguments,
                     ),
                 )
                 for tc in msg.tool_calls
@@ -404,7 +396,7 @@ def _persist_conversation(
     metadata: list[str | None],
     messages: list[AppMessage],
     storage_output: str | None,
-    tool_calls: list[Any] | None,
+    tool_calls: list[AppToolCall] | None,
 ) -> str | None:
     """Unified logic to save conversation history to LMDB."""
     try:
@@ -1843,9 +1835,10 @@ async def create_chat_completion(
         visible_output += image_markdown
         storage_output += image_markdown
 
-    tool_calls_payload = [call.model_dump(mode="json") for call in tool_calls]
-    if tool_calls_payload:
-        logger.debug(f"Detected tool calls: {reprlib.repr(tool_calls_payload)}")
+    if tool_calls:
+        logger.debug(
+            f"Detected tool calls: {reprlib.repr([tc.model_dump(mode='json') for tc in tool_calls])}"
+        )
 
     p_tok, c_tok, t_tok, r_tok = _calculate_usage(
         app_messages, visible_output, tool_calls, thoughts
@@ -1861,7 +1854,7 @@ async def create_chat_completion(
         created_time,
         request.model,
         visible_output,
-        tool_calls_payload,
+        tool_calls or None,
         "tool_calls" if tool_calls else "stop",
         usage,
         thoughts,
