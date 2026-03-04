@@ -1114,7 +1114,9 @@ def _create_real_streaming_response(
             async for chunk in generator:
                 all_outputs.append(chunk)
                 if not has_started:
-                    yield make_chunk({"delta": {"role": "assistant"}, "finish_reason": None})
+                    yield make_chunk(
+                        {"delta": {"role": "assistant", "content": ""}, "finish_reason": None}
+                    )
                     has_started = True
 
                 if t_delta := chunk.thoughts_delta:
@@ -1174,9 +1176,9 @@ def _create_real_streaming_response(
                 logger.warning(f"Failed to process image in OpenAI stream: {exc}")
 
         if detected_tool_calls:
-            for call in detected_tool_calls:
+            for idx, call in enumerate(detected_tool_calls):
                 tc_dict = {
-                    "index": call.id,
+                    "index": idx,
                     "id": call.id,
                     "type": "function",
                     "function": {"name": call.function.name, "arguments": call.function.arguments},
@@ -1186,14 +1188,18 @@ def _create_real_streaming_response(
                     {
                         "delta": {
                             "tool_calls": [tc_dict],
-                        }
+                        },
+                        "finish_reason": None,
                     }
                 )
 
         for image_url in image_results:
-            yield make_chunk({"delta": {"content": f"\n\n![Generated Image]({image_url})"}})
-
-        yield make_chunk({"delta": {}, "finish_reason": "stop"})
+            yield make_chunk(
+                {
+                    "delta": {"content": f"\n\n![Generated Image]({image_url})"},
+                    "finish_reason": None,
+                }
+            )
 
         p_tok, c_tok, t_tok, r_tok = _calculate_usage(
             messages, assistant_text, detected_tool_calls, full_thoughts
@@ -1280,7 +1286,6 @@ def _create_responses_real_streaming_response(
                 },
             },
         )
-
         yield make_event(
             "response.in_progress",
             {
