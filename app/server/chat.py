@@ -859,8 +859,8 @@ def _get_model_by_name(name: str) -> Model:
     return Model.from_name(name)
 
 
-def _get_available_models() -> list[ModelData]:
-    """Return a list of available models based on configuration strategy."""
+async def _get_available_models(pool: GeminiClientPool) -> list[ModelData]:
+    """Return a list of available models based on the configuration strategy and per-client accounts."""
     now = int(datetime.now(tz=UTC).timestamp())
     strategy = g_config.gemini.model_strategy
     models_data = []
@@ -876,12 +876,31 @@ def _get_available_models() -> list[ModelData]:
         )
 
     if strategy == "append":
-        custom_ids = {m.model_name for m in custom_models}
+        custom_ids = {m.id for m in models_data}
+        seen_model_ids = set()
+
+        for client in pool.clients:
+            if not client.running():
+                continue
+
+            client_models = client.list_models()
+            if client_models:
+                for am in client_models:
+                    if am.id not in custom_ids and am.id not in seen_model_ids:
+                        models_data.append(
+                            ModelData(
+                                id=am.id,
+                                created=now,
+                                owned_by="gemini-web",
+                            )
+                        )
+                        seen_model_ids.add(am.id)
+
         for model in Model:
             m_name = model.model_name
             if not m_name or m_name == "unspecified":
                 continue
-            if m_name in custom_ids:
+            if m_name in custom_ids or m_name in seen_model_ids:
                 continue
 
             models_data.append(
@@ -1711,7 +1730,8 @@ def _create_responses_real_streaming_response(
 
 @router.get("/v1/models", response_model=ModelListResponse)
 async def list_models(api_key: str = Depends(verify_api_key)):
-    models = _get_available_models()
+    pool = GeminiClientPool()
+    models = await _get_available_models(pool)
     return ModelListResponse(data=models)
 
 
