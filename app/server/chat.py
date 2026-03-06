@@ -1206,15 +1206,16 @@ def _create_real_streaming_response(
                     seen_media_urls.add(m_url)
 
         image_results = []
-        seen_hashes = set()
+        seen_hashes = {}
         for image in images:
             try:
                 media_store = get_media_store_dir()
                 _, _, _, fname, fhash = await _image_to_base64(image, media_store)
                 if fhash in seen_hashes:
                     (media_store / fname).unlink(missing_ok=True)
-                    continue
-                seen_hashes.add(fhash)
+                    fname = seen_hashes[fhash]
+                else:
+                    seen_hashes[fhash] = fname
                 img_url = f"{base_url}media/{fname}?token={get_media_token(fname)}"
                 title = getattr(image, "title", "Image")
                 image_results.append(f"![{title}]({img_url})")
@@ -1222,7 +1223,7 @@ def _create_real_streaming_response(
                 logger.warning(f"Failed to process image in OpenAI stream: {exc}")
 
         media_results = []
-        seen_media_hashes = set()
+        seen_media_hashes = {}
         for media_item in media_items:
             try:
                 media_store = get_media_store_dir()
@@ -1232,15 +1233,21 @@ def _create_real_streaming_response(
                 for mtype, (random_name, fhash) in m_dict.items():
                     if fhash in seen_media_hashes:
                         (media_store / random_name).unlink(missing_ok=True)
+                        existing_name = seen_media_hashes[fhash]
+                        m_urls[mtype] = (
+                            f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
+                        )
                         continue
-                    seen_media_hashes.add(fhash)
+                    seen_media_hashes[fhash] = random_name
                     m_urls[mtype] = (
                         f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                     )
 
                 title = getattr(media_item, "title", "Media")
-                video_url, video_thumb = m_urls.get("video"), m_urls.get("video_thumbnail")
-                audio_url, audio_thumb = m_urls.get("audio"), m_urls.get("audio_thumbnail")
+                video_url = m_urls.get("video")
+                audio_url = m_urls.get("audio")
+                video_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+                audio_thumb = m_urls.get("audio_thumbnail") or m_urls.get("video_thumbnail")
 
                 if video_url:
                     media_results.append(
@@ -1670,7 +1677,7 @@ def _create_responses_real_streaming_response(
 
         image_items: list[ImageGenerationCall] = []
         final_response_contents: list[ResponseOutputContent] = []
-        seen_hashes = set()
+        seen_hashes = {}
 
         images = []
         seen_image_urls = set()
@@ -1695,8 +1702,10 @@ def _create_responses_real_streaming_response(
             try:
                 b64, w, h, fname, fhash = await _image_to_base64(image, media_store)
                 if fhash in seen_hashes:
-                    continue
-                seen_hashes.add(fhash)
+                    (media_store / fname).unlink(missing_ok=True)
+                    b64, w, h, fname = seen_hashes[fhash]
+                else:
+                    seen_hashes[fhash] = (b64, w, h, fname)
 
                 parts = fname.rsplit(".", 1)
                 img_id = parts[0]
@@ -1739,7 +1748,7 @@ def _create_responses_real_streaming_response(
             except Exception:
                 logger.warning("Image processing failed in stream")
 
-        seen_media_hashes = set()
+        seen_media_hashes = {}
         for media_item in media_items:
             try:
                 m_dict = await _media_to_local_file(media_item, media_store)
@@ -1748,15 +1757,21 @@ def _create_responses_real_streaming_response(
                 for mtype, (random_name, fhash) in m_dict.items():
                     if fhash in seen_media_hashes:
                         (media_store / random_name).unlink(missing_ok=True)
+                        existing_name = seen_media_hashes[fhash]
+                        m_urls[mtype] = (
+                            f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
+                        )
                         continue
-                    seen_media_hashes.add(fhash)
+                    seen_media_hashes[fhash] = random_name
                     m_urls[mtype] = (
                         f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                     )
 
                 title = getattr(media_item, "title", "Media")
-                video_url, video_thumb = m_urls.get("video"), m_urls.get("video_thumbnail")
-                audio_url, audio_thumb = m_urls.get("audio"), m_urls.get("audio_thumbnail")
+                video_url = m_urls.get("video")
+                audio_url = m_urls.get("audio")
+                video_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+                audio_thumb = m_urls.get("audio_thumbnail") or m_urls.get("video_thumbnail")
 
                 md_parts = []
                 if video_url:
@@ -2003,7 +2018,7 @@ async def create_chat_completion(
         resp_or_stream.media or []
     )
     media_markdown = ""
-    seen_media_hashes = set()
+    seen_media_hashes = {}
     for m_item in media_items:
         try:
             m_dict = await _media_to_local_file(m_item, media_store)
@@ -2012,15 +2027,21 @@ async def create_chat_completion(
             for mtype, (random_name, fhash) in m_dict.items():
                 if fhash in seen_media_hashes:
                     (media_store / random_name).unlink(missing_ok=True)
+                    existing_name = seen_media_hashes[fhash]
+                    m_urls[mtype] = (
+                        f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
+                    )
                     continue
-                seen_media_hashes.add(fhash)
+                seen_media_hashes[fhash] = random_name
                 m_urls[mtype] = (
                     f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                 )
 
             title = getattr(m_item, "title", "Media")
-            video_url, video_thumb = m_urls.get("video"), m_urls.get("video_thumbnail")
-            audio_url, audio_thumb = m_urls.get("audio"), m_urls.get("audio_thumbnail")
+            video_url = m_urls.get("video")
+            audio_url = m_urls.get("audio")
+            video_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+            audio_thumb = m_urls.get("audio_thumbnail") or m_urls.get("video_thumbnail")
 
             md_parts = []
             if video_url:
@@ -2220,14 +2241,15 @@ async def create_response(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No images returned.")
 
     contents, img_calls = [], []
-    seen_hashes = set()
+    seen_hashes = {}
     for img in images:
         try:
             b64, w, h, fname, fhash = await _image_to_base64(img, media_store)
             if fhash in seen_hashes:
                 (media_store / fname).unlink(missing_ok=True)
-                continue
-            seen_hashes.add(fhash)
+                b64, w, h, fname = seen_hashes[fhash]
+            else:
+                seen_hashes[fhash] = (b64, w, h, fname)
 
             parts = fname.rsplit(".", 1)
             img_id = parts[0]
@@ -2266,7 +2288,7 @@ async def create_response(
     media_items: list[GeneratedVideo | GeneratedMedia] = (resp_or_stream.videos or []) + (
         resp_or_stream.media or []
     )
-    seen_media_hashes = set()
+    seen_media_hashes = {}
     media_markdown = ""
     for m_item in media_items:
         try:
@@ -2276,15 +2298,21 @@ async def create_response(
             for mtype, (random_name, fhash) in m_dict.items():
                 if fhash in seen_media_hashes:
                     (media_store / random_name).unlink(missing_ok=True)
+                    existing_name = seen_media_hashes[fhash]
+                    m_urls[mtype] = (
+                        f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
+                    )
                     continue
-                seen_media_hashes.add(fhash)
+                seen_media_hashes[fhash] = random_name
                 m_urls[mtype] = (
                     f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                 )
 
             title = getattr(m_item, "title", "Media")
-            video_url, video_thumb = m_urls.get("video"), m_urls.get("video_thumbnail")
-            audio_url, audio_thumb = m_urls.get("audio"), m_urls.get("audio_thumbnail")
+            video_url = m_urls.get("video")
+            audio_url = m_urls.get("audio")
+            video_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+            audio_thumb = m_urls.get("audio_thumbnail") or m_urls.get("video_thumbnail")
 
             md_parts = []
             if video_url:
