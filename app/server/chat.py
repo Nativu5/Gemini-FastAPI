@@ -897,21 +897,20 @@ async def _get_available_models(pool: GeminiClientPool) -> list[ModelData]:
     now = int(datetime.now(tz=UTC).timestamp())
     strategy = g_config.gemini.model_strategy
     models_data = []
+    seen_model_ids = set()
 
-    custom_models = [m for m in g_config.gemini.models if m.model_name]
-    for m in custom_models:
-        models_data.append(
-            ModelData(
-                id=m.model_name or "",
-                created=now,
-                owned_by="custom",
+    for m in g_config.gemini.models:
+        if m.model_name and m.model_name not in seen_model_ids:
+            models_data.append(
+                ModelData(
+                    id=m.model_name,
+                    created=now,
+                    owned_by="custom",
+                )
             )
-        )
+            seen_model_ids.add(m.model_name)
 
     if strategy == "append":
-        custom_ids = {m.id for m in models_data}
-        seen_model_ids = set()
-
         for client in pool.clients:
             if not client.running():
                 continue
@@ -919,7 +918,7 @@ async def _get_available_models(pool: GeminiClientPool) -> list[ModelData]:
             client_models = client.list_models()
             if client_models:
                 for am in client_models:
-                    if am.id not in custom_ids and am.id not in seen_model_ids:
+                    if am.id and am.id not in seen_model_ids:
                         models_data.append(
                             ModelData(
                                 id=am.id,
@@ -928,21 +927,6 @@ async def _get_available_models(pool: GeminiClientPool) -> list[ModelData]:
                             )
                         )
                         seen_model_ids.add(am.id)
-
-        for model in Model:
-            m_name = model.model_name
-            if not m_name or m_name == "unspecified":
-                continue
-            if m_name in custom_ids or m_name in seen_model_ids:
-                continue
-
-            models_data.append(
-                ModelData(
-                    id=m_name,
-                    created=now,
-                    owned_by="gemini-web",
-                )
-            )
 
     return models_data
 
