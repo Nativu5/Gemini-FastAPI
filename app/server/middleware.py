@@ -12,17 +12,17 @@ from loguru import logger
 
 from app.utils import g_config
 
-# Persistent directory for storing generated images
-IMAGE_STORE_DIR = Path(g_config.storage.images_path)
-IMAGE_STORE_DIR.mkdir(parents=True, exist_ok=True)
+# Persistent directory for storing generated media
+MEDIA_STORE_DIR = Path(g_config.storage.media_path)
+MEDIA_STORE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def get_image_store_dir() -> Path:
-    """Returns a persistent directory for storing images."""
-    return IMAGE_STORE_DIR
+def get_media_store_dir() -> Path:
+    """Returns a persistent directory for storing media."""
+    return MEDIA_STORE_DIR
 
 
-def get_image_token(filename: str) -> str:
+def get_media_token(filename: str) -> str:
     """Generate a HMAC-SHA256 token for a filename using the API key."""
     secret = g_config.server.api_key
     if not secret:
@@ -33,9 +33,9 @@ def get_image_token(filename: str) -> str:
     return hmac.new(secret_bytes, msg, hashlib.sha256).hexdigest()
 
 
-def verify_image_token(filename: str, token: str | None) -> bool:
+def verify_media_token(filename: str, token: str | None) -> bool:
     """Verify the provided token against the filename."""
-    expected = get_image_token(filename)
+    expected = get_media_token(filename)
     if not expected:
         return True  # No auth required
     if not token:
@@ -43,8 +43,8 @@ def verify_image_token(filename: str, token: str | None) -> bool:
     return hmac.compare_digest(token, expected)
 
 
-def cleanup_expired_images(retention_days: int) -> int:
-    """Delete images in IMAGE_STORE_DIR older than retention_days."""
+def cleanup_expired_media(retention_days: int) -> int:
+    """Delete media files in MEDIA_STORE_DIR older than retention_days."""
     if retention_days <= 0:
         return 0
 
@@ -53,7 +53,7 @@ def cleanup_expired_images(retention_days: int) -> int:
     cutoff = now - retention_seconds
 
     count = 0
-    for file_path in IMAGE_STORE_DIR.iterdir():
+    for file_path in MEDIA_STORE_DIR.iterdir():
         if not file_path.is_file():
             continue
         try:
@@ -61,10 +61,10 @@ def cleanup_expired_images(retention_days: int) -> int:
                 file_path.unlink()
                 count += 1
         except Exception as e:
-            logger.warning(f"Failed to delete expired image {file_path}: {e}")
+            logger.warning(f"Failed to delete expired media {file_path}: {e}")
 
     if count > 0:
-        logger.info(f"Cleaned up {count} expired images.")
+        logger.info(f"Cleaned up {count} expired media files.")
     return count
 
 

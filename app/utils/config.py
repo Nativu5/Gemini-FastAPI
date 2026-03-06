@@ -151,9 +151,9 @@ class StorageConfig(BaseModel):
         default="data/lmdb",
         description="Path to the storage directory where data will be saved",
     )
-    images_path: str = Field(
-        default="data/images",
-        description="Path to the directory where generated images will be stored",
+    media_path: str = Field(
+        default="data/media",
+        description="Path to the directory where generated media will be stored",
     )
     max_size: int = Field(
         default=1024**2 * 256,  # 256 MB

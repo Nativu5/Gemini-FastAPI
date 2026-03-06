@@ -164,8 +164,8 @@ requires-dist = [
     { name = "orjson", specifier = ">=3.11.7" },
     { name = "pydantic-settings", extras = ["yaml"], specifier = ">=2.13.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.2" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.4" },
-    { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.20" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.5" },
+    { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.21" },
     { name = "uvicorn", specifier = ">=0.41.0" },
     { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.22.1" },
 ]

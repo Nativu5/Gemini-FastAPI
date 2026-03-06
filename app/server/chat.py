@@ -16,6 +16,7 @@ from gemini_webapi import ModelOutput
 from gemini_webapi.client import ChatSession
 from gemini_webapi.constants import Model
 from gemini_webapi.types.image import GeneratedImage, Image
+from gemini_webapi.types.video import GeneratedMedia, GeneratedVideo
 from loguru import logger
 
 from app.models import (
@@ -54,8 +55,8 @@ from app.models import (
     ToolChoiceTypes,
 )
 from app.server.middleware import (
-    get_image_store_dir,
-    get_image_token,
+    get_media_store_dir,
+    get_media_token,
     get_temp_dir,
     verify_api_key,
 )
@@ -128,6 +129,38 @@ async def _image_to_base64(
     filename = random_name
     file_hash = hashlib.sha256(data).hexdigest()
     return base64.b64encode(data).decode("ascii"), width, height, filename, file_hash
+
+
+async def _media_to_local_file(
+    media: GeneratedVideo | GeneratedMedia, temp_dir: Path
+) -> dict[str, tuple[str, str]]:
+    """Persist media and return dict mapping type to (filename, hash)"""
+    try:
+        saved_paths = await media.save(path=str(temp_dir))
+    except Exception as e:
+        logger.warning(f"Failed to save media: {e}")
+        return {}
+
+    results = {}
+    for mtype, spath in saved_paths.items():
+        if not spath:
+            continue
+
+        original_path = Path(spath)
+        data = original_path.read_bytes()
+        suffix = original_path.suffix
+
+        if not suffix:
+            suffix = ".mp4" if "video" in mtype else ".mp3"
+
+        random_name = f"media_{uuid.uuid4().hex}{suffix}"
+        new_path = temp_dir / random_name
+        original_path.rename(new_path)
+
+        fhash = hashlib.sha256(data).hexdigest()
+        results[mtype] = (random_name, fhash)
+
+    return results
 
 
 def _calculate_usage(
@@ -1170,29 +1203,85 @@ def _create_real_streaming_response(
         )
 
         images = []
-        seen_urls = set()
+        seen_image_urls = set()
+        media_items: list[GeneratedVideo | GeneratedMedia] = []
+        seen_media_urls = set()
+
         for out in all_outputs:
             if out.images:
                 for img in out.images:
-                    if img.url not in seen_urls:
+                    if img.url not in seen_image_urls:
                         images.append(img)
-                        seen_urls.add(img.url)
+                        seen_image_urls.add(img.url)
+
+            m_list = (out.videos or []) + (out.media or [])
+            for m in m_list:
+                m_url = getattr(m, "url", None) or getattr(m, "mp3_url", None)
+                if m_url and m_url not in seen_media_urls:
+                    media_items.append(m)
+                    seen_media_urls.add(m_url)
 
         image_results = []
         seen_hashes = set()
         for image in images:
             try:
-                image_store = get_image_store_dir()
-                _, _, _, fname, fhash = await _image_to_base64(image, image_store)
+                media_store = get_media_store_dir()
+                _, _, _, fname, fhash = await _image_to_base64(image, media_store)
                 if fhash in seen_hashes:
-                    (image_store / fname).unlink(missing_ok=True)
+                    (media_store / fname).unlink(missing_ok=True)
                     continue
                 seen_hashes.add(fhash)
-
-                img_url = f"{base_url}images/{fname}?token={get_image_token(fname)}"
-                image_results.append(img_url)
+                img_url = f"{base_url}media/{fname}?token={get_media_token(fname)}"
+                title = getattr(image, "title", "Image")
+                image_results.append(f"![{title}]({img_url})")
             except Exception as exc:
                 logger.warning(f"Failed to process image in OpenAI stream: {exc}")
+
+        media_results = []
+        seen_media_hashes = set()
+        for media_item in media_items:
+            try:
+                media_store = get_media_store_dir()
+                m_dict = await _media_to_local_file(media_item, media_store)
+
+                m_urls = {}
+                for mtype, (random_name, fhash) in m_dict.items():
+                    if fhash in seen_media_hashes:
+                        (media_store / random_name).unlink(missing_ok=True)
+                        continue
+                    seen_media_hashes.add(fhash)
+                    m_urls[mtype] = (
+                        f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
+                    )
+
+                media_url = m_urls.get("video") or m_urls.get("audio")
+                thumb_url = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+
+                title = getattr(media_item, "title", "Media")
+                if thumb_url and media_url:
+                    media_results.append(f"[![{title}]({thumb_url})]({media_url})")
+                elif media_url:
+                    media_results.append(f"[{title}]({media_url})")
+                elif thumb_url:
+                    media_results.append(f"![{title}]({thumb_url})")
+            except Exception as exc:
+                logger.warning(f"Failed to process media in OpenAI stream: {exc}")
+
+        for image_url in image_results:
+            yield make_chunk(
+                {
+                    "delta": {"content": f"\n\n{image_url}"},
+                    "finish_reason": None,
+                }
+            )
+
+        for media_md in media_results:
+            yield make_chunk(
+                {
+                    "delta": {"content": f"\n\n{media_md}"},
+                    "finish_reason": None,
+                }
+            )
 
         if detected_tool_calls:
             for idx, call in enumerate(detected_tool_calls):
@@ -1211,14 +1300,6 @@ def _create_real_streaming_response(
                         "finish_reason": None,
                     }
                 )
-
-        for image_url in image_results:
-            yield make_chunk(
-                {
-                    "delta": {"content": f"\n\n![Generated Image]({image_url})"},
-                    "finish_reason": None,
-                }
-            )
 
         p_tok, c_tok, t_tok, r_tok = _calculate_usage(
             messages, assistant_text, detected_tool_calls, full_thoughts
@@ -1261,7 +1342,7 @@ def _create_responses_real_streaming_response(
     client_wrapper: GeminiClientWrapper,
     session: ChatSession,
     request: ResponseCreateRequest,
-    image_store: Path,
+    media_store: Path,
     base_url: str,
     structured_requirement: StructuredOutputRequirement | None = None,
 ) -> StreamingResponse:
@@ -1596,57 +1677,107 @@ def _create_responses_real_streaming_response(
         final_response_contents: list[ResponseOutputContent] = []
         seen_hashes = set()
 
+        images = []
+        seen_image_urls = set()
+        media_items: list[GeneratedVideo | GeneratedMedia] = []
+        seen_media_urls = set()
+
         for out in all_outputs:
             if out.images:
-                for image in out.images:
-                    try:
-                        b64, w, h, fname, fhash = await _image_to_base64(image, image_store)
-                        if fhash in seen_hashes:
-                            continue
-                        seen_hashes.add(fhash)
+                for img in out.images:
+                    if img.url not in seen_image_urls:
+                        images.append(img)
+                        seen_image_urls.add(img.url)
 
-                        parts = fname.rsplit(".", 1)
-                        img_id = parts[0]
-                        fmt = parts[1] if len(parts) > 1 else "png"
+            m_list = (out.videos or []) + (out.media or [])
+            for m in m_list:
+                m_url = getattr(m, "url", None) or getattr(m, "mp3_url", None)
+                if m_url and m_url not in seen_media_urls:
+                    media_items.append(m)
+                    seen_media_urls.add(m_url)
 
-                        img_item = ImageGenerationCall(
-                            id=img_id,
-                            result=b64,
-                            output_format=fmt,
-                            size=f"{w}x{h}" if w and h else None,
-                        )
+        for image in images:
+            try:
+                b64, w, h, fname, fhash = await _image_to_base64(image, media_store)
+                if fhash in seen_hashes:
+                    continue
+                seen_hashes.add(fhash)
 
-                        image_url = (
-                            f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
-                        )
-                        final_response_contents.append(
-                            ResponseOutputText(type="output_text", text=image_url)
-                        )
+                parts = fname.rsplit(".", 1)
+                img_id = parts[0]
+                fmt = parts[1] if len(parts) > 1 else "png"
 
-                        yield make_event(
-                            "response.output_item.added",
-                            {
-                                **base_event,
-                                "type": "response.output_item.added",
-                                "output_index": current_index,
-                                "item": img_item.model_dump(mode="json"),
-                            },
-                        )
+                img_item = ImageGenerationCall(
+                    id=img_id,
+                    result=b64,
+                    output_format=fmt,
+                    size=f"{w}x{h}" if w and h else None,
+                )
 
-                        yield make_event(
-                            "response.output_item.done",
-                            {
-                                **base_event,
-                                "type": "response.output_item.done",
-                                "output_index": current_index,
-                                "item": img_item.model_dump(mode="json"),
-                            },
-                        )
-                        current_index += 1
-                        image_items.append(img_item)
-                        storage_output += f"\n\n{image_url}"
-                    except Exception:
-                        logger.warning("Image processing failed in stream")
+                image_url = f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
+                final_response_contents.append(
+                    ResponseOutputText(type="output_text", text=image_url)
+                )
+
+                yield make_event(
+                    "response.output_item.added",
+                    {
+                        **base_event,
+                        "type": "response.output_item.added",
+                        "output_index": current_index,
+                        "item": img_item.model_dump(mode="json"),
+                    },
+                )
+
+                yield make_event(
+                    "response.output_item.done",
+                    {
+                        **base_event,
+                        "type": "response.output_item.done",
+                        "output_index": current_index,
+                        "item": img_item.model_dump(mode="json"),
+                    },
+                )
+                current_index += 1
+                image_items.append(img_item)
+                storage_output += f"\n\n{image_url}"
+            except Exception:
+                logger.warning("Image processing failed in stream")
+
+        seen_media_hashes = set()
+        for media_item in media_items:
+            try:
+                m_dict = await _media_to_local_file(media_item, media_store)
+
+                m_urls = {}
+                for mtype, (random_name, fhash) in m_dict.items():
+                    if fhash in seen_media_hashes:
+                        (media_store / random_name).unlink(missing_ok=True)
+                        continue
+                    seen_media_hashes.add(fhash)
+                    m_urls[mtype] = (
+                        f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
+                    )
+
+                media_url = m_urls.get("video") or m_urls.get("audio")
+                thumb_url = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+
+                title = getattr(media_item, "title", "Media")
+                media_md = ""
+                if thumb_url and media_url:
+                    media_md = f"[![{title}]({thumb_url})]({media_url})"
+                elif media_url:
+                    media_md = f"[{title}]({media_url})"
+                elif thumb_url:
+                    media_md = f"![{title}]({thumb_url})"
+
+                if media_md:
+                    final_response_contents.append(
+                        ResponseOutputText(type="output_text", text=media_md)
+                    )
+                    storage_output += f"\n\n{media_md}"
+            except Exception:
+                logger.warning("Media processing failed in stream")
 
         for call in detected_tool_calls:
             tc_item = ResponseFunctionToolCall(
@@ -1741,7 +1872,7 @@ async def create_chat_completion(
     raw_request: Request,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
-    image_store: Path = Depends(get_image_store_dir),
+    media_store: Path = Depends(get_media_store_dir),
 ):
     base_url = str(raw_request.base_url)
     pool, db = GeminiClientPool(), LMDBConversationStore()
@@ -1845,13 +1976,13 @@ async def create_chat_completion(
     seen_hashes = set()
     for image in images:
         try:
-            _, _, _, fname, fhash = await _image_to_base64(image, image_store)
+            _, _, _, fname, fhash = await _image_to_base64(image, media_store)
             if fhash in seen_hashes:
-                (image_store / fname).unlink(missing_ok=True)
+                (media_store / fname).unlink(missing_ok=True)
                 continue
             seen_hashes.add(fhash)
 
-            img_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
+            img_url = f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
             image_markdown += f"\n\n{img_url}"
         except Exception as exc:
             logger.warning(f"Failed to process image in OpenAI response: {exc}")
@@ -1859,6 +1990,42 @@ async def create_chat_completion(
     if image_markdown:
         visible_output += image_markdown
         storage_output += image_markdown
+
+    media_items: list[GeneratedVideo | GeneratedMedia] = (resp_or_stream.videos or []) + (
+        resp_or_stream.media or []
+    )
+    media_markdown = ""
+    seen_media_hashes = set()
+    for m_item in media_items:
+        try:
+            m_dict = await _media_to_local_file(m_item, media_store)
+
+            m_urls = {}
+            for mtype, (random_name, fhash) in m_dict.items():
+                if fhash in seen_media_hashes:
+                    (media_store / random_name).unlink(missing_ok=True)
+                    continue
+                seen_media_hashes.add(fhash)
+                m_urls[mtype] = (
+                    f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
+                )
+
+            media_url = m_urls.get("video") or m_urls.get("audio")
+            thumb_url = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+
+            title = getattr(m_item, "title", "Media")
+            if thumb_url and media_url:
+                media_markdown += f"\n\n[![{title}]({thumb_url})]({media_url})"
+            elif media_url:
+                media_markdown += f"\n\n[{title}]({media_url})"
+            elif thumb_url:
+                media_markdown += f"\n\n![{title}]({thumb_url})"
+        except Exception as exc:
+            logger.warning(f"Failed to process media in OpenAI response: {exc}")
+
+    if media_markdown:
+        visible_output += media_markdown
+        storage_output += media_markdown
 
     if tool_calls:
         logger.debug(
@@ -1902,7 +2069,7 @@ async def create_response(
     raw_request: Request,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
-    image_store: Path = Depends(get_image_store_dir),
+    media_store: Path = Depends(get_media_store_dir),
 ):
     base_url = str(raw_request.base_url)
     base_messages = _convert_responses_to_app_messages(request.input)
@@ -2002,7 +2169,7 @@ async def create_response(
             client,
             session,
             request,
-            image_store,
+            media_store,
             base_url,
             struct_req,
         )
@@ -2033,9 +2200,9 @@ async def create_response(
     seen_hashes = set()
     for img in images:
         try:
-            b64, w, h, fname, fhash = await _image_to_base64(img, image_store)
+            b64, w, h, fname, fhash = await _image_to_base64(img, media_store)
             if fhash in seen_hashes:
-                (image_store / fname).unlink(missing_ok=True)
+                (media_store / fname).unlink(missing_ok=True)
                 continue
             seen_hashes.add(fhash)
 
@@ -2047,12 +2214,6 @@ async def create_response(
                 else ("png" if isinstance(img, GeneratedImage) else "jpeg")
             )
 
-            contents.append(
-                ResponseOutputText(
-                    type="output_text",
-                    text=f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})",
-                )
-            )
             img_calls.append(
                 ImageGenerationCall(
                     id=img_id,
@@ -2072,11 +2233,52 @@ async def create_response(
     image_markdown = ""
     for img_call in img_calls:
         fname = f"{img_call.id}.{img_call.output_format}"
-        img_url = f"![{fname}]({base_url}images/{fname}?token={get_image_token(fname)})"
+        img_url = f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
         image_markdown += f"\n\n{img_url}"
 
     if image_markdown:
         storage_output += image_markdown
+        contents.append(ResponseOutputText(type="output_text", text=image_markdown.strip()))
+
+    media_items: list[GeneratedVideo | GeneratedMedia] = (resp_or_stream.videos or []) + (
+        resp_or_stream.media or []
+    )
+    seen_media_hashes = set()
+    media_markdown = ""
+    for m_item in media_items:
+        try:
+            m_dict = await _media_to_local_file(m_item, media_store)
+
+            m_urls = {}
+            for mtype, (random_name, fhash) in m_dict.items():
+                if fhash in seen_media_hashes:
+                    (media_store / random_name).unlink(missing_ok=True)
+                    continue
+                seen_media_hashes.add(fhash)
+                m_urls[mtype] = (
+                    f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
+                )
+
+            media_url = m_urls.get("video") or m_urls.get("audio")
+            thumb_url = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+
+            title = getattr(m_item, "title", "Media")
+            m_md = ""
+            if thumb_url and media_url:
+                m_md = f"[![{title}]({thumb_url})]({media_url})"
+            elif media_url:
+                m_md = f"[{title}]({media_url})"
+            elif thumb_url:
+                m_md = f"![{title}]({thumb_url})"
+
+            if m_md:
+                media_markdown += f"\n\n{m_md}"
+        except Exception as exc:
+            logger.warning(f"Failed to process media in OpenAI response: {exc}")
+
+    if media_markdown:
+        storage_output += media_markdown
+        contents.append(ResponseOutputText(type="output_text", text=media_markdown.strip()))
 
     p_tok, c_tok, t_tok, r_tok = _calculate_usage(messages, assistant_text, tool_calls, thoughts)
     usage = ResponseUsage(

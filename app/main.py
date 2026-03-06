@@ -6,11 +6,11 @@ from loguru import logger
 
 from .server.chat import router as chat_router
 from .server.health import router as health_router
-from .server.images import router as images_router
+from .server.media import router as media_router
 from .server.middleware import (
     add_cors_middleware,
     add_exception_handler,
-    cleanup_expired_images,
+    cleanup_expired_media,
 )
 from .services import GeminiClientPool, LMDBConversationStore
 
@@ -33,7 +33,7 @@ async def _run_retention_cleanup(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         try:
             store.cleanup_expired()
-            cleanup_expired_images(store.retention_days)
+            cleanup_expired_media(store.retention_days)
         except Exception:
             logger.exception("LMDB retention cleanup task failed.")
 
@@ -99,6 +99,6 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router, tags=["Health"])
     app.include_router(chat_router, tags=["Chat"])
-    app.include_router(images_router, tags=["Images"])
+    app.include_router(media_router, tags=["Media"])
 
     return app
