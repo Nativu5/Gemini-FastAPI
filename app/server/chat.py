@@ -1246,26 +1246,25 @@ def _create_real_streaming_response(
                 title = getattr(media_item, "title", "Media")
                 video_url = m_urls.get("video")
                 audio_url = m_urls.get("audio")
-                video_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-                audio_thumb = m_urls.get("audio_thumbnail") or m_urls.get("video_thumbnail")
+                video_thumb = m_urls.get("video_thumbnail")
+                audio_thumb = m_urls.get("audio_thumbnail")
 
+                md_parts = []
                 if video_url:
-                    media_results.append(
+                    md_parts.append(
                         f"[![{title}]({video_thumb})]({video_url})"
                         if video_thumb
                         else f"[{title}]({video_url})"
                     )
-                elif video_thumb:
-                    media_results.append(f"![{title}]({video_thumb})")
 
                 if audio_url:
-                    media_results.append(
+                    md_parts.append(
                         f"[![{title} (Audio)]({audio_thumb})]({audio_url})"
                         if audio_thumb
                         else f"[{title} (Audio)]({audio_url})"
                     )
-                elif audio_thumb:
-                    media_results.append(f"![{title} (Audio)]({audio_thumb})")
+                if md_parts:
+                    media_results.append("\n\n".join(md_parts))
             except Exception as exc:
                 logger.warning(f"Failed to process media in OpenAI stream: {exc}")
 
@@ -1770,8 +1769,8 @@ def _create_responses_real_streaming_response(
                 title = getattr(media_item, "title", "Media")
                 video_url = m_urls.get("video")
                 audio_url = m_urls.get("audio")
-                video_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-                audio_thumb = m_urls.get("audio_thumbnail") or m_urls.get("video_thumbnail")
+                video_thumb = m_urls.get("video_thumbnail")
+                audio_thumb = m_urls.get("audio_thumbnail")
 
                 md_parts = []
                 if video_url:
@@ -1780,8 +1779,6 @@ def _create_responses_real_streaming_response(
                         if video_thumb
                         else f"[{title}]({video_url})"
                     )
-                elif video_thumb:
-                    md_parts.append(f"![{title}]({video_thumb})")
 
                 if audio_url:
                     md_parts.append(
@@ -1789,8 +1786,6 @@ def _create_responses_real_streaming_response(
                         if audio_thumb
                         else f"[{title} (Audio)]({audio_url})"
                     )
-                elif audio_thumb:
-                    md_parts.append(f"![{title} (Audio)]({audio_thumb})")
 
                 media_md = "\n\n".join(md_parts)
 
@@ -2040,8 +2035,8 @@ async def create_chat_completion(
             title = getattr(m_item, "title", "Media")
             video_url = m_urls.get("video")
             audio_url = m_urls.get("audio")
-            video_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-            audio_thumb = m_urls.get("audio_thumbnail") or m_urls.get("video_thumbnail")
+            video_thumb = m_urls.get("video_thumbnail")
+            audio_thumb = m_urls.get("audio_thumbnail")
 
             md_parts = []
             if video_url:
@@ -2050,8 +2045,6 @@ async def create_chat_completion(
                     if video_thumb
                     else f"[{title}]({video_url})"
                 )
-            elif video_thumb:
-                md_parts.append(f"![{title}]({video_thumb})")
 
             if audio_url:
                 md_parts.append(
@@ -2059,11 +2052,10 @@ async def create_chat_completion(
                     if audio_thumb
                     else f"[{title} (Audio)]({audio_url})"
                 )
-            elif audio_thumb:
-                md_parts.append(f"![{title} (Audio)]({audio_thumb})")
 
             if md_parts:
-                media_markdown += "\n\n" + "\n\n".join(md_parts)
+                m_md = "\n\n".join(md_parts)
+                media_markdown += f"\n\n{m_md}"
         except Exception as exc:
             logger.warning(f"Failed to process media in OpenAI response: {exc}")
 
@@ -2311,8 +2303,8 @@ async def create_response(
             title = getattr(m_item, "title", "Media")
             video_url = m_urls.get("video")
             audio_url = m_urls.get("audio")
-            video_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-            audio_thumb = m_urls.get("audio_thumbnail") or m_urls.get("video_thumbnail")
+            video_thumb = m_urls.get("video_thumbnail")
+            audio_thumb = m_urls.get("audio_thumbnail")
 
             md_parts = []
             if video_url:
@@ -2321,8 +2313,6 @@ async def create_response(
                     if video_thumb
                     else f"[{title}]({video_url})"
                 )
-            elif video_thumb:
-                md_parts.append(f"![{title}]({video_thumb})")
 
             if audio_url:
                 md_parts.append(
@@ -2330,8 +2320,6 @@ async def create_response(
                     if audio_thumb
                     else f"[{title} (Audio)]({audio_url})"
                 )
-            elif audio_thumb:
-                md_parts.append(f"![{title} (Audio)]({audio_thumb})")
 
             if md_parts:
                 m_md = "\n\n".join(md_parts)
