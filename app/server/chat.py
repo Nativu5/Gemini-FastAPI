@@ -1238,16 +1238,27 @@ def _create_real_streaming_response(
                         f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                     )
 
-                media_url = m_urls.get("video") or m_urls.get("audio")
-                thumb_url = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-
                 title = getattr(media_item, "title", "Media")
-                if thumb_url and media_url:
-                    media_results.append(f"[![{title}]({thumb_url})]({media_url})")
-                elif media_url:
-                    media_results.append(f"[{title}]({media_url})")
-                elif thumb_url:
-                    media_results.append(f"![{title}]({thumb_url})")
+                video_url, video_thumb = m_urls.get("video"), m_urls.get("video_thumbnail")
+                audio_url, audio_thumb = m_urls.get("audio"), m_urls.get("audio_thumbnail")
+
+                if video_url:
+                    media_results.append(
+                        f"[![{title}]({video_thumb})]({video_url})"
+                        if video_thumb
+                        else f"[{title}]({video_url})"
+                    )
+                elif video_thumb:
+                    media_results.append(f"![{title}]({video_thumb})")
+
+                if audio_url:
+                    media_results.append(
+                        f"[![{title} (Audio)]({audio_thumb})]({audio_url})"
+                        if audio_thumb
+                        else f"[{title} (Audio)]({audio_url})"
+                    )
+                elif audio_thumb:
+                    media_results.append(f"![{title} (Audio)]({audio_thumb})")
             except Exception as exc:
                 logger.warning(f"Failed to process media in OpenAI stream: {exc}")
 
@@ -1743,17 +1754,30 @@ def _create_responses_real_streaming_response(
                         f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                     )
 
-                media_url = m_urls.get("video") or m_urls.get("audio")
-                thumb_url = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-
                 title = getattr(media_item, "title", "Media")
-                media_md = ""
-                if thumb_url and media_url:
-                    media_md = f"[![{title}]({thumb_url})]({media_url})"
-                elif media_url:
-                    media_md = f"[{title}]({media_url})"
-                elif thumb_url:
-                    media_md = f"![{title}]({thumb_url})"
+                video_url, video_thumb = m_urls.get("video"), m_urls.get("video_thumbnail")
+                audio_url, audio_thumb = m_urls.get("audio"), m_urls.get("audio_thumbnail")
+
+                md_parts = []
+                if video_url:
+                    md_parts.append(
+                        f"[![{title}]({video_thumb})]({video_url})"
+                        if video_thumb
+                        else f"[{title}]({video_url})"
+                    )
+                elif video_thumb:
+                    md_parts.append(f"![{title}]({video_thumb})")
+
+                if audio_url:
+                    md_parts.append(
+                        f"[![{title} (Audio)]({audio_thumb})]({audio_url})"
+                        if audio_thumb
+                        else f"[{title} (Audio)]({audio_url})"
+                    )
+                elif audio_thumb:
+                    md_parts.append(f"![{title} (Audio)]({audio_thumb})")
+
+                media_md = "\n\n".join(md_parts)
 
                 if media_md:
                     final_response_contents.append(
@@ -1994,16 +2018,31 @@ async def create_chat_completion(
                     f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                 )
 
-            media_url = m_urls.get("video") or m_urls.get("audio")
-            thumb_url = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-
             title = getattr(m_item, "title", "Media")
-            if thumb_url and media_url:
-                media_markdown += f"\n\n[![{title}]({thumb_url})]({media_url})"
-            elif media_url:
-                media_markdown += f"\n\n[{title}]({media_url})"
-            elif thumb_url:
-                media_markdown += f"\n\n![{title}]({thumb_url})"
+            video_url, video_thumb = m_urls.get("video"), m_urls.get("video_thumbnail")
+            audio_url, audio_thumb = m_urls.get("audio"), m_urls.get("audio_thumbnail")
+
+            md_parts = []
+            if video_url:
+                md_parts.append(
+                    f"[![{title}]({video_thumb})]({video_url})"
+                    if video_thumb
+                    else f"[{title}]({video_url})"
+                )
+            elif video_thumb:
+                md_parts.append(f"![{title}]({video_thumb})")
+
+            if audio_url:
+                md_parts.append(
+                    f"[![{title} (Audio)]({audio_thumb})]({audio_url})"
+                    if audio_thumb
+                    else f"[{title} (Audio)]({audio_url})"
+                )
+            elif audio_thumb:
+                md_parts.append(f"![{title} (Audio)]({audio_thumb})")
+
+            if md_parts:
+                media_markdown += "\n\n" + "\n\n".join(md_parts)
         except Exception as exc:
             logger.warning(f"Failed to process media in OpenAI response: {exc}")
 
@@ -2243,19 +2282,31 @@ async def create_response(
                     f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                 )
 
-            media_url = m_urls.get("video") or m_urls.get("audio")
-            thumb_url = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-
             title = getattr(m_item, "title", "Media")
-            m_md = ""
-            if thumb_url and media_url:
-                m_md = f"[![{title}]({thumb_url})]({media_url})"
-            elif media_url:
-                m_md = f"[{title}]({media_url})"
-            elif thumb_url:
-                m_md = f"![{title}]({thumb_url})"
+            video_url, video_thumb = m_urls.get("video"), m_urls.get("video_thumbnail")
+            audio_url, audio_thumb = m_urls.get("audio"), m_urls.get("audio_thumbnail")
 
-            if m_md:
+            md_parts = []
+            if video_url:
+                md_parts.append(
+                    f"[![{title}]({video_thumb})]({video_url})"
+                    if video_thumb
+                    else f"[{title}]({video_url})"
+                )
+            elif video_thumb:
+                md_parts.append(f"![{title}]({video_thumb})")
+
+            if audio_url:
+                md_parts.append(
+                    f"[![{title} (Audio)]({audio_thumb})]({audio_url})"
+                    if audio_thumb
+                    else f"[{title} (Audio)]({audio_url})"
+                )
+            elif audio_thumb:
+                md_parts.append(f"![{title} (Audio)]({audio_thumb})")
+
+            if md_parts:
+                m_md = "\n\n".join(md_parts)
                 media_markdown += f"\n\n{m_md}"
         except Exception as exc:
             logger.warning(f"Failed to process media in OpenAI response: {exc}")
