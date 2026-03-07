@@ -138,27 +138,47 @@ async def _media_to_local_file(
     try:
         saved_paths = await media.save(path=str(temp_dir))
     except Exception as e:
-        logger.warning(f"Failed to save media: {e}")
+        logger.warning(f"Failed to save media: {e}", exc_info=True)
         return {}
 
+    default_extensions = {
+        "video": ".mp4",
+        "audio": ".mp3",
+        "video_thumbnail": ".jpg",
+        "audio_thumbnail": ".jpg",
+    }
+
     results = {}
+    path_map = {}
+
     for mtype, spath in saved_paths.items():
         if not spath:
             continue
+        try:
+            original_path = Path(spath)
+            if not original_path.exists():
+                if spath in path_map:
+                    results[mtype] = path_map[spath]
+                continue
 
-        original_path = Path(spath)
-        data = original_path.read_bytes()
-        suffix = original_path.suffix
+            if spath in path_map:
+                results[mtype] = path_map[spath]
+                continue
 
-        if not suffix:
-            suffix = ".mp4" if "video" in mtype else ".mp3"
+            data = original_path.read_bytes()
+            suffix = original_path.suffix
+            if not suffix:
+                suffix = default_extensions.get(mtype) or (".mp4" if "video" in mtype else ".mp3")
 
-        random_name = f"media_{uuid.uuid4().hex}{suffix}"
-        new_path = temp_dir / random_name
-        original_path.rename(new_path)
+            random_name = f"media_{uuid.uuid4().hex}{suffix}"
+            new_path = temp_dir / random_name
+            original_path.rename(new_path)
 
-        fhash = hashlib.sha256(data).hexdigest()
-        results[mtype] = (random_name, fhash)
+            fhash = hashlib.sha256(data).hexdigest()
+            results[mtype] = (random_name, fhash)
+            path_map[spath] = (random_name, fhash)
+        except Exception as e:
+            logger.warning(f"Error processing {mtype} at {spath}: {e}")
 
     return results
 
@@ -1674,13 +1694,13 @@ def _create_responses_real_streaming_response(
             )
             current_index += 1
 
-        image_items: list[ImageGenerationCall] = []
-        final_response_contents: list[ResponseOutputContent] = []
+        image_items = []
+        final_response_contents = []
         seen_hashes = {}
 
         images = []
         seen_image_urls = set()
-        media_items: list[GeneratedVideo | GeneratedMedia] = []
+        media_items = []
         seen_media_urls = set()
 
         for out in all_outputs:
@@ -1731,7 +1751,6 @@ def _create_responses_real_streaming_response(
                         "item": img_item.model_dump(mode="json"),
                     },
                 )
-
                 yield make_event(
                     "response.output_item.done",
                     {
@@ -1744,8 +1763,8 @@ def _create_responses_real_streaming_response(
                 current_index += 1
                 image_items.append(img_item)
                 storage_output += f"\n\n{image_url}"
-            except Exception:
-                logger.warning("Image processing failed in stream")
+            except Exception as e:
+                logger.warning(f"Image processing failed in stream: {e}")
 
         seen_media_hashes = {}
         for media_item in media_items:
@@ -1988,17 +2007,17 @@ async def create_chat_completion(
         thoughts, raw_clean, structured_requirement
     )
 
-    # Process images for OpenAI non-streaming flow
     images = resp_or_stream.images or []
     image_markdown = ""
-    seen_hashes = set()
+    seen_hashes = {}
     for image in images:
         try:
-            _, _, _, fname, fhash = await _image_to_base64(image, media_store)
+            b64, w, h, fname, fhash = await _image_to_base64(image, media_store)
             if fhash in seen_hashes:
                 (media_store / fname).unlink(missing_ok=True)
-                continue
-            seen_hashes.add(fhash)
+                b64, w, h, fname = seen_hashes[fhash]
+            else:
+                seen_hashes[fhash] = (b64, w, h, fname)
 
             img_url = f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
             image_markdown += f"\n\n{img_url}"
