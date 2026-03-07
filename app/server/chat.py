@@ -1244,16 +1244,19 @@ def _create_real_streaming_response(
 
         media_results = []
         seen_media_hashes = {}
+        last_thumb_url = None
         for media_item in media_items:
             try:
                 media_store = get_media_store_dir()
                 m_dict = await _media_to_local_file(media_item, media_store)
+                logger.debug(f"Media processing keys: {list(m_dict.keys())}")
 
                 m_urls = {}
                 for mtype, (random_name, fhash) in m_dict.items():
                     if fhash in seen_media_hashes:
-                        (media_store / random_name).unlink(missing_ok=True)
                         existing_name = seen_media_hashes[fhash]
+                        if random_name != existing_name:
+                            (media_store / random_name).unlink(missing_ok=True)
                         m_urls[mtype] = (
                             f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
                         )
@@ -1263,25 +1266,27 @@ def _create_real_streaming_response(
                         f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                     )
 
+                logger.debug(f"Media processing m_urls: {m_urls}")
                 title = getattr(media_item, "title", "Media")
                 video_url = m_urls.get("video")
                 audio_url = m_urls.get("audio")
-                video_thumb = m_urls.get("video_thumbnail")
-                audio_thumb = m_urls.get("audio_thumbnail")
+                item_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+                if item_thumb:
+                    last_thumb_url = item_thumb
 
                 md_parts = []
                 if video_url:
                     md_parts.append(
-                        f"[![{title}]({video_thumb})]({video_url})"
-                        if video_thumb
+                        f"[![{title}]({last_thumb_url})]({video_url})"
+                        if last_thumb_url
                         else f"[{title}]({video_url})"
                     )
 
                 if audio_url:
                     md_parts.append(
-                        f"[![{title} (Audio)]({audio_thumb})]({audio_url})"
-                        if audio_thumb
-                        else f"[{title} (Audio)]({audio_url})"
+                        f"[![{title} - Audio]({last_thumb_url})]({audio_url})"
+                        if last_thumb_url
+                        else f"[{title} - Audio]({audio_url})"
                     )
                 if md_parts:
                     media_results.append("\n\n".join(md_parts))
@@ -1767,15 +1772,18 @@ def _create_responses_real_streaming_response(
                 logger.warning(f"Image processing failed in stream: {e}")
 
         seen_media_hashes = {}
+        last_thumb_url = None
         for media_item in media_items:
             try:
                 m_dict = await _media_to_local_file(media_item, media_store)
+                logger.debug(f"Media processing m_dict: {m_dict}")
 
                 m_urls = {}
                 for mtype, (random_name, fhash) in m_dict.items():
                     if fhash in seen_media_hashes:
-                        (media_store / random_name).unlink(missing_ok=True)
                         existing_name = seen_media_hashes[fhash]
+                        if random_name != existing_name:
+                            (media_store / random_name).unlink(missing_ok=True)
                         m_urls[mtype] = (
                             f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
                         )
@@ -1785,25 +1793,27 @@ def _create_responses_real_streaming_response(
                         f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                     )
 
+                logger.debug(f"Media processing m_urls: {m_urls}")
                 title = getattr(media_item, "title", "Media")
                 video_url = m_urls.get("video")
                 audio_url = m_urls.get("audio")
-                video_thumb = m_urls.get("video_thumbnail")
-                audio_thumb = m_urls.get("audio_thumbnail")
+                item_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+                if item_thumb:
+                    last_thumb_url = item_thumb
 
                 md_parts = []
                 if video_url:
                     md_parts.append(
-                        f"[![{title}]({video_thumb})]({video_url})"
-                        if video_thumb
+                        f"[![{title}]({last_thumb_url})]({video_url})"
+                        if last_thumb_url
                         else f"[{title}]({video_url})"
                     )
 
                 if audio_url:
                     md_parts.append(
-                        f"[![{title} (Audio)]({audio_thumb})]({audio_url})"
-                        if audio_thumb
-                        else f"[{title} (Audio)]({audio_url})"
+                        f"[![{title} - Audio]({last_thumb_url})]({audio_url})"
+                        if last_thumb_url
+                        else f"[{title} - Audio]({audio_url})"
                     )
 
                 media_md = "\n\n".join(md_parts)
@@ -2033,15 +2043,18 @@ async def create_chat_completion(
     )
     media_markdown = ""
     seen_media_hashes = {}
+    last_thumb_url = None
     for m_item in media_items:
         try:
             m_dict = await _media_to_local_file(m_item, media_store)
+            logger.debug(f"Media processing m_dict: {m_dict}")
 
             m_urls = {}
             for mtype, (random_name, fhash) in m_dict.items():
                 if fhash in seen_media_hashes:
-                    (media_store / random_name).unlink(missing_ok=True)
                     existing_name = seen_media_hashes[fhash]
+                    if random_name != existing_name:
+                        (media_store / random_name).unlink(missing_ok=True)
                     m_urls[mtype] = (
                         f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
                     )
@@ -2051,25 +2064,27 @@ async def create_chat_completion(
                     f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                 )
 
+            logger.debug(f"Media processing m_urls: {m_urls}")
             title = getattr(m_item, "title", "Media")
             video_url = m_urls.get("video")
             audio_url = m_urls.get("audio")
-            video_thumb = m_urls.get("video_thumbnail")
-            audio_thumb = m_urls.get("audio_thumbnail")
+            item_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+            if item_thumb:
+                last_thumb_url = item_thumb
 
             md_parts = []
             if video_url:
                 md_parts.append(
-                    f"[![{title}]({video_thumb})]({video_url})"
-                    if video_thumb
+                    f"[![{title}]({last_thumb_url})]({video_url})"
+                    if last_thumb_url
                     else f"[{title}]({video_url})"
                 )
 
             if audio_url:
                 md_parts.append(
-                    f"[![{title} (Audio)]({audio_thumb})]({audio_url})"
-                    if audio_thumb
-                    else f"[{title} (Audio)]({audio_url})"
+                    f"[![{title} - Audio]({last_thumb_url})]({audio_url})"
+                    if last_thumb_url
+                    else f"[{title} - Audio]({audio_url})"
                 )
 
             if md_parts:
@@ -2301,15 +2316,18 @@ async def create_response(
     )
     seen_media_hashes = {}
     media_markdown = ""
+    last_thumb_url = None
     for m_item in media_items:
         try:
             m_dict = await _media_to_local_file(m_item, media_store)
+            logger.debug(f"Media processing m_dict: {m_dict}")
 
             m_urls = {}
             for mtype, (random_name, fhash) in m_dict.items():
                 if fhash in seen_media_hashes:
-                    (media_store / random_name).unlink(missing_ok=True)
                     existing_name = seen_media_hashes[fhash]
+                    if random_name != existing_name:
+                        (media_store / random_name).unlink(missing_ok=True)
                     m_urls[mtype] = (
                         f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
                     )
@@ -2319,25 +2337,27 @@ async def create_response(
                     f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                 )
 
+            logger.debug(f"Media processing m_urls: {m_urls}")
             title = getattr(m_item, "title", "Media")
             video_url = m_urls.get("video")
             audio_url = m_urls.get("audio")
-            video_thumb = m_urls.get("video_thumbnail")
-            audio_thumb = m_urls.get("audio_thumbnail")
+            item_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
+            if item_thumb:
+                last_thumb_url = item_thumb
 
             md_parts = []
             if video_url:
                 md_parts.append(
-                    f"[![{title}]({video_thumb})]({video_url})"
-                    if video_thumb
+                    f"[![{title}]({last_thumb_url})]({video_url})"
+                    if last_thumb_url
                     else f"[{title}]({video_url})"
                 )
 
             if audio_url:
                 md_parts.append(
-                    f"[![{title} (Audio)]({audio_thumb})]({audio_url})"
-                    if audio_thumb
-                    else f"[{title} (Audio)]({audio_url})"
+                    f"[![{title} - Audio]({last_thumb_url})]({audio_url})"
+                    if last_thumb_url
+                    else f"[{title} - Audio]({audio_url})"
                 )
 
             if md_parts:
