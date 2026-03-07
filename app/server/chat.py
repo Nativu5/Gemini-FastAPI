@@ -1206,25 +1206,38 @@ def _create_real_streaming_response(
             full_thoughts, full_text, structured_requirement
         )
 
-        images = []
-        seen_image_urls = set()
-        media_items: list[GeneratedVideo | GeneratedMedia] = []
-        seen_media_urls = set()
+        image_map = {}
+        media_items = []
+        media_url_to_idx = {}
 
         for out in all_outputs:
-            if out.images:
-                for img in out.images:
-                    if img.url not in seen_image_urls:
-                        images.append(img)
-                        seen_image_urls.add(img.url)
+            for img in out.images or []:
+                if img.url:
+                    image_map[img.url] = img
 
             m_list = (out.videos or []) + (out.media or [])
             for m in m_list:
-                m_url = getattr(m, "url", None) or getattr(m, "mp3_url", None)
-                if m_url and m_url not in seen_media_urls:
-                    media_items.append(m)
-                    seen_media_urls.add(m_url)
+                v_url = getattr(m, "url", None)
+                a_url = getattr(m, "mp3_url", None)
+                if not v_url and not a_url:
+                    continue
 
+                idx = (media_url_to_idx.get(v_url) if v_url else None) or (
+                    media_url_to_idx.get(a_url) if a_url else None
+                )
+
+                if idx is not None:
+                    media_items[idx] = m
+                else:
+                    idx = len(media_items)
+                    media_items.append(m)
+
+                if v_url:
+                    media_url_to_idx[v_url] = idx
+                if a_url:
+                    media_url_to_idx[a_url] = idx
+
+        images = list(image_map.values())
         image_results = []
         seen_hashes = {}
         for image in images:
@@ -1249,7 +1262,6 @@ def _create_real_streaming_response(
             try:
                 media_store = get_media_store_dir()
                 m_dict = await _media_to_local_file(media_item, media_store)
-                logger.debug(f"Media processing keys: {list(m_dict.keys())}")
 
                 m_urls = {}
                 for mtype, (random_name, fhash) in m_dict.items():
@@ -1266,7 +1278,6 @@ def _create_real_streaming_response(
                         f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                     )
 
-                logger.debug(f"Media processing m_urls: {m_urls}")
                 title = getattr(media_item, "title", "Media")
                 video_url = m_urls.get("video")
                 audio_url = m_urls.get("audio")
@@ -1703,25 +1714,38 @@ def _create_responses_real_streaming_response(
         final_response_contents = []
         seen_hashes = {}
 
-        images = []
-        seen_image_urls = set()
+        image_map = {}
         media_items = []
-        seen_media_urls = set()
+        media_url_to_idx = {}
 
         for out in all_outputs:
-            if out.images:
-                for img in out.images:
-                    if img.url not in seen_image_urls:
-                        images.append(img)
-                        seen_image_urls.add(img.url)
+            for img in out.images or []:
+                if img.url:
+                    image_map[img.url] = img
 
             m_list = (out.videos or []) + (out.media or [])
             for m in m_list:
-                m_url = getattr(m, "url", None) or getattr(m, "mp3_url", None)
-                if m_url and m_url not in seen_media_urls:
-                    media_items.append(m)
-                    seen_media_urls.add(m_url)
+                v_url = getattr(m, "url", None)
+                a_url = getattr(m, "mp3_url", None)
+                if not v_url and not a_url:
+                    continue
 
+                idx = (media_url_to_idx.get(v_url) if v_url else None) or (
+                    media_url_to_idx.get(a_url) if a_url else None
+                )
+
+                if idx is not None:
+                    media_items[idx] = m
+                else:
+                    idx = len(media_items)
+                    media_items.append(m)
+
+                if v_url:
+                    media_url_to_idx[v_url] = idx
+                if a_url:
+                    media_url_to_idx[a_url] = idx
+
+        images = list(image_map.values())
         for image in images:
             try:
                 b64, w, h, fname, fhash = await _image_to_base64(image, media_store)
@@ -1776,7 +1800,6 @@ def _create_responses_real_streaming_response(
         for media_item in media_items:
             try:
                 m_dict = await _media_to_local_file(media_item, media_store)
-                logger.debug(f"Media processing m_dict: {m_dict}")
 
                 m_urls = {}
                 for mtype, (random_name, fhash) in m_dict.items():
@@ -1793,7 +1816,6 @@ def _create_responses_real_streaming_response(
                         f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                     )
 
-                logger.debug(f"Media processing m_urls: {m_urls}")
                 title = getattr(media_item, "title", "Media")
                 video_url = m_urls.get("video")
                 audio_url = m_urls.get("audio")
@@ -2047,7 +2069,6 @@ async def create_chat_completion(
     for m_item in media_items:
         try:
             m_dict = await _media_to_local_file(m_item, media_store)
-            logger.debug(f"Media processing m_dict: {m_dict}")
 
             m_urls = {}
             for mtype, (random_name, fhash) in m_dict.items():
@@ -2064,7 +2085,6 @@ async def create_chat_completion(
                     f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                 )
 
-            logger.debug(f"Media processing m_urls: {m_urls}")
             title = getattr(m_item, "title", "Media")
             video_url = m_urls.get("video")
             audio_url = m_urls.get("audio")
@@ -2320,7 +2340,6 @@ async def create_response(
     for m_item in media_items:
         try:
             m_dict = await _media_to_local_file(m_item, media_store)
-            logger.debug(f"Media processing m_dict: {m_dict}")
 
             m_urls = {}
             for mtype, (random_name, fhash) in m_dict.items():
@@ -2337,7 +2356,6 @@ async def create_response(
                     f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
                 )
 
-            logger.debug(f"Media processing m_urls: {m_urls}")
             title = getattr(m_item, "title", "Media")
             video_url = m_urls.get("video")
             audio_url = m_urls.get("audio")
