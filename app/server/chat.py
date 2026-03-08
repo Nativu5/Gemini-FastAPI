@@ -77,7 +77,7 @@ from app.utils.helper import (
 )
 
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
-METADATA_TTL_MINUTES = 15
+METADATA_TTL_MINUTES = 60
 
 router = APIRouter()
 
@@ -1188,8 +1188,8 @@ def _create_real_streaming_response(
                             {"delta": {"content": visible_delta}, "finish_reason": None}
                         )
         except Exception as e:
-            logger.exception(f"Error during OpenAI streaming: {e}")
-            yield f"data: {orjson.dumps({'error': {'message': 'Streaming error occurred.', 'type': 'server_error', 'param': None, 'code': None}}).decode('utf-8')}\n\n"
+            logger.exception(f"Error during streaming: {e}")
+            yield f"data: {orjson.dumps({'error': {'message': f'Streaming error occurred: {e}', 'type': 'server_error', 'param': None, 'code': None}}).decode('utf-8')}\n\n"
             return
 
         if all_outputs:
@@ -1305,6 +1305,7 @@ def _create_real_streaming_response(
                 logger.warning(f"Failed to process media in OpenAI stream: {exc}")
 
         for image_url in image_results:
+            storage_output += f"\n\n{image_url}"
             yield make_chunk(
                 {
                     "delta": {"content": f"\n\n{image_url}"},
@@ -1313,6 +1314,7 @@ def _create_real_streaming_response(
             )
 
         for media_md in media_results:
+            storage_output += f"\n\n{media_md}"
             yield make_chunk(
                 {
                     "delta": {"content": f"\n\n{media_md}"},
@@ -1596,11 +1598,15 @@ def _create_responses_real_streaming_response(
                             },
                         )
 
-        except Exception:
-            logger.exception("Responses streaming error")
+        except Exception as e:
+            logger.exception(f"Error during streaming: {e}")
             yield make_event(
                 "error",
-                {**base_event, "type": "error", "error": {"message": "Streaming error."}},
+                {
+                    **base_event,
+                    "type": "error",
+                    "error": {"message": f"Streaming error occurred: {e}"},
+                },
             )
             return
 
@@ -1766,9 +1772,10 @@ def _create_responses_real_streaming_response(
                     size=f"{w}x{h}" if w and h else None,
                 )
 
-                image_url = f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
+                img_link = f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
+                image_url_with_newline = f"\n\n{img_link}"
                 final_response_contents.append(
-                    ResponseOutputText(type="output_text", text=image_url)
+                    ResponseOutputText(type="output_text", text=image_url_with_newline)
                 )
 
                 yield make_event(
@@ -1791,7 +1798,7 @@ def _create_responses_real_streaming_response(
                 )
                 current_index += 1
                 image_items.append(img_item)
-                storage_output += f"\n\n{image_url}"
+                storage_output += image_url_with_newline
             except Exception as e:
                 logger.warning(f"Image processing failed in stream: {e}")
 
@@ -1841,10 +1848,11 @@ def _create_responses_real_streaming_response(
                 media_md = "\n\n".join(md_parts)
 
                 if media_md:
+                    media_md_with_newline = f"\n\n{media_md}"
                     final_response_contents.append(
-                        ResponseOutputText(type="output_text", text=media_md)
+                        ResponseOutputText(type="output_text", text=media_md_with_newline)
                     )
-                    storage_output += f"\n\n{media_md}"
+                    storage_output += media_md_with_newline
             except Exception:
                 logger.warning("Media processing failed in stream")
 
@@ -2329,7 +2337,7 @@ async def create_response(
 
     if image_markdown:
         storage_output += image_markdown
-        contents.append(ResponseOutputText(type="output_text", text=image_markdown.strip()))
+        contents.append(ResponseOutputText(type="output_text", text=image_markdown))
 
     media_items: list[GeneratedVideo | GeneratedMedia] = (resp_or_stream.videos or []) + (
         resp_or_stream.media or []
@@ -2386,7 +2394,7 @@ async def create_response(
 
     if media_markdown:
         storage_output += media_markdown
-        contents.append(ResponseOutputText(type="output_text", text=media_markdown.strip()))
+        contents.append(ResponseOutputText(type="output_text", text=media_markdown))
 
     p_tok, c_tok, t_tok, r_tok = _calculate_usage(messages, assistant_text, tool_calls, thoughts)
     usage = ResponseUsage(

@@ -43,7 +43,6 @@ def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
 
     text = normalize_llm_text(text)
     text = unescape_text(text)
-
     text = remove_tool_call_blocks(text)
 
     if fuzzy:
