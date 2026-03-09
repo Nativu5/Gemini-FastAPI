@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import io
@@ -137,8 +138,11 @@ async def _media_to_local_file(
     """Persist media and return dict mapping type to (filename, hash)"""
     try:
         saved_paths = await media.save(path=str(temp_dir))
+        if not saved_paths:
+            logger.warning("No files saved from media object.")
+            return {}
     except Exception as e:
-        logger.warning(f"Failed to save media: {e}", exc_info=True)
+        logger.error(f"Failed to save media: {e}")
         return {}
 
     default_extensions = {
@@ -224,10 +228,12 @@ def _create_responses_standard_payload(
     usage: ResponseUsage,
     request: ResponseCreateRequest,
     full_thoughts: str | None = None,
+    message_id: str | None = None,
+    reason_id: str | None = None,
 ) -> ResponseCreateResponse:
     """Unified factory for building ResponseCreateResponse objects."""
-    message_id = f"msg_{uuid.uuid4().hex[:24]}"
-    reason_id = f"rs_{uuid.uuid4().hex[:24]}"
+    message_id = message_id or f"msg_{uuid.uuid4().hex[:24]}"
+    reason_id = reason_id or f"rs_{uuid.uuid4().hex[:24]}"
     now_ts = int(datetime.now(tz=UTC).timestamp())
 
     output_items: list[Any] = []
@@ -241,15 +247,16 @@ def _create_responses_standard_payload(
             )
         )
 
-    output_items.append(
-        ResponseOutputMessage(
-            id=message_id,
-            type="message",
-            status="completed",
-            role="assistant",
-            content=response_contents,
+    if response_contents or not (detected_tool_calls or image_call_items):
+        output_items.append(
+            ResponseOutputMessage(
+                id=message_id,
+                type="message",
+                status="completed",
+                role="assistant",
+                content=response_contents,
+            )
         )
-    )
 
     if detected_tool_calls:
         output_items.extend(
@@ -1009,7 +1016,7 @@ async def _send_with_split(
                 return session.send_message_stream(text, files=files)
             return await session.send_message(text, files=files)
         except Exception as e:
-            logger.exception(f"Error sending message to Gemini: {e}")
+            logger.error(f"Error sending message to Gemini: {e}")
             raise
 
     logger.info(
@@ -1031,7 +1038,7 @@ async def _send_with_split(
             return session.send_message_stream(instruction, files=final_files)
         return await session.send_message(instruction, files=final_files)
     except Exception as e:
-        logger.exception(f"Error sending large text as file to Gemini: {e}")
+        logger.error(f"Error sending large text as file to Gemini: {e}")
         raise
 
 
@@ -1121,6 +1128,29 @@ class StreamingOutputFilter:
         return strip_system_hints(res)
 
 
+# --- Media Processing Helpers ---
+
+
+async def _process_image_item(image: Image):
+    """Process an image item by converting it to base64 and returning a standard result tuple."""
+    try:
+        media_store = get_media_store_dir()
+        return "image", image, await _image_to_base64(image, media_store)
+    except Exception as exc:
+        logger.warning(f"Background image processing failed: {exc}")
+        return None
+
+
+async def _process_media_item(media_item: GeneratedVideo | GeneratedMedia):
+    """Process a media item by saving it to a local file and returning a standard result tuple."""
+    try:
+        media_store = get_media_store_dir()
+        return "media", media_item, await _media_to_local_file(media_item, media_store)
+    except Exception as exc:
+        logger.warning(f"Background media processing failed: {exc}")
+        return None
+
+
 # --- Response Builders & Streaming ---
 
 
@@ -1143,10 +1173,15 @@ def _create_real_streaming_response(
     """
 
     async def generate_stream():
-        full_thoughts, full_text = "", ""
+        full_text = ""
+        full_thoughts = ""
         has_started = False
         all_outputs: list[ModelOutput] = []
         suppressor = StreamingOutputFilter()
+
+        media_tasks = []
+        seen_media_urls = set()
+        seen_image_urls = set()
 
         async def _make_async_gen(item: ModelOutput) -> AsyncGenerator[ModelOutput]:
             yield item
@@ -1187,8 +1222,20 @@ def _create_real_streaming_response(
                         yield make_chunk(
                             {"delta": {"content": visible_delta}, "finish_reason": None}
                         )
+
+                for img in chunk.images or []:
+                    if img.url and img.url not in seen_image_urls:
+                        seen_image_urls.add(img.url)
+                        media_tasks.append(asyncio.create_task(_process_image_item(img)))
+
+                m_list = (chunk.videos or []) + (chunk.media or [])
+                for m in m_list:
+                    p_url = getattr(m, "url", None) or getattr(m, "mp3_url", None)
+                    if p_url and p_url not in seen_media_urls:
+                        seen_media_urls.add(p_url)
+                        media_tasks.append(asyncio.create_task(_process_media_item(m)))
         except Exception as e:
-            logger.exception(f"Error during streaming: {e}")
+            logger.error(f"Error during streaming: {e}")
             yield f"data: {orjson.dumps({'error': {'message': f'Streaming error occurred: {e}', 'type': 'server_error', 'param': None, 'code': None}}).decode('utf-8')}\n\n"
             return
 
@@ -1202,125 +1249,93 @@ def _create_real_streaming_response(
         if remaining_text := suppressor.flush():
             yield make_chunk({"delta": {"content": remaining_text}, "finish_reason": None})
 
-        _thoughts, assistant_text, storage_output, detected_tool_calls = _process_llm_output(
+        _, _, storage_output, detected_tool_calls = _process_llm_output(
             full_thoughts, full_text, structured_requirement
         )
 
-        image_map = {}
-        media_items = []
-        media_url_to_idx = {}
+        seen_hashes = {}
+        seen_media_hashes = {}
+        media_store = get_media_store_dir()
 
-        for out in all_outputs:
-            for img in out.images or []:
-                if img.url:
-                    image_map[img.url] = img
+        if media_tasks:
+            logger.debug(f"Waiting for {len(media_tasks)} background media tasks with heartbeat...")
+            while media_tasks:
+                done, pending = await asyncio.wait(
+                    media_tasks, timeout=5.0, return_when=asyncio.FIRST_COMPLETED
+                )
+                media_tasks = list(pending)
 
-            m_list = (out.videos or []) + (out.media or [])
-            for m in m_list:
-                v_url = getattr(m, "url", None)
-                a_url = getattr(m, "mp3_url", None)
-                if not v_url and not a_url:
+                if not done:
+                    yield ": ping\n\n"
                     continue
 
-                idx = (media_url_to_idx.get(v_url) if v_url else None) or (
-                    media_url_to_idx.get(a_url) if a_url else None
-                )
-
-                if idx is not None:
-                    media_items[idx] = m
-                else:
-                    idx = len(media_items)
-                    media_items.append(m)
-
-                if v_url:
-                    media_url_to_idx[v_url] = idx
-                if a_url:
-                    media_url_to_idx[a_url] = idx
-
-        images = list(image_map.values())
-        image_results = []
-        seen_hashes = {}
-        for image in images:
-            try:
-                media_store = get_media_store_dir()
-                _, _, _, fname, fhash = await _image_to_base64(image, media_store)
-                if fhash in seen_hashes:
-                    (media_store / fname).unlink(missing_ok=True)
-                    fname = seen_hashes[fhash]
-                else:
-                    seen_hashes[fhash] = fname
-                img_url = f"{base_url}media/{fname}?token={get_media_token(fname)}"
-                title = getattr(image, "title", "Image")
-                image_results.append(f"![{title}]({img_url})")
-            except Exception as exc:
-                logger.warning(f"Failed to process image in OpenAI stream: {exc}")
-
-        media_results = []
-        seen_media_hashes = {}
-        last_thumb_url = None
-        for media_item in media_items:
-            try:
-                media_store = get_media_store_dir()
-                m_dict = await _media_to_local_file(media_item, media_store)
-
-                m_urls = {}
-                for mtype, (random_name, fhash) in m_dict.items():
-                    if fhash in seen_media_hashes:
-                        existing_name = seen_media_hashes[fhash]
-                        if random_name != existing_name:
-                            (media_store / random_name).unlink(missing_ok=True)
-                        m_urls[mtype] = (
-                            f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
-                        )
+                for task in done:
+                    res = task.result()
+                    if not res:
                         continue
-                    seen_media_hashes[fhash] = random_name
-                    m_urls[mtype] = (
-                        f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
-                    )
 
-                title = getattr(media_item, "title", "Media")
-                video_url = m_urls.get("video")
-                audio_url = m_urls.get("audio")
-                item_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-                if item_thumb:
-                    last_thumb_url = item_thumb
+                    rtype, original_item, media_data = res
+                    if rtype == "image":
+                        _, _, _, fname, fhash = media_data
+                        if fhash in seen_hashes:
+                            (media_store / fname).unlink(missing_ok=True)
+                            fname = seen_hashes[fhash]
+                        else:
+                            seen_hashes[fhash] = fname
 
-                md_parts = []
-                if video_url:
-                    md_parts.append(
-                        f"[![{title}]({last_thumb_url})]({video_url})"
-                        if last_thumb_url
-                        else f"[{title}]({video_url})"
-                    )
+                        img_url = f"{base_url}media/{fname}?token={get_media_token(fname)}"
+                        title = getattr(original_item, "title", "Image")
+                        md = f"![{title}]({img_url})"
+                        storage_output += f"\n\n{md}"
+                        yield make_chunk({"delta": {"content": f"\n\n{md}"}, "finish_reason": None})
 
-                if audio_url:
-                    md_parts.append(
-                        f"[![{title} - Audio]({last_thumb_url})]({audio_url})"
-                        if last_thumb_url
-                        else f"[{title} - Audio]({audio_url})"
-                    )
-                if md_parts:
-                    media_results.append("\n\n".join(md_parts))
-            except Exception as exc:
-                logger.warning(f"Failed to process media in OpenAI stream: {exc}")
+                    elif rtype == "media":
+                        m_dict = media_data
+                        if not m_dict:
+                            continue
 
-        for image_url in image_results:
-            storage_output += f"\n\n{image_url}"
-            yield make_chunk(
-                {
-                    "delta": {"content": f"\n\n{image_url}"},
-                    "finish_reason": None,
-                }
-            )
+                        m_urls = {}
+                        for mtype, (random_name, fhash) in m_dict.items():
+                            if fhash in seen_media_hashes:
+                                existing_name = seen_media_hashes[fhash]
+                                if random_name != existing_name:
+                                    (media_store / random_name).unlink(missing_ok=True)
+                                m_urls[mtype] = (
+                                    f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
+                                )
+                            else:
+                                seen_media_hashes[fhash] = random_name
+                                m_urls[mtype] = (
+                                    f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
+                                )
 
-        for media_md in media_results:
-            storage_output += f"\n\n{media_md}"
-            yield make_chunk(
-                {
-                    "delta": {"content": f"\n\n{media_md}"},
-                    "finish_reason": None,
-                }
-            )
+                        title = getattr(original_item, "title", "Media")
+                        video_url = m_urls.get("video")
+                        audio_url = m_urls.get("audio")
+                        current_thumb = m_urls.get("video_thumbnail") or m_urls.get(
+                            "audio_thumbnail"
+                        )
+
+                        md_parts = []
+                        if video_url:
+                            md_parts.append(
+                                f"[![{title}]({current_thumb})]({video_url})"
+                                if current_thumb
+                                else f"[{title}]({video_url})"
+                            )
+                        if audio_url:
+                            md_parts.append(
+                                f"[![{title} - Audio]({current_thumb})]({audio_url})"
+                                if current_thumb
+                                else f"[{title} - Audio]({audio_url})"
+                            )
+
+                        if md_parts:
+                            md = "\n\n".join(md_parts)
+                            storage_output += f"\n\n{md}"
+                            yield make_chunk(
+                                {"delta": {"content": f"\n\n{md}"}, "finish_reason": None}
+                            )
 
         if detected_tool_calls:
             for idx, call in enumerate(detected_tool_calls):
@@ -1341,7 +1356,7 @@ def _create_real_streaming_response(
                 )
 
         p_tok, c_tok, t_tok, r_tok = _calculate_usage(
-            messages, assistant_text, detected_tool_calls, full_thoughts
+            messages, storage_output, detected_tool_calls, full_thoughts
         )
         usage = CompletionUsage(
             prompt_tokens=p_tok,
@@ -1381,7 +1396,6 @@ def _create_responses_real_streaming_response(
     client_wrapper: GeminiClientWrapper,
     session: ChatSession,
     request: ResponseCreateRequest,
-    media_store: Path,
     base_url: str,
     structured_requirement: StructuredOutputRequirement | None = None,
 ) -> StreamingResponse:
@@ -1442,14 +1456,21 @@ def _create_responses_real_streaming_response(
             },
         )
 
-        full_thoughts, full_text = "", ""
+        full_text = ""
+        full_thoughts = ""
+        media_tasks = []
+        seen_media_urls = set()
+        seen_image_urls = set()
+
         all_outputs: list[ModelOutput] = []
 
         thought_item_id = f"rs_{uuid.uuid4().hex[:24]}"
         message_item_id = f"msg_{uuid.uuid4().hex[:24]}"
 
         thought_open, message_open = False, False
-        current_index = 0
+        next_output_index = 0
+        thought_index = 0
+        message_index = 0
         suppressor = StreamingOutputFilter()
 
         try:
@@ -1467,12 +1488,14 @@ def _create_responses_real_streaming_response(
 
                 if chunk.thoughts_delta:
                     if not thought_open:
+                        thought_index = next_output_index
+                        next_output_index += 1
                         yield make_event(
                             "response.output_item.added",
                             {
                                 **base_event,
                                 "type": "response.output_item.added",
-                                "output_index": current_index,
+                                "output_index": thought_index,
                                 "item": ResponseReasoningItem(
                                     id=thought_item_id,
                                     type="reasoning",
@@ -1488,7 +1511,7 @@ def _create_responses_real_streaming_response(
                                 **base_event,
                                 "type": "response.reasoning_summary_part.added",
                                 "item_id": thought_item_id,
-                                "output_index": current_index,
+                                "output_index": thought_index,
                                 "summary_index": 0,
                                 "part": SummaryTextContent(text="").model_dump(mode="json"),
                             },
@@ -1502,7 +1525,7 @@ def _create_responses_real_streaming_response(
                             **base_event,
                             "type": "response.reasoning_summary_text.delta",
                             "item_id": thought_item_id,
-                            "output_index": current_index,
+                            "output_index": thought_index,
                             "summary_index": 0,
                             "delta": chunk.thoughts_delta,
                         },
@@ -1516,7 +1539,7 @@ def _create_responses_real_streaming_response(
                                 **base_event,
                                 "type": "response.reasoning_summary_text.done",
                                 "item_id": thought_item_id,
-                                "output_index": current_index,
+                                "output_index": thought_index,
                                 "summary_index": 0,
                                 "text": full_thoughts,
                             },
@@ -1527,7 +1550,7 @@ def _create_responses_real_streaming_response(
                                 **base_event,
                                 "type": "response.reasoning_summary_part.done",
                                 "item_id": thought_item_id,
-                                "output_index": current_index,
+                                "output_index": thought_index,
                                 "summary_index": 0,
                                 "part": SummaryTextContent(text=full_thoughts).model_dump(
                                     mode="json"
@@ -1539,7 +1562,7 @@ def _create_responses_real_streaming_response(
                             {
                                 **base_event,
                                 "type": "response.output_item.done",
-                                "output_index": current_index,
+                                "output_index": thought_index,
                                 "item": ResponseReasoningItem(
                                     id=thought_item_id,
                                     type="reasoning",
@@ -1548,16 +1571,17 @@ def _create_responses_real_streaming_response(
                                 ).model_dump(mode="json"),
                             },
                         )
-                        current_index += 1
                         thought_open = False
 
                     if not message_open:
+                        message_index = next_output_index
+                        next_output_index += 1
                         yield make_event(
                             "response.output_item.added",
                             {
                                 **base_event,
                                 "type": "response.output_item.added",
-                                "output_index": current_index,
+                                "output_index": message_index,
                                 "item": ResponseOutputMessage(
                                     id=message_item_id,
                                     type="message",
@@ -1574,7 +1598,7 @@ def _create_responses_real_streaming_response(
                                 **base_event,
                                 "type": "response.content_part.added",
                                 "item_id": message_item_id,
-                                "output_index": current_index,
+                                "output_index": message_index,
                                 "content_index": 0,
                                 "part": ResponseOutputText(type="output_text", text="").model_dump(
                                     mode="json"
@@ -1591,15 +1615,27 @@ def _create_responses_real_streaming_response(
                                 **base_event,
                                 "type": "response.output_text.delta",
                                 "item_id": message_item_id,
-                                "output_index": current_index,
+                                "output_index": message_index,
                                 "content_index": 0,
                                 "delta": visible,
                                 "logprobs": [],
                             },
                         )
 
+                for img in chunk.images or []:
+                    if img.url and img.url not in seen_image_urls:
+                        seen_image_urls.add(img.url)
+                        media_tasks.append(asyncio.create_task(_process_image_item(img)))
+
+                m_list = (chunk.videos or []) + (chunk.media or [])
+                for m in m_list:
+                    p_url = getattr(m, "url", None) or getattr(m, "mp3_url", None)
+                    if p_url and p_url not in seen_media_urls:
+                        seen_media_urls.add(p_url)
+                        media_tasks.append(asyncio.create_task(_process_media_item(m)))
+
         except Exception as e:
-            logger.exception(f"Error during streaming: {e}")
+            logger.error(f"Error during streaming: {e}")
             yield make_event(
                 "error",
                 {
@@ -1625,7 +1661,7 @@ def _create_responses_real_streaming_response(
                     **base_event,
                     "type": "response.output_text.delta",
                     "item_id": message_item_id,
-                    "output_index": current_index,
+                    "output_index": message_index,
                     "content_index": 0,
                     "delta": remaining,
                     "logprobs": [],
@@ -1639,7 +1675,7 @@ def _create_responses_real_streaming_response(
                     **base_event,
                     "type": "response.reasoning_summary_text.done",
                     "item_id": thought_item_id,
-                    "output_index": current_index,
+                    "output_index": thought_index,
                     "summary_index": 0,
                     "text": full_thoughts,
                 },
@@ -1650,7 +1686,7 @@ def _create_responses_real_streaming_response(
                     **base_event,
                     "type": "response.reasoning_summary_part.done",
                     "item_id": thought_item_id,
-                    "output_index": current_index,
+                    "output_index": thought_index,
                     "summary_index": 0,
                     "part": SummaryTextContent(text=full_thoughts).model_dump(mode="json"),
                 },
@@ -1660,7 +1696,7 @@ def _create_responses_real_streaming_response(
                 {
                     **base_event,
                     "type": "response.output_item.done",
-                    "output_index": current_index,
+                    "output_index": thought_index,
                     "item": ResponseReasoningItem(
                         id=thought_item_id,
                         type="reasoning",
@@ -1669,20 +1705,239 @@ def _create_responses_real_streaming_response(
                     ).model_dump(mode="json"),
                 },
             )
-            current_index += 1
 
-        _thoughts, assistant_text, storage_output, detected_tool_calls = _process_llm_output(
+        _, assistant_text, storage_output, detected_tool_calls = _process_llm_output(
             full_thoughts, full_text, structured_requirement
         )
 
+        image_items = []
+        seen_hashes = {}
+        seen_media_hashes = {}
+        media_store = get_media_store_dir()
+
+        if media_tasks:
+            logger.debug(
+                f"Waiting for {len(media_tasks)} background media tasks in Responses with heartbeat..."
+            )
+            while media_tasks:
+                done, pending = await asyncio.wait(
+                    media_tasks, timeout=5.0, return_when=asyncio.FIRST_COMPLETED
+                )
+                media_tasks = list(pending)
+
+                if not done:
+                    yield ": ping\n\n"
+                    continue
+
+                for task in done:
+                    res = task.result()
+                    if not res:
+                        continue
+
+                    rtype, original_item, media_data = res
+                    if rtype == "image":
+                        b64, w, h, fname, fhash = media_data
+                        if fhash in seen_hashes:
+                            (media_store / fname).unlink(missing_ok=True)
+                            b64, w, h, fname = seen_hashes[fhash]
+                        else:
+                            seen_hashes[fhash] = (b64, w, h, fname)
+
+                        parts = fname.rsplit(".", 1)
+                        img_id = parts[0]
+                        fmt = parts[1] if len(parts) > 1 else "png"
+
+                        img_item = ImageGenerationCall(
+                            id=img_id,
+                            result=b64,
+                            output_format=fmt,
+                            size=f"{w}x{h}" if w and h else None,
+                        )
+
+                        img_link = (
+                            f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
+                        )
+                        md_to_add = f"\n\n{img_link}"
+
+                        img_index = next_output_index
+                        next_output_index += 1
+                        yield make_event(
+                            "response.output_item.added",
+                            {
+                                **base_event,
+                                "type": "response.output_item.added",
+                                "output_index": img_index,
+                                "item": img_item.model_dump(mode="json"),
+                            },
+                        )
+                        yield make_event(
+                            "response.output_item.done",
+                            {
+                                **base_event,
+                                "type": "response.output_item.done",
+                                "output_index": img_index,
+                                "item": img_item.model_dump(mode="json"),
+                            },
+                        )
+
+                        if not message_open:
+                            message_index = next_output_index
+                            next_output_index += 1
+                            yield make_event(
+                                "response.output_item.added",
+                                {
+                                    **base_event,
+                                    "type": "response.output_item.added",
+                                    "output_index": message_index,
+                                    "item": ResponseOutputMessage(
+                                        id=message_item_id,
+                                        type="message",
+                                        status="in_progress",
+                                        role="assistant",
+                                        content=[],
+                                    ).model_dump(mode="json"),
+                                },
+                            )
+                            yield make_event(
+                                "response.content_part.added",
+                                {
+                                    **base_event,
+                                    "type": "response.content_part.added",
+                                    "item_id": message_item_id,
+                                    "output_index": message_index,
+                                    "content_index": 0,
+                                    "part": ResponseOutputText(
+                                        type="output_text", text=""
+                                    ).model_dump(mode="json"),
+                                },
+                            )
+                            message_open = True
+
+                        yield make_event(
+                            "response.output_text.delta",
+                            {
+                                **base_event,
+                                "type": "response.output_text.delta",
+                                "item_id": message_item_id,
+                                "output_index": message_index,
+                                "content_index": 0,
+                                "delta": md_to_add,
+                                "logprobs": [],
+                            },
+                        )
+                        assistant_text += md_to_add
+                        storage_output += md_to_add
+                        image_items.append(img_item)
+
+                    elif rtype == "media":
+                        m_dict = media_data
+                        if not m_dict:
+                            continue
+
+                        m_urls = {}
+                        for mtype, (random_name, fhash) in m_dict.items():
+                            if fhash in seen_media_hashes:
+                                existing_name = seen_media_hashes[fhash]
+                                if random_name != existing_name:
+                                    (media_store / random_name).unlink(missing_ok=True)
+                                m_urls[mtype] = (
+                                    f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
+                                )
+                            else:
+                                seen_media_hashes[fhash] = random_name
+                                m_urls[mtype] = (
+                                    f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
+                                )
+
+                        title = getattr(original_item, "title", "Media")
+                        video_url = m_urls.get("video")
+                        audio_url = m_urls.get("audio")
+                        current_thumb = m_urls.get("video_thumbnail") or m_urls.get(
+                            "audio_thumbnail"
+                        )
+
+                        md_parts = []
+                        if video_url:
+                            md_parts.append(
+                                f"[![{title}]({current_thumb})]({video_url})"
+                                if current_thumb
+                                else f"[{title}]({video_url})"
+                            )
+                        if audio_url:
+                            md_parts.append(
+                                f"[![{title} - Audio]({current_thumb})]({audio_url})"
+                                if current_thumb
+                                else f"[{title} - Audio]({audio_url})"
+                            )
+
+                        if md_parts:
+                            media_md = "\n\n".join(md_parts)
+                            md_to_add = f"\n\n{media_md}"
+
+                            if not message_open:
+                                message_index = next_output_index
+                                next_output_index += 1
+                                yield make_event(
+                                    "response.output_item.added",
+                                    {
+                                        **base_event,
+                                        "type": "response.output_item.added",
+                                        "output_index": message_index,
+                                        "item": ResponseOutputMessage(
+                                            id=message_item_id,
+                                            type="message",
+                                            status="in_progress",
+                                            role="assistant",
+                                            content=[],
+                                        ).model_dump(mode="json"),
+                                    },
+                                )
+                                yield make_event(
+                                    "response.content_part.added",
+                                    {
+                                        **base_event,
+                                        "type": "response.content_part.added",
+                                        "item_id": message_item_id,
+                                        "output_index": message_index,
+                                        "content_index": 0,
+                                        "part": ResponseOutputText(
+                                            type="output_text", text=""
+                                        ).model_dump(mode="json"),
+                                    },
+                                )
+                                message_open = True
+
+                            yield make_event(
+                                "response.output_text.delta",
+                                {
+                                    **base_event,
+                                    "type": "response.output_text.delta",
+                                    "item_id": message_item_id,
+                                    "output_index": message_index,
+                                    "content_index": 0,
+                                    "delta": md_to_add,
+                                    "logprobs": [],
+                                },
+                            )
+                            assistant_text += md_to_add
+                            storage_output += md_to_add
+
+        final_response_contents: list[ResponseOutputContent] = []
         if message_open:
+            if assistant_text:
+                final_response_contents = [
+                    ResponseOutputText(type="output_text", text=assistant_text)
+                ]
+            else:
+                final_response_contents = [ResponseOutputText(type="output_text", text="")]
+
             yield make_event(
                 "response.output_text.done",
                 {
                     **base_event,
                     "type": "response.output_text.done",
                     "item_id": message_item_id,
-                    "output_index": current_index,
+                    "output_index": message_index,
                     "content_index": 0,
                 },
             )
@@ -1692,171 +1947,33 @@ def _create_responses_real_streaming_response(
                     **base_event,
                     "type": "response.content_part.done",
                     "item_id": message_item_id,
-                    "output_index": current_index,
+                    "output_index": message_index,
                     "content_index": 0,
                     "part": ResponseOutputText(type="output_text", text=assistant_text).model_dump(
                         mode="json"
                     ),
                 },
             )
+
             yield make_event(
                 "response.output_item.done",
                 {
                     **base_event,
                     "type": "response.output_item.done",
-                    "output_index": current_index,
+                    "output_index": message_index,
                     "item": ResponseOutputMessage(
                         id=message_item_id,
                         type="message",
                         status="completed",
                         role="assistant",
-                        content=[ResponseOutputText(type="output_text", text=assistant_text)],
+                        content=final_response_contents,
                     ).model_dump(mode="json"),
                 },
             )
-            current_index += 1
-
-        image_items = []
-        final_response_contents = []
-        seen_hashes = {}
-
-        image_map = {}
-        media_items = []
-        media_url_to_idx = {}
-
-        for out in all_outputs:
-            for img in out.images or []:
-                if img.url:
-                    image_map[img.url] = img
-
-            m_list = (out.videos or []) + (out.media or [])
-            for m in m_list:
-                v_url = getattr(m, "url", None)
-                a_url = getattr(m, "mp3_url", None)
-                if not v_url and not a_url:
-                    continue
-
-                idx = (media_url_to_idx.get(v_url) if v_url else None) or (
-                    media_url_to_idx.get(a_url) if a_url else None
-                )
-
-                if idx is not None:
-                    media_items[idx] = m
-                else:
-                    idx = len(media_items)
-                    media_items.append(m)
-
-                if v_url:
-                    media_url_to_idx[v_url] = idx
-                if a_url:
-                    media_url_to_idx[a_url] = idx
-
-        images = list(image_map.values())
-        for image in images:
-            try:
-                b64, w, h, fname, fhash = await _image_to_base64(image, media_store)
-                if fhash in seen_hashes:
-                    (media_store / fname).unlink(missing_ok=True)
-                    b64, w, h, fname = seen_hashes[fhash]
-                else:
-                    seen_hashes[fhash] = (b64, w, h, fname)
-
-                parts = fname.rsplit(".", 1)
-                img_id = parts[0]
-                fmt = parts[1] if len(parts) > 1 else "png"
-
-                img_item = ImageGenerationCall(
-                    id=img_id,
-                    result=b64,
-                    output_format=fmt,
-                    size=f"{w}x{h}" if w and h else None,
-                )
-
-                img_link = f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
-                image_url_with_newline = f"\n\n{img_link}"
-                final_response_contents.append(
-                    ResponseOutputText(type="output_text", text=image_url_with_newline)
-                )
-
-                yield make_event(
-                    "response.output_item.added",
-                    {
-                        **base_event,
-                        "type": "response.output_item.added",
-                        "output_index": current_index,
-                        "item": img_item.model_dump(mode="json"),
-                    },
-                )
-                yield make_event(
-                    "response.output_item.done",
-                    {
-                        **base_event,
-                        "type": "response.output_item.done",
-                        "output_index": current_index,
-                        "item": img_item.model_dump(mode="json"),
-                    },
-                )
-                current_index += 1
-                image_items.append(img_item)
-                storage_output += image_url_with_newline
-            except Exception as e:
-                logger.warning(f"Image processing failed in stream: {e}")
-
-        seen_media_hashes = {}
-        last_thumb_url = None
-        for media_item in media_items:
-            try:
-                m_dict = await _media_to_local_file(media_item, media_store)
-
-                m_urls = {}
-                for mtype, (random_name, fhash) in m_dict.items():
-                    if fhash in seen_media_hashes:
-                        existing_name = seen_media_hashes[fhash]
-                        if random_name != existing_name:
-                            (media_store / random_name).unlink(missing_ok=True)
-                        m_urls[mtype] = (
-                            f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
-                        )
-                        continue
-                    seen_media_hashes[fhash] = random_name
-                    m_urls[mtype] = (
-                        f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
-                    )
-
-                title = getattr(media_item, "title", "Media")
-                video_url = m_urls.get("video")
-                audio_url = m_urls.get("audio")
-                item_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-                if item_thumb:
-                    last_thumb_url = item_thumb
-
-                md_parts = []
-                if video_url:
-                    md_parts.append(
-                        f"[![{title}]({last_thumb_url})]({video_url})"
-                        if last_thumb_url
-                        else f"[{title}]({video_url})"
-                    )
-
-                if audio_url:
-                    md_parts.append(
-                        f"[![{title} - Audio]({last_thumb_url})]({audio_url})"
-                        if last_thumb_url
-                        else f"[{title} - Audio]({audio_url})"
-                    )
-
-                media_md = "\n\n".join(md_parts)
-
-                if media_md:
-                    media_md_with_newline = f"\n\n{media_md}"
-                    final_response_contents.append(
-                        ResponseOutputText(type="output_text", text=media_md_with_newline)
-                    )
-                    storage_output += media_md_with_newline
-            except Exception:
-                logger.warning("Media processing failed in stream")
 
         for call in detected_tool_calls:
+            tc_index = next_output_index
+            next_output_index += 1
             tc_item = ResponseFunctionToolCall(
                 id=call.id,
                 call_id=call.id,
@@ -1869,7 +1986,7 @@ def _create_responses_real_streaming_response(
                 {
                     **base_event,
                     "type": "response.output_item.added",
-                    "output_index": current_index,
+                    "output_index": tc_index,
                     "item": tc_item.model_dump(mode="json"),
                 },
             )
@@ -1878,19 +1995,13 @@ def _create_responses_real_streaming_response(
                 {
                     **base_event,
                     "type": "response.output_item.done",
-                    "output_index": current_index,
+                    "output_index": tc_index,
                     "item": tc_item.model_dump(mode="json"),
                 },
             )
-            current_index += 1
-
-        if assistant_text:
-            final_response_contents.insert(
-                0, ResponseOutputText(type="output_text", text=assistant_text)
-            )
 
         p_tok, c_tok, t_tok, r_tok = _calculate_usage(
-            messages, assistant_text, detected_tool_calls, full_thoughts
+            messages, storage_output, detected_tool_calls, full_thoughts
         )
         usage = ResponseUsage(
             input_tokens=p_tok,
@@ -1908,6 +2019,8 @@ def _create_responses_real_streaming_response(
             usage,
             request,
             full_thoughts,
+            message_item_id,
+            thought_item_id,
         )
         _persist_conversation(
             db,
@@ -1949,7 +2062,6 @@ async def create_chat_completion(
     raw_request: Request,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
-    media_store: Path = Depends(get_media_store_dir),
 ):
     base_url = str(raw_request.base_url)
     pool, db = GeminiClientPool(), LMDBConversationStore()
@@ -1996,7 +2108,7 @@ async def create_chat_completion(
             session = client.start_chat(model=model)
             m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
         except Exception as e:
-            logger.exception("Error in preparing conversation")
+            logger.error(f"Error in preparing conversation: {e}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
             ) from e
@@ -2013,7 +2125,7 @@ async def create_chat_completion(
             session, m_input, files=files, stream=bool(request.stream)
         )
     except Exception as e:
-        logger.exception("Gemini API error")
+        logger.error(f"Gemini API error: {e}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     if request.stream:
@@ -2038,7 +2150,7 @@ async def create_chat_completion(
         thoughts = resp_or_stream.thoughts
         raw_clean = GeminiClientWrapper.extract_output(resp_or_stream, include_thoughts=False)
     except Exception as exc:
-        logger.exception("Gemini output parsing failed.")
+        logger.error(f"Gemini output parsing failed: {exc}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Malformed response."
         ) from exc
@@ -2048,35 +2160,51 @@ async def create_chat_completion(
     )
 
     images = resp_or_stream.images or []
-    image_markdown = ""
-    seen_hashes = {}
-    for image in images:
-        try:
-            b64, w, h, fname, fhash = await _image_to_base64(image, media_store)
-            if fhash in seen_hashes:
-                (media_store / fname).unlink(missing_ok=True)
-                b64, w, h, fname = seen_hashes[fhash]
-            else:
-                seen_hashes[fhash] = (b64, w, h, fname)
-
-            img_url = f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
-            image_markdown += f"\n\n{img_url}"
-        except Exception as exc:
-            logger.warning(f"Failed to process image in OpenAI response: {exc}")
-
-    if image_markdown:
-        visible_output += image_markdown
-        storage_output += image_markdown
-
     media_items: list[GeneratedVideo | GeneratedMedia] = (resp_or_stream.videos or []) + (
         resp_or_stream.media or []
     )
+    unique_media = []
+    seen_urls = set()
+    for m in media_items:
+        v_url = getattr(m, "url", None)
+        a_url = getattr(m, "mp3_url", None)
+        primary_url = v_url or a_url
+        if primary_url and primary_url not in seen_urls:
+            unique_media.append(m)
+            seen_urls.add(primary_url)
+
+    tasks = [_process_image_item(img) for img in images] + [
+        _process_media_item(m) for m in unique_media
+    ]
+    results = await asyncio.gather(*tasks)
+
+    image_markdown = ""
     media_markdown = ""
+    seen_hashes = {}
     seen_media_hashes = {}
-    last_thumb_url = None
-    for m_item in media_items:
-        try:
-            m_dict = await _media_to_local_file(m_item, media_store)
+    media_store = get_media_store_dir()
+
+    for res in results:
+        if not res:
+            continue
+        rtype, original_item, media_data = res
+
+        if rtype == "image":
+            _, _, _, fname, fhash = media_data
+            if fhash in seen_hashes:
+                (media_store / fname).unlink(missing_ok=True)
+                fname = seen_hashes[fhash]
+            else:
+                seen_hashes[fhash] = fname
+
+            img_url = f"{base_url}media/{fname}?token={get_media_token(fname)}"
+            title = getattr(original_item, "title", "Image")
+            image_markdown += f"\n\n![{title}]({img_url})"
+
+        elif rtype == "media":
+            m_dict = media_data
+            if not m_dict:
+                continue
 
             m_urls = {}
             for mtype, (random_name, fhash) in m_dict.items():
@@ -2087,39 +2215,37 @@ async def create_chat_completion(
                     m_urls[mtype] = (
                         f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
                     )
-                    continue
-                seen_media_hashes[fhash] = random_name
-                m_urls[mtype] = (
-                    f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
-                )
+                else:
+                    seen_media_hashes[fhash] = random_name
+                    m_urls[mtype] = (
+                        f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
+                    )
 
-            title = getattr(m_item, "title", "Media")
+            title = getattr(original_item, "title", "Media")
             video_url = m_urls.get("video")
             audio_url = m_urls.get("audio")
-            item_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-            if item_thumb:
-                last_thumb_url = item_thumb
+            current_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
 
             md_parts = []
             if video_url:
                 md_parts.append(
-                    f"[![{title}]({last_thumb_url})]({video_url})"
-                    if last_thumb_url
+                    f"[![{title}]({current_thumb})]({video_url})"
+                    if current_thumb
                     else f"[{title}]({video_url})"
                 )
-
             if audio_url:
                 md_parts.append(
-                    f"[![{title} - Audio]({last_thumb_url})]({audio_url})"
-                    if last_thumb_url
+                    f"[![{title} - Audio]({current_thumb})]({audio_url})"
+                    if current_thumb
                     else f"[{title} - Audio]({audio_url})"
                 )
 
             if md_parts:
-                m_md = "\n\n".join(md_parts)
-                media_markdown += f"\n\n{m_md}"
-        except Exception as exc:
-            logger.warning(f"Failed to process media in OpenAI response: {exc}")
+                media_markdown += f"\n\n{'\n\n'.join(md_parts)}"
+
+    if image_markdown:
+        visible_output += image_markdown
+        storage_output += image_markdown
 
     if media_markdown:
         visible_output += media_markdown
@@ -2131,7 +2257,7 @@ async def create_chat_completion(
         )
 
     p_tok, c_tok, t_tok, r_tok = _calculate_usage(
-        app_messages, visible_output, tool_calls, thoughts
+        app_messages, storage_output, tool_calls, thoughts
     )
     usage = {
         "prompt_tokens": p_tok,
@@ -2167,7 +2293,6 @@ async def create_response(
     raw_request: Request,
     api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
-    media_store: Path = Depends(get_media_store_dir),
 ):
     base_url = str(raw_request.base_url)
     base_messages = _convert_responses_to_app_messages(request.input)
@@ -2234,7 +2359,7 @@ async def create_response(
             session = client.start_chat(model=model)
             m_input, files = await GeminiClientWrapper.process_conversation(messages, tmp_dir)
         except Exception as e:
-            logger.exception("Error in preparing conversation")
+            logger.error(f"Error in preparing conversation: {e}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
             ) from e
@@ -2251,7 +2376,7 @@ async def create_response(
             session, m_input, files=files, stream=bool(request.stream)
         )
     except Exception as e:
-        logger.exception("Gemini API error")
+        logger.error(f"Gemini API error: {e}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     if request.stream:
@@ -2267,7 +2392,6 @@ async def create_response(
             client,
             session,
             request,
-            media_store,
             base_url,
             struct_req,
         )
@@ -2278,7 +2402,7 @@ async def create_response(
         thoughts = resp_or_stream.thoughts
         raw_clean = GeminiClientWrapper.extract_output(resp_or_stream, include_thoughts=False)
     except Exception as exc:
-        logger.exception("Gemini parsing failed")
+        logger.error(f"Gemini parsing failed: {exc}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Malformed response."
         ) from exc
@@ -2294,11 +2418,32 @@ async def create_response(
     ) and not images:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No images returned.")
 
+    unique_media = []
+    seen_urls = set()
+    for m in (resp_or_stream.videos or []) + (resp_or_stream.media or []):
+        p_url = getattr(m, "url", None) or getattr(m, "mp3_url", None)
+        if p_url and p_url not in seen_urls:
+            unique_media.append(m)
+            seen_urls.add(p_url)
+
+    tasks = [_process_image_item(img) for img in images] + [
+        _process_media_item(m) for m in unique_media
+    ]
+    results = await asyncio.gather(*tasks)
+
     contents, img_calls = [], []
     seen_hashes = {}
-    for img in images:
-        try:
-            b64, w, h, fname, fhash = await _image_to_base64(img, media_store)
+    seen_media_hashes = {}
+    media_markdown = ""
+    media_store = get_media_store_dir()
+
+    for res in results:
+        if not res:
+            continue
+        rtype, original_item, media_data = res
+
+        if rtype == "image":
+            b64, w, h, fname, fhash = media_data
             if fhash in seen_hashes:
                 (media_store / fname).unlink(missing_ok=True)
                 b64, w, h, fname = seen_hashes[fhash]
@@ -2307,47 +2452,17 @@ async def create_response(
 
             parts = fname.rsplit(".", 1)
             img_id = parts[0]
-            img_format = (
-                parts[1]
-                if len(parts) > 1
-                else ("png" if isinstance(img, GeneratedImage) else "jpeg")
-            )
-
+            fmt = parts[1] if len(parts) > 1 else "png"
             img_calls.append(
                 ImageGenerationCall(
-                    id=img_id,
-                    result=b64,
-                    output_format=img_format,
-                    size=f"{w}x{h}" if w and h else None,
+                    id=img_id, result=b64, output_format=fmt, size=f"{w}x{h}" if w and h else None
                 )
             )
-        except Exception as e:
-            logger.warning(f"Image error: {e}")
 
-    if assistant_text:
-        contents.append(ResponseOutputText(type="output_text", text=assistant_text))
-    if not contents:
-        contents.append(ResponseOutputText(type="output_text", text=""))
-
-    image_markdown = ""
-    for img_call in img_calls:
-        fname = f"{img_call.id}.{img_call.output_format}"
-        img_url = f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
-        image_markdown += f"\n\n{img_url}"
-
-    if image_markdown:
-        storage_output += image_markdown
-        contents.append(ResponseOutputText(type="output_text", text=image_markdown))
-
-    media_items: list[GeneratedVideo | GeneratedMedia] = (resp_or_stream.videos or []) + (
-        resp_or_stream.media or []
-    )
-    seen_media_hashes = {}
-    media_markdown = ""
-    last_thumb_url = None
-    for m_item in media_items:
-        try:
-            m_dict = await _media_to_local_file(m_item, media_store)
+        elif rtype == "media":
+            m_dict = media_data
+            if not m_dict:
+                continue
 
             m_urls = {}
             for mtype, (random_name, fhash) in m_dict.items():
@@ -2358,45 +2473,54 @@ async def create_response(
                     m_urls[mtype] = (
                         f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
                     )
-                    continue
-                seen_media_hashes[fhash] = random_name
-                m_urls[mtype] = (
-                    f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
-                )
+                else:
+                    seen_media_hashes[fhash] = random_name
+                    m_urls[mtype] = (
+                        f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
+                    )
 
-            title = getattr(m_item, "title", "Media")
+            title = getattr(original_item, "title", "Media")
             video_url = m_urls.get("video")
             audio_url = m_urls.get("audio")
-            item_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-            if item_thumb:
-                last_thumb_url = item_thumb
+            current_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
 
             md_parts = []
             if video_url:
                 md_parts.append(
-                    f"[![{title}]({last_thumb_url})]({video_url})"
-                    if last_thumb_url
+                    f"[![{title}]({current_thumb})]({video_url})"
+                    if current_thumb
                     else f"[{title}]({video_url})"
                 )
-
             if audio_url:
                 md_parts.append(
-                    f"[![{title} - Audio]({last_thumb_url})]({audio_url})"
-                    if last_thumb_url
+                    f"[![{title} - Audio]({current_thumb})]({audio_url})"
+                    if current_thumb
                     else f"[{title} - Audio]({audio_url})"
                 )
 
             if md_parts:
-                m_md = "\n\n".join(md_parts)
-                media_markdown += f"\n\n{m_md}"
-        except Exception as exc:
-            logger.warning(f"Failed to process media in OpenAI response: {exc}")
+                media_markdown += f"\n\n{'\n\n'.join(md_parts)}"
+
+    if assistant_text:
+        contents.append(ResponseOutputText(type="output_text", text=assistant_text))
+
+    image_markdown = ""
+    for ic in img_calls:
+        img_url = f"{base_url}media/{ic.id}.{ic.output_format}?token={get_media_token(f'{ic.id}.{ic.output_format}')}"
+        image_markdown += f"\n\n![{ic.id}]({img_url})"
+
+    if image_markdown:
+        storage_output += image_markdown
+        contents.append(ResponseOutputText(type="output_text", text=image_markdown))
 
     if media_markdown:
         storage_output += media_markdown
         contents.append(ResponseOutputText(type="output_text", text=media_markdown))
 
-    p_tok, c_tok, t_tok, r_tok = _calculate_usage(messages, assistant_text, tool_calls, thoughts)
+    if not contents:
+        contents.append(ResponseOutputText(type="output_text", text=""))
+
+    p_tok, c_tok, t_tok, r_tok = _calculate_usage(messages, storage_output, tool_calls, thoughts)
     usage = ResponseUsage(
         input_tokens=p_tok,
         output_tokens=c_tok,
