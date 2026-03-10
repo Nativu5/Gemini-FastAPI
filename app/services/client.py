@@ -34,13 +34,10 @@ class GeminiClientWrapper(GeminiClient):
         Inject default configuration values from global settings.
         """
         config = g_config.gemini
-        auto_close = kwargs.get("auto_close", False)
         try:
             await super().init(
                 timeout=config.timeout,
                 watchdog_timeout=config.watchdog_timeout,
-                auto_close=auto_close,
-                close_delay=config.timeout,
                 auto_refresh=config.auto_refresh,
                 refresh_interval=config.refresh_interval,
                 verbose=config.verbose,
