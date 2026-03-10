@@ -176,8 +176,8 @@ dev = [{ name = "gemini-fastapi", extras = ["dev"] }]
 
 [[package]]
 name = "gemini-webapi"
-version = "0.0.post259"
-source = { git = "https://github.com/luuquangvu/Gemini-API.git?rev=move-httpx-to-curl_cffi#9d56d7c0aaf62c725734d39acc6113547a9aab6a" }
+version = "0.0.post260"
+source = { git = "https://github.com/luuquangvu/Gemini-API.git?rev=move-httpx-to-curl_cffi#8309ca686a2d3ffd5de00bd7dba3212a3f87c5c6" }
 dependencies = [
     { name = "curl-cffi" },
     { name = "loguru" },
