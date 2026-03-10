@@ -39,9 +39,22 @@ class GeminiClientSettings(BaseModel):
     """Credential set for one Gemini client."""
 
     id: str = Field(..., description="Unique identifier for the client")
-    secure_1psid: str = Field(..., description="Gemini Secure 1PSID")
-    secure_1psidts: str = Field(..., description="Gemini Secure 1PSIDTS")
+    secure_1psid: str | None = Field(default=None, description="Gemini Secure 1PSID")
+    secure_1psidts: str | None = Field(default=None, description="Gemini Secure 1PSIDTS")
+    cookies: dict[str, str] | None = Field(
+        default=None, description="Gemini cookies as a dictionary"
+    )
     proxy: str | None = Field(default=None, description="Proxy URL for this Gemini client")
+
+    @field_validator("cookies", mode="before")
+    @classmethod
+    def _parse_cookies(cls, v: Any) -> Any:
+        if isinstance(v, str) and v.strip().startswith("{"):
+            try:
+                return orjson.loads(v)
+            except orjson.JSONDecodeError:
+                return v
+        return v
 
     @field_validator("proxy", mode="before")
     @classmethod
@@ -228,10 +241,10 @@ class Config(BaseSettings):
         )
 
 
-def extract_gemini_clients_env() -> dict[int, dict[str, str]]:
+def extract_gemini_clients_env() -> dict[int, dict[str, Any]]:
     """Extract and remove all Gemini clients related environment variables, return a mapping from index to field dict."""
     prefix = "CONFIG_GEMINI__CLIENTS__"
-    env_overrides: dict[int, dict[str, str]] = {}
+    env_overrides: dict[int, dict[str, Any]] = {}
     to_delete = []
     for k, v in os.environ.items():
         if k.startswith(prefix):
@@ -252,7 +265,7 @@ def extract_gemini_clients_env() -> dict[int, dict[str, str]]:
 
 def _merge_clients_with_env(
     base_clients: list[GeminiClientSettings] | None,
-    env_overrides: dict[int, dict[str, str]],
+    env_overrides: dict[int, dict[str, Any]],
 ):
     """Override base_clients with env_overrides, return the new clients list."""
     if not env_overrides:

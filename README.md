@@ -54,8 +54,12 @@ Edit `config/config.yaml` and provide at least one credential pair:
 gemini:
   clients:
     - id: "client-a"
-      secure_1psid: "YOUR_SECURE_1PSID_HERE"
-      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
+      secure_1psid: "YOUR_SECURE_1PSID_HERE" # Optional if 'cookies' is provided
+      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE" # Optional if 'cookies' is provided
+      # OR use a cookies dictionary:
+      # cookies:
+      #   __Secure-1PSID: "..."
+      #   __Secure-1PSIDTS: "..."
       proxy: null # Optional proxy URL (null/empty keeps direct connection)
 ```
 
@@ -179,6 +183,9 @@ export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts"
 
 # Override optional proxy settings for client 0
 export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
+
+# Override using a JSON cookies string for client 0
+export CONFIG_GEMINI__CLIENTS__0__COOKIES='{"__Secure-1PSID": "...", "__Secure-1PSIDTS": "..."}'
 
 # Override conversation storage size limit
 export CONFIG_STORAGE__MAX_SIZE=268435456  # 256 MB

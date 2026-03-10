@@ -1241,10 +1241,32 @@ def _create_real_streaming_response(
 
         if all_outputs:
             final_chunk = all_outputs[-1]
-            if final_chunk.text:
-                full_text = final_chunk.text
             if final_chunk.thoughts:
-                full_thoughts = final_chunk.thoughts
+                f_thoughts = final_chunk.thoughts
+                ft_len, ct_len = len(f_thoughts), len(full_thoughts)
+                if ft_len >= ct_len and f_thoughts.startswith(full_thoughts):
+                    if ft_len > ct_len:
+                        drift_t = f_thoughts[ct_len:]
+                        full_thoughts = f_thoughts
+                        yield make_chunk(
+                            {"delta": {"reasoning_content": drift_t}, "finish_reason": None}
+                        )
+                else:
+                    logger.debug("Significant thoughts drift detected, preferring accumulated.")
+
+            if final_chunk.text:
+                f_text = final_chunk.text
+                f_len, c_len = len(f_text), len(full_text)
+                if f_len >= c_len and f_text.startswith(full_text):
+                    if f_len > c_len:
+                        drift = f_text[c_len:]
+                        full_text = f_text
+                        if visible_drift := suppressor.process(drift):
+                            yield make_chunk(
+                                {"delta": {"content": visible_drift}, "finish_reason": None}
+                            )
+                else:
+                    logger.debug("Significant text drift detected, preferring accumulated state.")
 
         if remaining_text := suppressor.flush():
             yield make_chunk({"delta": {"content": remaining_text}, "finish_reason": None})
@@ -1648,10 +1670,116 @@ def _create_responses_real_streaming_response(
 
         if all_outputs:
             last = all_outputs[-1]
-            if last.text:
-                full_text = last.text
             if last.thoughts:
-                full_thoughts = last.thoughts
+                l_thoughts = last.thoughts
+                lt_len, ct_len = len(l_thoughts), len(full_thoughts)
+                if lt_len >= ct_len and l_thoughts.startswith(full_thoughts):
+                    if lt_len > ct_len:
+                        drift_t = l_thoughts[ct_len:]
+                        full_thoughts = l_thoughts
+                        if not thought_open:
+                            thought_index = next_output_index
+                            next_output_index += 1
+                            yield make_event(
+                                "response.output_item.added",
+                                {
+                                    **base_event,
+                                    "type": "response.output_item.added",
+                                    "output_index": thought_index,
+                                    "item": ResponseReasoningItem(
+                                        id=thought_item_id,
+                                        type="reasoning",
+                                        status="in_progress",
+                                        summary=[],
+                                    ).model_dump(mode="json"),
+                                },
+                            )
+                            yield make_event(
+                                "response.reasoning_summary_part.added",
+                                {
+                                    **base_event,
+                                    "type": "response.reasoning_summary_part.added",
+                                    "item_id": thought_item_id,
+                                    "output_index": thought_index,
+                                    "summary_index": 0,
+                                    "part": SummaryTextContent(text="").model_dump(mode="json"),
+                                },
+                            )
+                            thought_open = True
+
+                        yield make_event(
+                            "response.reasoning_summary_text.delta",
+                            {
+                                **base_event,
+                                "type": "response.reasoning_summary_text.delta",
+                                "item_id": thought_item_id,
+                                "output_index": thought_index,
+                                "summary_index": 0,
+                                "delta": drift_t,
+                            },
+                        )
+                else:
+                    logger.debug(
+                        "Significant thoughts drift detected in Responses API, preferring accumulated."
+                    )
+
+            if last.text:
+                l_text = last.text
+                l_len, c_len = len(l_text), len(full_text)
+                if l_len >= c_len and l_text.startswith(full_text):
+                    if l_len > c_len:
+                        drift = l_text[c_len:]
+                        full_text = l_text
+                        if visible := suppressor.process(drift):
+                            if not message_open:
+                                message_index = next_output_index
+                                next_output_index += 1
+                                yield make_event(
+                                    "response.output_item.added",
+                                    {
+                                        **base_event,
+                                        "type": "response.output_item.added",
+                                        "output_index": message_index,
+                                        "item": ResponseOutputMessage(
+                                            id=message_item_id,
+                                            type="message",
+                                            status="in_progress",
+                                            role="assistant",
+                                            content=[],
+                                        ).model_dump(mode="json"),
+                                    },
+                                )
+                                yield make_event(
+                                    "response.content_part.added",
+                                    {
+                                        **base_event,
+                                        "type": "response.content_part.added",
+                                        "item_id": message_item_id,
+                                        "output_index": message_index,
+                                        "content_index": 0,
+                                        "part": ResponseOutputText(
+                                            type="output_text", text=""
+                                        ).model_dump(mode="json"),
+                                    },
+                                )
+                                message_open = True
+
+                            yield make_event(
+                                "response.output_text.delta",
+                                {
+                                    **base_event,
+                                    "type": "response.output_text.delta",
+                                    "item_id": message_item_id,
+                                    "output_index": message_index,
+                                    "content_index": 0,
+                                    "delta": visible,
+                                    "logprobs": [],
+                                },
+                            )
+                else:
+                    logger.debug(
+                        "Significant text drift detected in Responses API, preferring accumulated."
+                    )
 
         remaining = suppressor.flush()
         if remaining and message_open:
