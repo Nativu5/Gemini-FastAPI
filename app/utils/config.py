@@ -53,7 +53,10 @@ class GeminiClientSettings(BaseModel):
             try:
                 return orjson.loads(v)
             except orjson.JSONDecodeError:
-                return v
+                try:
+                    return ast.literal_eval(v)
+                except (ValueError, SyntaxError):
+                    return v
         return v
 
     @field_validator("proxy", mode="before")
@@ -80,7 +83,10 @@ class GeminiModelConfig(BaseModel):
             try:
                 return orjson.loads(v)
             except orjson.JSONDecodeError:
-                return v
+                try:
+                    return ast.literal_eval(v)
+                except (ValueError, SyntaxError):
+                    return v
         return v
 
 
@@ -116,9 +122,12 @@ class GeminiConfig(BaseModel):
         if isinstance(v, str) and v.strip().startswith("["):
             try:
                 return orjson.loads(v)
-            except orjson.JSONDecodeError as e:
-                logger.warning(f"Failed to parse models JSON string: {e}")
-                return v
+            except orjson.JSONDecodeError:
+                try:
+                    return ast.literal_eval(v)
+                except (ValueError, SyntaxError) as e:
+                    logger.warning(f"Failed to parse models JSON or Python literal: {e}")
+                    return v
         return v
 
     @field_validator("models")
