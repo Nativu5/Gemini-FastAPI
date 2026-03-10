@@ -24,10 +24,7 @@ class GeminiClientPool(metaclass=Singleton):
         for c in g_config.gemini.clients:
             client = GeminiClientWrapper(
                 client_id=c.id,
-                secure_1psid=c.secure_1psid,
-                secure_1psidts=c.secure_1psidts,
-                cookies=c.cookies,
-                proxy=c.proxy,
+                **c.model_dump(exclude={"id"}),
             )
             self._clients.append(client)
             self._id_map[c.id] = client
@@ -40,13 +37,7 @@ class GeminiClientPool(metaclass=Singleton):
         for client in self._clients:
             if not client.running():
                 try:
-                    await client.init(
-                        timeout=g_config.gemini.timeout,
-                        watchdog_timeout=g_config.gemini.watchdog_timeout,
-                        auto_refresh=g_config.gemini.auto_refresh,
-                        verbose=g_config.gemini.verbose,
-                        refresh_interval=g_config.gemini.refresh_interval,
-                    )
+                    await client.init()
                 except Exception:
                     logger.exception(f"Failed to initialize client {client.id}")
 
@@ -93,13 +84,7 @@ class GeminiClientPool(metaclass=Singleton):
                 return True
 
             try:
-                await client.init(
-                    timeout=g_config.gemini.timeout,
-                    watchdog_timeout=g_config.gemini.watchdog_timeout,
-                    auto_refresh=g_config.gemini.auto_refresh,
-                    verbose=g_config.gemini.verbose,
-                    refresh_interval=g_config.gemini.refresh_interval,
-                )
+                await client.init()
                 logger.info(f"Restarted Gemini client {client.id} after it stopped.")
                 return True
             except Exception:

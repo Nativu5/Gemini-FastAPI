@@ -1,6 +1,6 @@
 import io
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import orjson
 from gemini_webapi import GeminiClient, ModelOutput
@@ -29,36 +29,21 @@ class GeminiClientWrapper(GeminiClient):
         super().__init__(**kwargs)
         self.id = client_id
 
-    async def init(  # type: ignore
-        self,
-        timeout: float = cast(float, _UNSET),
-        watchdog_timeout: float = cast(float, _UNSET),
-        auto_close: bool = False,
-        close_delay: float = cast(float, _UNSET),
-        auto_refresh: bool = cast(bool, _UNSET),
-        refresh_interval: float = cast(float, _UNSET),
-        verbose: bool = cast(bool, _UNSET),
-    ) -> None:
+    async def init(self, *args: Any, **kwargs: Any) -> None:
         """
-        Inject default configuration values.
+        Inject default configuration values from global settings.
         """
         config = g_config.gemini
-        timeout = cast(float, _resolve(timeout, config.timeout))
-        watchdog_timeout = cast(float, _resolve(watchdog_timeout, config.watchdog_timeout))
-        close_delay = timeout
-        auto_refresh = cast(bool, _resolve(auto_refresh, config.auto_refresh))
-        refresh_interval = cast(float, _resolve(refresh_interval, config.refresh_interval))
-        verbose = cast(bool, _resolve(verbose, config.verbose))
-
+        auto_close = kwargs.get("auto_close", False)
         try:
             await super().init(
-                timeout=timeout,
-                watchdog_timeout=watchdog_timeout,
+                timeout=config.timeout,
+                watchdog_timeout=config.watchdog_timeout,
                 auto_close=auto_close,
-                close_delay=close_delay,
-                auto_refresh=auto_refresh,
-                refresh_interval=refresh_interval,
-                verbose=verbose,
+                close_delay=config.timeout,
+                auto_refresh=config.auto_refresh,
+                refresh_interval=config.refresh_interval,
+                verbose=config.verbose,
             )
         except Exception:
             logger.exception(f"Failed to initialize GeminiClient {self.id}")
