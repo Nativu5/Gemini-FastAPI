@@ -19,9 +19,8 @@ cors:
 gemini:
   clients:
     - id: "example-id-1"   # Arbitrary client ID
-      secure_1psid: "YOUR_SECURE_1PSID_HERE"      # Optional: Gemini Secure 1PSID
-      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"  # Optional: Gemini Secure 1PSIDTS
-      cookies: null                               # Optional: Cookies dictionary (e.g. {__Secure-1PSID: "...", __Secure-1PSIDTS: "..."})
+      secure_1psid: "YOUR_SECURE_1PSID_HERE"      # Gemini Secure 1PSID
+      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"  # Gemini Secure 1PSIDTS
       proxy: null          # Optional proxy URL (null/empty means direct connection)
   timeout: 450             # Init timeout in seconds (Not less than 30s)
   watchdog_timeout: 90     # Watchdog timeout in seconds (Not less than 30s)

@@ -41,23 +41,7 @@ class GeminiClientSettings(BaseModel):
     id: str = Field(..., description="Unique identifier for the client")
     secure_1psid: str | None = Field(default=None, description="Gemini Secure 1PSID")
     secure_1psidts: str | None = Field(default=None, description="Gemini Secure 1PSIDTS")
-    cookies: dict[str, str] | None = Field(
-        default=None, description="Gemini cookies as a dictionary"
-    )
     proxy: str | None = Field(default=None, description="Proxy URL for this Gemini client")
-
-    @field_validator("cookies", mode="before")
-    @classmethod
-    def _parse_cookies(cls, v: Any) -> Any:
-        if isinstance(v, str) and v.strip().startswith("{"):
-            try:
-                return orjson.loads(v)
-            except orjson.JSONDecodeError:
-                try:
-                    return ast.literal_eval(v)
-                except (ValueError, SyntaxError):
-                    return v
-        return v
 
     @field_validator("proxy", mode="before")
     @classmethod
@@ -103,11 +87,11 @@ class GeminiConfig(BaseModel):
     )
     timeout: int = Field(default=450, ge=30, description="Init timeout in seconds")
     watchdog_timeout: int = Field(default=90, ge=30, description="Watchdog timeout in seconds")
-    auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini cookies")
+    auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini sessions")
     refresh_interval: int = Field(
         default=600,
         ge=60,
-        description="Interval in seconds to refresh Gemini cookies (Not less than 60s)",
+        description="Interval in seconds to refresh Gemini sessions (Not less than 60s)",
     )
     verbose: bool = Field(False, description="Enable verbose logging for Gemini API requests")
     max_chars_per_request: int = Field(

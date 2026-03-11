@@ -54,12 +54,8 @@ pip install -e .
 gemini:
   clients:
     - id: "client-a"
-      secure_1psid: "YOUR_SECURE_1PSID_HERE" # 若已提供 'cookies'，则此项可选
-      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE" # 若已提供 'cookies'，则此项可选
-      # 或者使用 Cookies 字典：
-      # cookies:
-      #   __Secure-1PSID: "..."
-      #   __Secure-1PSIDTS: "..."
+      secure_1psid: "YOUR_SECURE_1PSID_HERE"
+      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
       proxy: null # 可选代理 URL (null/空值则保持直连)
 ```
 
@@ -184,8 +180,6 @@ export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts"
 # 覆盖 Client 0 的代理设置
 export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
 
-# 通过 JSON 字符串覆盖 Client 0 的 Cookie 配置
-export CONFIG_GEMINI__CLIENTS__0__COOKIES='{"__Secure-1PSID": "...", "__Secure-1PSIDTS": "..."}'
 
 # 覆盖对话存储大小限制
 export CONFIG_STORAGE__MAX_SIZE=268435456  # 256 MB
