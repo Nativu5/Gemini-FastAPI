@@ -1079,12 +1079,16 @@ class StreamingOutputFilter:
             match = STREAM_MASTER_RE.search(self.buffer)
             if not match:
                 tail_match = STREAM_TAIL_RE.search(self.buffer)
-                keep_len = len(tail_match.group(0)) if tail_match else 0
-                yield_len = len(self.buffer) - keep_len
-                if yield_len > 0:
+                if tail_match:
+                    yield_len = len(self.buffer) - len(tail_match.group(0))
+                    if yield_len > 0:
+                        if self._is_outputting():
+                            output.append(self.buffer[:yield_len])
+                        self.buffer = self.buffer[yield_len:]
+                else:
                     if self._is_outputting():
-                        output.append(self.buffer[:yield_len])
-                    self.buffer = self.buffer[yield_len:]
+                        output.append(self.buffer)
+                    self.buffer = ""
                 break
 
             start, end = match.span()
