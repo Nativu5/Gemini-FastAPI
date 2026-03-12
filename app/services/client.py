@@ -3,14 +3,13 @@ from pathlib import Path
 from typing import Any
 
 import orjson
-from gemini_webapi import GeminiClient, ModelOutput
+from gemini_webapi import GeminiClient
 from loguru import logger
 
 from app.models import AppMessage
 from app.utils import g_config
 from app.utils.helper import (
     add_tag,
-    normalize_llm_text,
     save_file_to_tempfile,
     save_url_to_tempfile,
 )
@@ -173,15 +172,3 @@ class GeminiClientWrapper(GeminiClient):
 
         conversation.append(add_tag("assistant", "", unclose=True))
         return "\n".join(conversation), files
-
-    @staticmethod
-    def extract_output(response: ModelOutput, include_thoughts: bool = True) -> str:
-        text = ""
-        if include_thoughts and response.thoughts:
-            text += f"<think>{response.thoughts}</think>\n"
-        if response.text:
-            text += response.text
-        else:
-            text += str(response)
-
-        return normalize_llm_text(text)

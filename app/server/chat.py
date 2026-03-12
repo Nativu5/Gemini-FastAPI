@@ -72,6 +72,7 @@ from app.utils.helper import (
     estimate_tokens,
     extract_image_dimensions,
     extract_tool_calls,
+    normalize_llm_text,
     remove_tool_call_blocks,
     strip_system_hints,
     text_from_message,
@@ -1270,7 +1271,9 @@ def _create_real_streaming_response(
             yield make_chunk({"delta": {"content": remaining_text}, "finish_reason": None})
 
         _, _, storage_output, detected_tool_calls = _process_llm_output(
-            full_thoughts, full_text, structured_requirement
+            normalize_llm_text(full_thoughts or ""),
+            normalize_llm_text(full_text or ""),
+            structured_requirement,
         )
 
         seen_hashes = {}
@@ -1823,7 +1826,9 @@ def _create_responses_real_streaming_response(
             )
 
         _, assistant_text, storage_output, detected_tool_calls = _process_llm_output(
-            full_thoughts, full_text, structured_requirement
+            normalize_llm_text(full_thoughts or ""),
+            normalize_llm_text(full_text or ""),
+            structured_requirement,
         )
 
         image_items = []
@@ -2262,17 +2267,10 @@ async def create_chat_completion(
 
     assert isinstance(resp_or_stream, ModelOutput)
 
-    try:
-        thoughts = resp_or_stream.thoughts
-        raw_clean = GeminiClientWrapper.extract_output(resp_or_stream, include_thoughts=False)
-    except Exception as exc:
-        logger.error(f"Gemini output parsing failed: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Malformed response."
-        ) from exc
-
     thoughts, visible_output, storage_output, tool_calls = _process_llm_output(
-        thoughts, raw_clean, structured_requirement
+        normalize_llm_text(resp_or_stream.thoughts or ""),
+        normalize_llm_text(resp_or_stream.text or ""),
+        structured_requirement,
     )
 
     images = resp_or_stream.images or []
@@ -2412,8 +2410,8 @@ async def create_response(
 ):
     base_url = str(raw_request.base_url)
     base_messages = _convert_responses_to_app_messages(request.input)
-    struct_req = _build_structured_requirement(request.response_format)
-    extra_instr = [struct_req.instruction] if struct_req else []
+    structured_requirement = _build_structured_requirement(request.response_format)
+    extra_instr = [structured_requirement.instruction] if structured_requirement else []
 
     standard_tools, image_tools = [], []
     if request.tools:
@@ -2509,22 +2507,15 @@ async def create_response(
             session,
             request,
             base_url,
-            struct_req,
+            structured_requirement,
         )
 
     assert isinstance(resp_or_stream, ModelOutput)
 
-    try:
-        thoughts = resp_or_stream.thoughts
-        raw_clean = GeminiClientWrapper.extract_output(resp_or_stream, include_thoughts=False)
-    except Exception as exc:
-        logger.error(f"Gemini parsing failed: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Malformed response."
-        ) from exc
-
     thoughts, assistant_text, storage_output, tool_calls = _process_llm_output(
-        thoughts, raw_clean, struct_req
+        normalize_llm_text(resp_or_stream.thoughts or ""),
+        normalize_llm_text(resp_or_stream.text or ""),
+        structured_requirement,
     )
     images = resp_or_stream.images or []
     if (
