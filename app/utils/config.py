@@ -1,7 +1,7 @@
 import ast
 import os
 import sys
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import orjson
 from loguru import logger
@@ -250,7 +250,7 @@ def extract_gemini_clients_env() -> dict[int, dict[str, Any]]:
             idx = int(index_str)
             env_overrides.setdefault(idx, {})[field] = v
             to_delete.append(k)
-    # Remove these environment variables to avoid Pydantic parsing errors
+
     for k in to_delete:
         del os.environ[k]
     return env_overrides
@@ -306,9 +306,8 @@ def extract_gemini_models_env() -> dict[int, dict[str, Any]]:
         if parsed_successfully and isinstance(models_list, list):
             for idx, model_data in enumerate(models_list):
                 if isinstance(model_data, dict):
-                    env_overrides[idx] = model_data
+                    env_overrides[idx] = cast(dict[str, Any], model_data)
 
-            # Remove the environment variable to avoid Pydantic parsing errors
             del os.environ[root_key]
 
     return env_overrides
@@ -328,12 +327,10 @@ def _merge_models_with_env(
     for idx in sorted(env_overrides):
         overrides = env_overrides[idx]
         if idx < len(result_models):
-            # Update existing model: overwrite fields found in env
             model_dict = result_models[idx].model_dump()
             model_dict.update(overrides)
             result_models[idx] = GeminiModelConfig(**model_dict)
         elif idx == len(result_models):
-            # Append new models
             new_model = GeminiModelConfig(**overrides)
             result_models.append(new_model)
         else:
@@ -352,20 +349,13 @@ def initialize_config() -> Config:
         Config: Configuration object
     """
     try:
-        # First, extract and remove Gemini clients related environment variables
         env_clients_overrides = extract_gemini_clients_env()
-        # Extract and remove Gemini models related environment variables
         env_models_overrides = extract_gemini_models_env()
-
-        # Then, initialize Config with pydantic_settings
         config = Config()
 
-        # Synthesize clients
         config.gemini.clients = _merge_clients_with_env(
             config.gemini.clients, env_clients_overrides
         )
-
-        # Synthesize models
         config.gemini.models = _merge_models_with_env(config.gemini.models, env_models_overrides)
 
         return config

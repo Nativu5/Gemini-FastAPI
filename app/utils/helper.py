@@ -33,7 +33,7 @@ TOOL_WRAP_HINT = (
     "[/CallParameter]\n"
     "[/Call]\n"
     "[/ToolCalls]\n\n"
-    "CRITICAL: Do NOT mix natural language with protocol tags. Either respond naturally OR provide the protocol block alone. There is no middle ground.\n"
+    "CRITICAL: Do NOT mix natural language with protocol tags. Either respond naturally OR provide the protocol block alone. There is no middle ground."
 )
 TOOL_BLOCK_RE = re.compile(
     r"\\?\[ToolCalls\\?](.*?)\\?\[\\?/ToolCalls\\?]",

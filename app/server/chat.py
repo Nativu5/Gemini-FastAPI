@@ -73,7 +73,6 @@ from app.utils.helper import (
     extract_image_dimensions,
     extract_tool_calls,
     normalize_llm_text,
-    remove_tool_call_blocks,
     strip_system_hints,
     text_from_message,
 )
@@ -357,9 +356,7 @@ def _process_llm_output(
         logger.debug(f"Detected {len(tool_calls)} tool call(s) in model output.")
 
     visible_output = visible_output.strip()
-
-    storage_output = remove_tool_call_blocks(raw_text)
-    storage_output = storage_output.strip()
+    storage_output = visible_output
 
     if structured_requirement and visible_output:
         try:
