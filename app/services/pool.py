@@ -1,4 +1,5 @@
 import asyncio
+import random
 from collections import deque
 
 from loguru import logger
@@ -32,18 +33,20 @@ class GeminiClientPool(metaclass=Singleton):
             self._restart_locks[c.id] = asyncio.Lock()
 
     async def init(self) -> None:
-        """Initialize all clients in the pool."""
-        success_count = 0
-        for client in self._clients:
-            if not client.running():
-                try:
-                    await client.init()
-                except Exception:
-                    logger.exception(f"Failed to initialize client {client.id}")
+        """Initialize all clients in the pool with staggered start times."""
+        clients_to_init = [c for c in self._clients if not c.running()]
+        for i, client in enumerate(clients_to_init):
+            try:
+                await client.init()
+            except Exception:
+                logger.error(f"Failed to initialize client {client.id}")
 
-            if client.running():
-                success_count += 1
+            if i < len(clients_to_init) - 1:
+                delay = random.uniform(5, 30)
+                logger.info(f"Staggering next initialization by {delay:.2f}s")
+                await asyncio.sleep(delay)
 
+        success_count = sum(1 for client in self._clients if client.running())
         if success_count == 0:
             raise RuntimeError("Failed to initialize any Gemini clients")
 
