@@ -99,6 +99,18 @@ class GeminiClientPool(metaclass=Singleton):
         """Return managed clients."""
         return self._clients
 
+    async def close(self) -> None:
+        """Close all clients in the pool."""
+        if not self._clients:
+            return
+
+        logger.info(f"Closing {len(self._clients)} Gemini clients...")
+        await asyncio.gather(
+            *(client.close() for client in self._clients if client.running()),
+            return_exceptions=True,
+        )
+        logger.info("All Gemini clients closed.")
+
     def status(self) -> dict[str, bool]:
         """Return running status for each client."""
         return {client.id: client.running() for client in self._clients}

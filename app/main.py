@@ -77,6 +77,11 @@ async def lifespan(app: FastAPI):
     finally:
         cleanup_stop_event.set()
         try:
+            await pool.close()
+        except Exception:
+            logger.exception("Failed to close Gemini client pool gracefully.")
+
+        try:
             await cleanup_task
         except asyncio.CancelledError:
             logger.debug("LMDB retention cleanup task cancelled during shutdown.")
