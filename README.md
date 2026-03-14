@@ -1,22 +1,22 @@
 # Gemini-FastAPI
 
 [![Python 3.13](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-green.svg)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [ English | [中文](README.zh.md) ]
 
 Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API).
 
-**✅ Call Gemini's web-based models via API without an API Key, completely free!**
+**Call Gemini's web-based models via API without an API Key, completely free!**
 
 ## Features
 
-- **🔐 No Google API Key Required**: Use web cookies to freely access Gemini's models via API.
-- **🔍 Google Search Included**: Get up-to-date answers using web-based Gemini's search capabilities.
-- **💾 Conversation Persistence**: LMDB-based storage supporting multi-turn conversations.
-- **🖼️ Multi-modal Support**: Support for handling text, images, and file uploads.
-- **⚖️ Multi-account Load Balancing**: Distribute requests across multiple accounts with per-account proxy settings.
+- **No Google API Key Required**: Use web cookies to freely access Gemini's models via API.
+- **Google Search Included**: Get up-to-date answers using web-based Gemini's search capabilities.
+- **Conversation Persistence**: LMDB-based storage supporting multi-turn conversations.
+- **Multi-modal Support**: Support for handling text, images, and file uploads.
+- **Multi-account Load Balancing**: Distribute requests across multiple accounts with per-account proxy settings.
 
 ## Quick Start
 
@@ -25,7 +25,7 @@ Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by [Hanao
 ### Prerequisites
 
 - Python 3.13
-- Google account with Gemini access on web
+- Google account with Gemini access on web (Enable **[Gemini Apps activity](https://myactivity.google.com/product/gemini)** for best conversation persistence)
 - `secure_1psid` and `secure_1psidts` cookies from Gemini web interface
 
 ### Installation
@@ -96,7 +96,7 @@ These endpoints are designed to be compatible with OpenAI's API structure, allow
 ### Utility Endpoints
 
 - **`GET /health`**: Health check endpoint. Returns the status of the server, configured Gemini clients, and conversation storage.
-- **`GET /images/{filename}`**: Internal endpoint to serve generated images. Requires a valid token (automatically included in image URLs returned by the API).
+- **`GET /media/{filename}`**: Internal endpoint to serve generated media. Requires a valid token (automatically included in image URLs returned by the API).
 
 ## Docker Deployment
 
@@ -204,6 +204,11 @@ To use Gemini-FastAPI, you need to extract your Gemini session cookies:
 4. Find and copy the values for:
    - `__Secure-1PSID`
    - `__Secure-1PSIDTS`
+
+> [!IMPORTANT]
+> **Enable [Gemini Apps activity](https://myactivity.google.com/product/gemini)** to ensure stable conversation persistence.
+>
+> While active chat turns may work temporarily without it, any transient error, TLS session restart, or server reboot can cause Google to expire the conversation metadata. If this setting is disabled, the model will **completely lose the context of your multi-turn conversation**, making old threads unreachable even if they are stored in your local LMDB.
 
 > [!TIP]
 > For detailed instructions, refer to the [HanaokaYuzu/Gemini-API authentication guide](https://github.com/HanaokaYuzu/Gemini-API?tab=readme-ov-file#authentication).

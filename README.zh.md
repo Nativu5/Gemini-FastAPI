@@ -1,22 +1,22 @@
 # Gemini-FastAPI
 
 [![Python 3.13](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-green.svg)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [ [English](README.md) | 中文 ]
 
 将 Gemini 网页端模型封装为兼容 OpenAI API 的 API Server。基于 [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API) 实现。
 
-**✅ 无需 API Key，免费通过 API 调用 Gemini 网页端模型！**
+**无需 API Key，免费通过 API 调用 Gemini 网页端模型！**
 
 ## 功能特性
 
-- 🔐 **无需 Google API Key**：只需网页 Cookie，即可免费通过 API 调用 Gemini 模型。
-- 🔍 **内置 Google 搜索**：API 已内置 Gemini 网页端的搜索能力，模型响应更加准确。
-- 💾 **会话持久化**：基于 LMDB 存储，支持多轮对话历史记录。
-- 🖼️ **多模态支持**：可处理文本、图片及文件上传。
-- ⚖️ **多账户负载均衡**：支持多账户分发请求，可为每个账户单独配置代理。
+- **无需 Google API Key**：只需网页 Cookie，即可免费通过 API 调用 Gemini 模型。
+- **内置 Google 搜索**：API 已内置 Gemini 网页端的搜索能力，模型响应更加准确。
+- **会话持久化**：基于 LMDB 存储，支持多轮对话历史记录。
+- **多模态支持**：可处理文本、图片及文件上传。
+- **多账户负载均衡**：支持多账户分发请求，可为每个账户单独配置代理。
 
 ## 快速开始
 
@@ -25,7 +25,7 @@
 ### 前置条件
 
 - Python 3.13
-- 拥有网页版 Gemini 访问权限的 Google 账号
+- 拥有网页版 Gemini 访问权限的 Google 账号 (开启 **[Gemini Apps 应用活动](https://myactivity.google.com/product/gemini)** 以获得最佳会话持久化体验)
 - 从 Gemini 网页获取的 `secure_1psid` 和 `secure_1psidts` Cookie
 
 ### 安装
@@ -93,10 +93,10 @@ python run.py
 
 - **`POST /v1/responses`**: 用于复杂交互模式的专用接口，支持分步输出、生成图片及工具调用等更丰富的响应项。
 
-### 辅助与系统接口
+### 实用工具接口
 
-- **`GET /health`**: 健康检查接口。返回服务器运行状态、已配置的 Gemini 客户端健康度以及对话存储统计信息。
-- **`GET /images/{filename}`**: 用于访问生成的图片的内部接口。需携带有效 Token（API 返回的图片 URL 中已自动包含该 Token）。
+- **`GET /health`**: 健康检查接口。返回服务器、已配置的 Gemini 客户端以及对话存储的状态。
+- **`GET /media/{filename}`**: 用于分发生成的媒体内容的内部接口。需要有效的 Token（API 返回的图片 URL 中已自动包含该 Token）。
 
 ## Docker 部署
 
@@ -204,8 +204,10 @@ export CONFIG_STORAGE__MAX_SIZE=268435456  # 256 MB
    - `__Secure-1PSID`
    - `__Secure-1PSIDTS`
 
-> [!TIP]
-> 详细操作请参考 [HanaokaYuzu/Gemini-API 认证指南](https://github.com/HanaokaYuzu/Gemini-API?tab=readme-ov-file#authentication)。
+> [!IMPORTANT]
+> **请开启 [Gemini Apps 应用活动](https://myactivity.google.com/product/gemini)** 以确保稳定的会话持久化。
+>
+> 虽然在没有开启该设置的情况下，连续的聊天过程可能暂时正常，但任何瞬时错误、TLS 会话重启或服务器重启都可能导致 Google 端过期的会话元数据。如果该设置被禁用，模型将 **完全丢失多轮对话的上下文**，导致即使本地 LMDB 中存有历史记录，旧对话也将无法继续。
 
 ### 代理设置
 

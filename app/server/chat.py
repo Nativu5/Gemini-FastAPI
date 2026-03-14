@@ -78,7 +78,6 @@ from app.utils.helper import (
 )
 
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
-METADATA_TTL_MINUTES = 60
 
 router = APIRouter()
 
@@ -972,24 +971,13 @@ async def _find_reusable_session(
         if search_history[-1].role in {"assistant", "system", "tool"}:
             try:
                 if conv := db.find(model.model_name, search_history):
-                    now = datetime.now()
-                    updated_at = conv.updated_at or conv.created_at or now
-                    age_minutes = (now - updated_at).total_seconds() / 60
-                    if age_minutes <= METADATA_TTL_MINUTES:
-                        client = await pool.acquire(conv.client_id)
-                        session = client.start_chat(metadata=conv.metadata, model=model)
-                        remain = messages[search_end:]
-                        logger.debug(
-                            f"Match found at prefix length {search_end}/{len(messages)}. Client: {conv.client_id}"
-                        )
-                        return session, client, remain
-                    else:
-                        logger.debug(
-                            f"Matched conversation at length {search_end} is too old ({age_minutes:.1f}m), skipping reuse."
-                        )
-                else:
-                    # Log that we tried this prefix but failed
-                    pass
+                    client = await pool.acquire(conv.client_id)
+                    session = client.start_chat(metadata=conv.metadata, model=model)
+                    remain = messages[search_end:]
+                    logger.debug(
+                        f"Match found at prefix length {search_end}/{len(messages)}. Client: {conv.client_id}"
+                    )
+                    return session, client, remain
             except Exception as e:
                 logger.warning(
                     f"Error checking LMDB for reusable session at length {search_end}: {e}"
@@ -1024,7 +1012,7 @@ async def _send_with_split(
     file_obj.name = "message.txt"
     try:
         final_files: list[Any] = list(files) if files else []
-        final_files.append(file_obj)
+        final_files.insert(0, file_obj)
         instruction = (
             "The user's input exceeds the character limit and is provided in the attached file `message.txt`.\n\n"
             "**System Instruction:**\n"
