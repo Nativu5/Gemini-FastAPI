@@ -947,7 +947,7 @@ async def _get_available_models(pool: GeminiClientPool) -> list[ModelData]:
                             ModelData(
                                 id=am.id,
                                 created=now,
-                                owned_by="gemini-web",
+                                owned_by="google",
                             )
                         )
                         seen_model_ids.add(am.id)
@@ -1045,6 +1045,8 @@ class StreamingOutputFilter:
 
     def _is_outputting(self) -> bool:
         """Determines if the current state allows yielding text to the stream."""
+        if self.state == "POST_BLOCK":
+            return False
         return self.state == "NORMAL" or (self.state == "IN_BLOCK" and self.current_role != "tool")
 
     def process(self, chunk: str) -> str:
@@ -1061,6 +1063,13 @@ class StreamingOutputFilter:
                     continue
                 else:
                     break
+
+            if self.state == "POST_BLOCK":
+                stripped = self.buffer.lstrip()
+                if not stripped:
+                    break
+                self.buffer = stripped
+                self.stack[-1] = "NORMAL"
 
             match = STREAM_MASTER_RE.search(self.buffer)
             if not match:
@@ -1096,7 +1105,13 @@ class StreamingOutputFilter:
                 else:
                     self.stack = ["NORMAL"]
 
-                if self.state == "NORMAL":
+                if self.state == "NORMAL" and matched_group in (
+                    "PROTOCOL_EXIT",
+                    "HINT_EXIT",
+                ):
+                    self.stack[-1] = "POST_BLOCK"
+
+                if self.state in ("NORMAL", "POST_BLOCK"):
                     self.current_role = ""
 
             self.buffer = self.buffer[end:]
