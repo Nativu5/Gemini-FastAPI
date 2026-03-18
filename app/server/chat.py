@@ -2365,11 +2365,6 @@ async def create_chat_completion(
         visible_output += media_markdown
         storage_output += media_markdown
 
-    if tool_calls:
-        logger.debug(
-            f"Detected tool calls: {reprlib.repr([tc.model_dump(mode='json') for tc in tool_calls])}"
-        )
-
     p_tok, c_tok, t_tok, r_tok = _calculate_usage(
         app_messages, storage_output, tool_calls, thoughts
     )
