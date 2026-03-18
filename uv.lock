@@ -157,16 +157,16 @@ dev = [
 requires-dist = [
     { name = "curl-cffi", specifier = ">=0.14.0" },
     { name = "fastapi", specifier = ">=0.135.1" },
-    { name = "gemini-webapi", git = "https://github.com/luuquangvu/Gemini-API.git?rev=move-httpx-to-curl_cffi" },
+    { name = "gemini-webapi", git = "https://github.com/HanaokaYuzu/Gemini-API.git" },
     { name = "httptools", specifier = ">=0.7.1" },
-    { name = "lmdb", specifier = ">=1.8.1" },
+    { name = "lmdb", specifier = ">=2.0.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "orjson", specifier = ">=3.11.7" },
     { name = "pydantic-settings", extras = ["yaml"], specifier = ">=2.13.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.6" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.23" },
-    { name = "uvicorn", specifier = ">=0.41.0" },
+    { name = "uvicorn", specifier = ">=0.42.0" },
     { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.22.1" },
 ]
 provides-extras = ["dev"]
@@ -176,8 +176,8 @@ dev = [{ name = "gemini-fastapi", extras = ["dev"] }]
 
 [[package]]
 name = "gemini-webapi"
-version = "0.0.post295"
-source = { git = "https://github.com/luuquangvu/Gemini-API.git?rev=move-httpx-to-curl_cffi#52b60b6b44b4b1386b9f8977afd916ce782384f1" }
+version = "1.21.0.post4"
+source = { git = "https://github.com/HanaokaYuzu/Gemini-API.git#37f3149d4d985af5100f20cecded0c257e8bbb36" }
 dependencies = [
     { name = "curl-cffi" },
     { name = "loguru" },
@@ -229,16 +229,16 @@ wheels = [
 
 [[package]]
 name = "lmdb"
-version = "1.8.1"
+version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/23/19/392f028e7ebcc1cc8212fe8a315a909b7a556278456f0bab9234d3a3b665/lmdb-1.8.1.tar.gz", hash = "sha256:44ef24033929e9cc227a7e17287473c452b462d716f118db885c667c80f57429", size = 886349, upload-time = "2026-03-12T23:21:48.42Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/14/d7/c8b34be72e94a18512eccb8fb4611ba84621d57c4579cb7431454f0f9b4a/lmdb-2.0.0.tar.gz", hash = "sha256:3130b625004f6aed2cbda7ea70c41375bfe57b3b2389051eaa8fcef2ff18411c", size = 899492, upload-time = "2026-03-18T03:56:06.816Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/75/5f/ec2fe6bb0986fae28db80292ffe5146ed7cc4d478d683d67050d2691a538/lmdb-1.8.1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:8b197007a5762411b7484e533ed1d03dca1b8ba1eee390233ac6e62ff45bd417", size = 101865, upload-time = "2026-03-12T23:21:12.902Z" },
-    { url = "https://files.pythonhosted.org/packages/75/35/1e43bba9658292c2ac787f5d003baa5ed37cad1b52666526edf4c908fb7d/lmdb-1.8.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:a9454649e62bc6f4a45f9aed175fcdd6fc2e91922bf970fd561053c616281d0a", size = 100462, upload-time = "2026-03-12T23:21:14.369Z" },
-    { url = "https://files.pythonhosted.org/packages/64/8e/2b1a0caa42b6f980a8b8663a272b9a52d4fd51ef0ca36cdec768cea02978/lmdb-1.8.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a51881d284116d82ead233b20ae7f6dbec8624dd7b0593a755c84e0d0bc4cc29", size = 303313, upload-time = "2026-03-12T23:21:15.636Z" },
-    { url = "https://files.pythonhosted.org/packages/40/51/8061694cf7b883d2a166965cbaa961ea1ce692ce1782ac58091b5aa0fdb5/lmdb-1.8.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:04c5472bfc38377a2b32ae3b494d82d9c8db7c64e9053ca1b7c86aa862ebaaf9", size = 303895, upload-time = "2026-03-12T23:21:16.769Z" },
-    { url = "https://files.pythonhosted.org/packages/7f/0f/c189c40d833ecd64f3e375a0bb02378110fc958916053ee687ec2c7d5079/lmdb-1.8.1-cp313-cp313-win_amd64.whl", hash = "sha256:fe0e34b2b20f47a108c3e04b397d1e27f080a7b0256c33efb5aef7bd1bccb923", size = 99707, upload-time = "2026-03-12T23:21:17.862Z" },
-    { url = "https://files.pythonhosted.org/packages/6c/c3/3c87bede5b62163b768e6a4bca893f59d3996cb6fc4052bfd67847c0efd7/lmdb-1.8.1-cp313-cp313-win_arm64.whl", hash = "sha256:c3550849cdbaf0ead6265cb5b10134b223c2cede7ce7a1f3390a55975e3a06d4", size = 94605, upload-time = "2026-03-12T23:21:19.102Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/d8/69a1b30ef2ea79f46c9fb6b2658d2a86fb738e42213fb536f3086b4d8a5c/lmdb-2.0.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:35f05c02e3629a7003398cf657278b2e93e74d2a4c77d3ee2485b65f4b2ada9a", size = 108272, upload-time = "2026-03-18T03:55:39.851Z" },
+    { url = "https://files.pythonhosted.org/packages/30/3d/f67c003ad3fc292c6f2a9215edb7f852b5ba643deeced7c377feecb5d764/lmdb-2.0.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:b5589e4d0c64be988129338299e3c1236838d056009c8ee215967f595ac32ac8", size = 107106, upload-time = "2026-03-18T03:55:41.125Z" },
+    { url = "https://files.pythonhosted.org/packages/53/9a/974d36bcebee3309522748a5eb6d80dc1895ea1a7cb69f047c7ac041d77d/lmdb-2.0.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:47a6ad68d763de441377f0d20036c60d7a88ad10c5303408f77412225cddc4b3", size = 324018, upload-time = "2026-03-18T03:55:42.547Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/88/d3b959f44012a877d30f0d9a40bc93c17605fc53c7b10d8f64b97b0c959c/lmdb-2.0.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8dc7156fc503000f9f76b1393cecac48a2d9d95f945a677c47d340aefad871a4", size = 327333, upload-time = "2026-03-18T03:55:44.13Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/e1/c659167677a46b86a013bc625418ccbd3a9e88cb1804d8c3c3b316acf504/lmdb-2.0.0-cp313-cp313-win_amd64.whl", hash = "sha256:88670fb86764d93454cb39ca1e8c08cb6dc2ef9b9d71f3f6ff9ef416d4202265", size = 104562, upload-time = "2026-03-18T03:55:45.758Z" },
+    { url = "https://files.pythonhosted.org/packages/07/2f/8de426d45a42ef8c8cae4dd1953166f8539f7e7406970adea3cecae00649/lmdb-2.0.0-cp313-cp313-win_arm64.whl", hash = "sha256:85a57eb3a85d231912819bcc8c75ed2baddba8f6d07ea79db62105a513ec2254", size = 98913, upload-time = "2026-03-18T03:55:47.013Z" },
 ]
 
 [[package]]
@@ -499,15 +499,15 @@ wheels = [
 
 [[package]]
 name = "uvicorn"
-version = "0.41.0"
+version = "0.42.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "h11" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/32/ce/eeb58ae4ac36fe09e3842eb02e0eb676bf2c53ae062b98f1b2531673efdd/uvicorn-0.41.0.tar.gz", hash = "sha256:09d11cf7008da33113824ee5a1c6422d89fbc2ff476540d69a34c87fab8b571a", size = 82633, upload-time = "2026-02-16T23:07:24.1Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/ad/4a96c425be6fb67e0621e62d86c402b4a17ab2be7f7c055d9bd2f638b9e2/uvicorn-0.42.0.tar.gz", hash = "sha256:9b1f190ce15a2dd22e7758651d9b6d12df09a13d51ba5bf4fc33c383a48e1775", size = 85393, upload-time = "2026-03-16T06:19:50.077Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/e4/d04a086285c20886c0daad0e026f250869201013d18f81d9ff5eada73a88/uvicorn-0.41.0-py3-none-any.whl", hash = "sha256:29e35b1d2c36a04b9e180d4007ede3bcb32a85fbdfd6c6aeb3f26839de088187", size = 68783, upload-time = "2026-02-16T23:07:22.357Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/89/f8827ccff89c1586027a105e5630ff6139a64da2515e24dafe860bd9ae4d/uvicorn-0.42.0-py3-none-any.whl", hash = "sha256:96c30f5c7abe6f74ae8900a70e92b85ad6613b745d4879eb9b16ccad15645359", size = 68830, upload-time = "2026-03-16T06:19:48.325Z" },
 ]
 
 [[package]]

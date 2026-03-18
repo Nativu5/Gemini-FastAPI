@@ -9,11 +9,11 @@ dependencies = [
     "fastapi>=0.135.1",
     "gemini-webapi>=1.21.0",
     "httptools>=0.7.1",
-    "lmdb>=1.8.1",
+    "lmdb>=2.0.0",
     "loguru>=0.7.3",
     "orjson>=3.11.7",
     "pydantic-settings[yaml]>=2.13.1",
-    "uvicorn>=0.41.0",
+    "uvicorn>=0.42.0",
     "uvloop>=0.22.1; sys_platform != 'win32'",
 ]
 
@@ -65,4 +65,4 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.uv.sources]
-gemini-webapi = { git = "https://github.com/luuquangvu/Gemini-API.git", rev = "move-httpx-to-curl_cffi" }
+gemini-webapi = { git = "https://github.com/HanaokaYuzu/Gemini-API.git" }
