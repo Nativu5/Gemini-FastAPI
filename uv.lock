@@ -157,7 +157,7 @@ dev = [
 requires-dist = [
     { name = "curl-cffi", specifier = ">=0.14.0" },
     { name = "fastapi", specifier = ">=0.135.1" },
-    { name = "gemini-webapi", git = "https://github.com/HanaokaYuzu/Gemini-API.git" },
+    { name = "gemini-webapi", git = "https://github.com/luuquangvu/Gemini-API.git?rev=retrieve-dynamic-models" },
     { name = "httptools", specifier = ">=0.7.1" },
     { name = "lmdb", specifier = ">=2.0.0" },
     { name = "loguru", specifier = ">=0.7.3" },
@@ -176,8 +176,8 @@ dev = [{ name = "gemini-fastapi", extras = ["dev"] }]
 
 [[package]]
 name = "gemini-webapi"
-version = "1.21.0.post4"
-source = { git = "https://github.com/HanaokaYuzu/Gemini-API.git#37f3149d4d985af5100f20cecded0c257e8bbb36" }
+version = "0.0.post219"
+source = { git = "https://github.com/luuquangvu/Gemini-API.git?rev=retrieve-dynamic-models#1440fc7e2b5079daaecf3b37c9880f4f1bde6619" }
 dependencies = [
     { name = "curl-cffi" },
     { name = "loguru" },

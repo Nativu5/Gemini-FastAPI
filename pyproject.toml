@@ -65,4 +65,4 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.uv.sources]
-gemini-webapi = { git = "https://github.com/HanaokaYuzu/Gemini-API.git" }
+gemini-webapi = { git = "https://github.com/luuquangvu/Gemini-API.git", rev = "retrieve-dynamic-models" }
