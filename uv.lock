@@ -159,7 +159,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.135.1" },
     { name = "gemini-webapi", git = "https://github.com/luuquangvu/Gemini-API.git?rev=retrieve-dynamic-models" },
     { name = "httptools", specifier = ">=0.7.1" },
-    { name = "lmdb", specifier = ">=2.1.0" },
+    { name = "lmdb", specifier = "~=1.8.1" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "orjson", specifier = ">=3.11.7" },
     { name = "pydantic-settings", extras = ["yaml"], specifier = ">=2.13.1" },
@@ -229,16 +229,16 @@ wheels = [
 
 [[package]]
 name = "lmdb"
-version = "2.1.0"
+version = "1.8.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d8/a9/b06257089086ceb1d10ba8c65c605c9063e34e7b65fa456d2f66bfb2fc1d/lmdb-2.1.0.tar.gz", hash = "sha256:812be2c49aeb191565425c4e010956017d7290bc9bc3f3c7e4950336b4ddb764", size = 912813, upload-time = "2026-03-19T04:58:51.399Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/23/19/392f028e7ebcc1cc8212fe8a315a909b7a556278456f0bab9234d3a3b665/lmdb-1.8.1.tar.gz", hash = "sha256:44ef24033929e9cc227a7e17287473c452b462d716f118db885c667c80f57429", size = 886349, upload-time = "2026-03-12T23:21:48.42Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/91/92/8357de991821250e75ddafe32476c6c8e66fe773cda073ed020dbd1797e4/lmdb-2.1.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:d3284f7b6f98ddecc4d126218b0509134cb36c167c0c104d0458521ca954c342", size = 108997, upload-time = "2026-03-19T04:58:26.566Z" },
-    { url = "https://files.pythonhosted.org/packages/9a/21/aa5f034479bc844cd1d3db606c01177b69f64ff6436061bcde2bcb88111a/lmdb-2.1.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:90a7d1caffd5cbdbecac88b598dace8dd038ac2c2b805c9faa0984a0b17bf997", size = 107790, upload-time = "2026-03-19T04:58:27.729Z" },
-    { url = "https://files.pythonhosted.org/packages/f5/d9/94977566909c81c5e2407f546e4e179a63ef6417a749095d3c7682f71d76/lmdb-2.1.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6fb2c908b30a4f63e5f15c158904ad6e8f474b5cf90bc08789599a5aa2d01b6b", size = 324669, upload-time = "2026-03-19T04:58:28.92Z" },
-    { url = "https://files.pythonhosted.org/packages/b8/42/08f14c83529a42456b26ab5be1ab332688f9bc36d38ccaf231c989ea41da/lmdb-2.1.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d48538aae010686a9dfabd1c0a976a0836c5044b8869249d05869ebd14c32639", size = 327653, upload-time = "2026-03-19T04:58:30.395Z" },
-    { url = "https://files.pythonhosted.org/packages/cc/18/42a90551d15bc3435e0258bb65b32a4d75f03a017cf1ac164c614f811664/lmdb-2.1.0-cp313-cp313-win_amd64.whl", hash = "sha256:52df6033da9a5e74cb407460d1a122958c437d0d142f1286bb238c2f550f03fb", size = 104803, upload-time = "2026-03-19T04:58:32.067Z" },
-    { url = "https://files.pythonhosted.org/packages/ad/f7/60db1dbdf56e8e8c56674682d460d1e64a797c5c24abd2de9e5ebeb7c544/lmdb-2.1.0-cp313-cp313-win_arm64.whl", hash = "sha256:170e40658d26730ccea9735cb0f73b9255b1a5c0f83d68e5f3f2f205d8a9e238", size = 99084, upload-time = "2026-03-19T04:58:33.437Z" },
+    { url = "https://files.pythonhosted.org/packages/75/5f/ec2fe6bb0986fae28db80292ffe5146ed7cc4d478d683d67050d2691a538/lmdb-1.8.1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:8b197007a5762411b7484e533ed1d03dca1b8ba1eee390233ac6e62ff45bd417", size = 101865, upload-time = "2026-03-12T23:21:12.902Z" },
+    { url = "https://files.pythonhosted.org/packages/75/35/1e43bba9658292c2ac787f5d003baa5ed37cad1b52666526edf4c908fb7d/lmdb-1.8.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:a9454649e62bc6f4a45f9aed175fcdd6fc2e91922bf970fd561053c616281d0a", size = 100462, upload-time = "2026-03-12T23:21:14.369Z" },
+    { url = "https://files.pythonhosted.org/packages/64/8e/2b1a0caa42b6f980a8b8663a272b9a52d4fd51ef0ca36cdec768cea02978/lmdb-1.8.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a51881d284116d82ead233b20ae7f6dbec8624dd7b0593a755c84e0d0bc4cc29", size = 303313, upload-time = "2026-03-12T23:21:15.636Z" },
+    { url = "https://files.pythonhosted.org/packages/40/51/8061694cf7b883d2a166965cbaa961ea1ce692ce1782ac58091b5aa0fdb5/lmdb-1.8.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:04c5472bfc38377a2b32ae3b494d82d9c8db7c64e9053ca1b7c86aa862ebaaf9", size = 303895, upload-time = "2026-03-12T23:21:16.769Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/0f/c189c40d833ecd64f3e375a0bb02378110fc958916053ee687ec2c7d5079/lmdb-1.8.1-cp313-cp313-win_amd64.whl", hash = "sha256:fe0e34b2b20f47a108c3e04b397d1e27f080a7b0256c33efb5aef7bd1bccb923", size = 99707, upload-time = "2026-03-12T23:21:17.862Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/c3/3c87bede5b62163b768e6a4bca893f59d3996cb6fc4052bfd67847c0efd7/lmdb-1.8.1-cp313-cp313-win_arm64.whl", hash = "sha256:c3550849cdbaf0ead6265cb5b10134b223c2cede7ce7a1f3390a55975e3a06d4", size = 94605, upload-time = "2026-03-12T23:21:19.102Z" },
 ]
 
 [[package]]
