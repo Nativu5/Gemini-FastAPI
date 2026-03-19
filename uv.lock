@@ -176,8 +176,8 @@ dev = [{ name = "gemini-fastapi", extras = ["dev"] }]
 
 [[package]]
 name = "gemini-webapi"
-version = "0.0.post222"
-source = { git = "https://github.com/luuquangvu/Gemini-API.git?rev=retrieve-dynamic-models#ac1f04e7da2281b988f6fbef1aa73252e28c4b23" }
+version = "0.0.post223"
+source = { git = "https://github.com/luuquangvu/Gemini-API.git?rev=retrieve-dynamic-models#201b6562e8d8e4049c2c9abe13ad2790ca72420a" }
 dependencies = [
     { name = "curl-cffi" },
     { name = "loguru" },
