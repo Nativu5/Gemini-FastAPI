@@ -14,12 +14,6 @@ from app.utils.helper import (
     save_url_to_tempfile,
 )
 
-_UNSET = object()
-
-
-def _resolve(value: Any, fallback: Any):
-    return fallback if value is _UNSET else value
-
 
 class GeminiClientWrapper(GeminiClient):
     """Gemini client with helper methods."""
