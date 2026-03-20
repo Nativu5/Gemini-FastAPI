@@ -941,16 +941,17 @@ async def _get_available_models(pool: GeminiClientPool) -> list[ModelData]:
 
             client_models = client.list_models()
             if client_models:
-                for am in client_models:
-                    if am.id and am.id not in seen_model_ids:
+                for model in client_models:
+                    model_id = model.model_name if model.model_name else model.model_id
+                    if model_id and model_id not in seen_model_ids:
                         models_data.append(
                             ModelData(
-                                id=am.id,
+                                id=model_id,
                                 created=now,
                                 owned_by="google",
                             )
                         )
-                        seen_model_ids.add(am.id)
+                        seen_model_ids.add(model_id)
 
     return models_data
 
