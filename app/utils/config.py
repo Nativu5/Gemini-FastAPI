@@ -93,7 +93,7 @@ class GeminiConfig(BaseModel):
         ge=60,
         description="Interval in seconds to refresh Gemini sessions (Not less than 60s)",
     )
-    verbose: bool = Field(False, description="Enable verbose logging for Gemini API requests")
+    verbose: bool = Field(True, description="Enable verbose logging for Gemini API requests")
     max_chars_per_request: int = Field(
         default=1_000_000,
         ge=1,
