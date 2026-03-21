@@ -11,19 +11,13 @@ router = APIRouter()
 async def health_check():
     pool = GeminiClientPool()
     db = LMDBConversationStore()
-
-    try:
-        await pool.init()
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini clients: {e}")
-        return HealthCheckResponse(ok=False, error=str(e))
-
     client_status = pool.status()
+    stat = db.stats()
 
     if not all(client_status.values()):
-        logger.warning("One or more Gemini clients not running")
+        down_clients = [client_id for client_id, status in client_status.items() if not status]
+        logger.warning(f"One or more Gemini clients not running: {', '.join(down_clients)}")
 
-    stat = db.stats()
     if not stat:
         logger.error("Failed to retrieve LMDB conversation store stats")
         return HealthCheckResponse(

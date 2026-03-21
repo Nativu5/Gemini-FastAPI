@@ -1,7 +1,7 @@
 import ast
 import os
 import sys
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import orjson
 from loguru import logger
@@ -39,8 +39,8 @@ class GeminiClientSettings(BaseModel):
     """Credential set for one Gemini client."""
 
     id: str = Field(..., description="Unique identifier for the client")
-    secure_1psid: str = Field(..., description="Gemini Secure 1PSID")
-    secure_1psidts: str = Field(..., description="Gemini Secure 1PSIDTS")
+    secure_1psid: str | None = Field(default=None, description="Gemini Secure 1PSID")
+    secure_1psidts: str | None = Field(default=None, description="Gemini Secure 1PSIDTS")
     proxy: str | None = Field(default=None, description="Proxy URL for this Gemini client")
 
     @field_validator("proxy", mode="before")
@@ -67,7 +67,10 @@ class GeminiModelConfig(BaseModel):
             try:
                 return orjson.loads(v)
             except orjson.JSONDecodeError:
-                return v
+                try:
+                    return ast.literal_eval(v)
+                except (ValueError, SyntaxError):
+                    return v
         return v
 
 
@@ -82,15 +85,15 @@ class GeminiConfig(BaseModel):
         default="append",
         description="Strategy for loading models: 'append' merges custom with default, 'overwrite' uses only custom",
     )
-    timeout: int = Field(default=600, ge=30, description="Init timeout in seconds")
-    watchdog_timeout: int = Field(default=300, ge=30, description="Watchdog timeout in seconds")
-    auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini cookies")
+    timeout: int = Field(default=450, ge=30, description="Init timeout in seconds")
+    watchdog_timeout: int = Field(default=90, ge=30, description="Watchdog timeout in seconds")
+    auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini sessions")
     refresh_interval: int = Field(
         default=600,
         ge=60,
-        description="Interval in seconds to refresh Gemini cookies (Not less than 60s)",
+        description="Interval in seconds to refresh Gemini sessions (Not less than 60s)",
     )
-    verbose: bool = Field(False, description="Enable verbose logging for Gemini API requests")
+    verbose: bool = Field(True, description="Enable verbose logging for Gemini API requests")
     max_chars_per_request: int = Field(
         default=1_000_000,
         ge=1,
@@ -103,9 +106,12 @@ class GeminiConfig(BaseModel):
         if isinstance(v, str) and v.strip().startswith("["):
             try:
                 return orjson.loads(v)
-            except orjson.JSONDecodeError as e:
-                logger.warning(f"Failed to parse models JSON string: {e}")
-                return v
+            except orjson.JSONDecodeError:
+                try:
+                    return ast.literal_eval(v)
+                except (ValueError, SyntaxError) as e:
+                    logger.warning(f"Failed to parse models JSON or Python literal: {e}")
+                    return v
         return v
 
     @field_validator("models")
@@ -151,9 +157,9 @@ class StorageConfig(BaseModel):
         default="data/lmdb",
         description="Path to the storage directory where data will be saved",
     )
-    images_path: str = Field(
-        default="data/images",
-        description="Path to the directory where generated images will be stored",
+    media_path: str = Field(
+        default="data/media",
+        description="Path to the directory where generated media will be stored",
     )
     max_size: int = Field(
         default=1024**2 * 256,  # 256 MB
@@ -228,10 +234,10 @@ class Config(BaseSettings):
         )
 
 
-def extract_gemini_clients_env() -> dict[int, dict[str, str]]:
+def extract_gemini_clients_env() -> dict[int, dict[str, Any]]:
     """Extract and remove all Gemini clients related environment variables, return a mapping from index to field dict."""
     prefix = "CONFIG_GEMINI__CLIENTS__"
-    env_overrides: dict[int, dict[str, str]] = {}
+    env_overrides: dict[int, dict[str, Any]] = {}
     to_delete = []
     for k, v in os.environ.items():
         if k.startswith(prefix):
@@ -244,7 +250,7 @@ def extract_gemini_clients_env() -> dict[int, dict[str, str]]:
             idx = int(index_str)
             env_overrides.setdefault(idx, {})[field] = v
             to_delete.append(k)
-    # Remove these environment variables to avoid Pydantic parsing errors
+
     for k in to_delete:
         del os.environ[k]
     return env_overrides
@@ -252,7 +258,7 @@ def extract_gemini_clients_env() -> dict[int, dict[str, str]]:
 
 def _merge_clients_with_env(
     base_clients: list[GeminiClientSettings] | None,
-    env_overrides: dict[int, dict[str, str]],
+    env_overrides: dict[int, dict[str, Any]],
 ):
     """Override base_clients with env_overrides, return the new clients list."""
     if not env_overrides:
@@ -300,9 +306,8 @@ def extract_gemini_models_env() -> dict[int, dict[str, Any]]:
         if parsed_successfully and isinstance(models_list, list):
             for idx, model_data in enumerate(models_list):
                 if isinstance(model_data, dict):
-                    env_overrides[idx] = model_data
+                    env_overrides[idx] = cast(dict[str, Any], model_data)
 
-            # Remove the environment variable to avoid Pydantic parsing errors
             del os.environ[root_key]
 
     return env_overrides
@@ -322,12 +327,10 @@ def _merge_models_with_env(
     for idx in sorted(env_overrides):
         overrides = env_overrides[idx]
         if idx < len(result_models):
-            # Update existing model: overwrite fields found in env
             model_dict = result_models[idx].model_dump()
             model_dict.update(overrides)
             result_models[idx] = GeminiModelConfig(**model_dict)
         elif idx == len(result_models):
-            # Append new models
             new_model = GeminiModelConfig(**overrides)
             result_models.append(new_model)
         else:
@@ -346,20 +349,13 @@ def initialize_config() -> Config:
         Config: Configuration object
     """
     try:
-        # First, extract and remove Gemini clients related environment variables
         env_clients_overrides = extract_gemini_clients_env()
-        # Extract and remove Gemini models related environment variables
         env_models_overrides = extract_gemini_models_env()
+        config = Config()
 
-        # Then, initialize Config with pydantic_settings
-        config = Config()  # type: ignore
-
-        # Synthesize clients
         config.gemini.clients = _merge_clients_with_env(
             config.gemini.clients, env_clients_overrides
         )
-
-        # Synthesize models
         config.gemini.models = _merge_models_with_env(config.gemini.models, env_models_overrides)
 
         return config

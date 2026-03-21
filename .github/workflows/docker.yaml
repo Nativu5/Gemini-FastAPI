@@ -6,11 +6,15 @@ on:
       - main
     tags:
       - "v*"
-    paths-ignore:
-      - "**/*.md"
-      - ".github/*"
-      - "LICENSE"
-      - ".gitignore"
+    paths:
+      - "app/**"
+      - "config/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      - "run.py"
+      - ".github/workflows/docker.yaml"
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io

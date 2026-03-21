@@ -16,8 +16,6 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
 
       - name: Update gemini-webapi
         id: update
@@ -33,8 +31,8 @@ jobs:
           fi
           echo "Current gemini-webapi version: $OLD_VERSION"
 
-          # Update the package using uv, which handles pyproject.toml and uv.lock
-          uv add --upgrade gemini-webapi
+          # Update gemini-webapi to the latest version
+          uv lock --upgrade-package gemini-webapi
 
           # Get new version of gemini-webapi after upgrade
           NEW_VERSION=$(uv pip show gemini-webapi | grep ^Version: | awk '{print $2}')

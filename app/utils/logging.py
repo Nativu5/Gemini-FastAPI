@@ -65,4 +65,4 @@ def _setup_logging_intercept() -> None:
             logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
     # Remove all existing handlers and add our interceptor
-    logging.basicConfig(handlers=[InterceptHandler()], level="INFO", force=True)
+    logging.basicConfig(handlers=[InterceptHandler()], level="DEBUG", force=True)

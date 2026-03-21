@@ -1,5 +1,6 @@
 import hashlib
 import string
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -7,15 +8,17 @@ from typing import Any
 
 import lmdb
 import orjson
+from lmdb import Environment, Error, Transaction
 from loguru import logger
 
-from app.models import ContentItem, ConversationInStore, Message
+from app.models import (
+    AppMessage,
+    ConversationInStore,
+)
 from app.utils import g_config
 from app.utils.helper import (
-    extract_tool_calls,
     normalize_llm_text,
     remove_tool_call_blocks,
-    strip_system_hints,
     unescape_text,
 )
 from app.utils.singleton import Singleton
@@ -40,7 +43,6 @@ def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
 
     text = normalize_llm_text(text)
     text = unescape_text(text)
-
     text = remove_tool_call_blocks(text)
 
     if fuzzy:
@@ -50,17 +52,14 @@ def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
     return text.strip() if text.strip() else None
 
 
-def _hash_message(message: Message, fuzzy: bool = False) -> str:
+def _hash_message(message: AppMessage, fuzzy: bool = False) -> str:
     """
     Generate a stable, canonical hash for a single message.
     """
     core_data: dict[str, Any] = {
         "role": message.role,
-        "name": message.name or None,
-        "tool_call_id": message.tool_call_id or None,
-        "reasoning_content": _normalize_text(message.reasoning_content)
-        if message.reasoning_content
-        else None,
+        "name": message.name,
+        "tool_call_id": message.tool_call_id,
     }
 
     content = message.content
@@ -71,39 +70,20 @@ def _hash_message(message: Message, fuzzy: bool = False) -> str:
     elif isinstance(content, list):
         text_parts = []
         for item in content:
-            text_val = ""
-            if isinstance(item, ContentItem) and item.type == "text":
-                text_val = item.text
-            elif isinstance(item, dict) and item.get("type") == "text":
-                text_val = item.get("text")
-
-            if text_val:
-                normalized_part = _normalize_text(text_val, fuzzy=fuzzy)
+            if item.type == "text" and item.text:
+                normalized_part = _normalize_text(item.text, fuzzy=fuzzy)
                 if normalized_part:
                     text_parts.append(normalized_part)
-            elif isinstance(item, (ContentItem, dict)):
-                item_type = item.type if isinstance(item, ContentItem) else item.get("type")
-                if item_type == "image_url":
-                    url = (
-                        item.image_url.get("url")
-                        if isinstance(item, ContentItem) and item.image_url
-                        else item.get("image_url", {}).get("url")
-                    )
-                    text_parts.append(f"[image_url:{url}]")
-                elif item_type == "file":
-                    url = (
-                        item.file.get("url") or item.file.get("filename")
-                        if isinstance(item, ContentItem) and item.file
-                        else item.get("file", {}).get("url") or item.get("file", {}).get("filename")
-                    )
-                    text_parts.append(f"[file:{url}]")
+            elif item.type != "text" and item.url:
+                text_parts.append(f"[{item.type}:{item.url}]")
 
         core_data["content"] = "\n".join(text_parts) if text_parts else None
 
     if message.tool_calls:
         calls_data = []
         for tc in message.tool_calls:
-            args = tc.function.arguments or "{}"
+            args = tc.function.arguments
+            name = tc.function.name
             try:
                 parsed = orjson.loads(args)
                 canon_args = orjson.dumps(parsed, option=orjson.OPT_SORT_KEYS).decode("utf-8")
@@ -112,7 +92,7 @@ def _hash_message(message: Message, fuzzy: bool = False) -> str:
 
             calls_data.append(
                 {
-                    "name": tc.function.name,
+                    "name": name,
                     "arguments": canon_args,
                 }
             )
@@ -126,7 +106,7 @@ def _hash_message(message: Message, fuzzy: bool = False) -> str:
 
 
 def _hash_conversation(
-    client_id: str, model: str, messages: list[Message], fuzzy: bool = False
+    client_id: str, model: str, messages: list[AppMessage], fuzzy: bool = False
 ) -> str:
     """Generate a hash for a list of messages and model name, tied to a specific client_id."""
     combined_hash = hashlib.sha256()
@@ -168,7 +148,7 @@ class LMDBConversationStore(metaclass=Singleton):
         self.db_path: Path = Path(db_path)
         self.max_db_size: int = max_db_size
         self.retention_days: int = max(0, int(retention_days))
-        self._env: lmdb.Environment | None = None
+        self._env: Environment | None = None
 
         self._ensure_db_path()
         self._init_environment()
@@ -189,12 +169,12 @@ class LMDBConversationStore(metaclass=Singleton):
                 meminit=False,
             )
             logger.info(f"LMDB environment initialized at {self.db_path}")
-        except lmdb.Error as e:
+        except Error as e:
             logger.error(f"Failed to initialize LMDB environment: {e}")
             raise
 
     @contextmanager
-    def _get_transaction(self, write: bool = False):
+    def _get_transaction(self, write: bool = False) -> Generator[Transaction]:
         """
         Context manager for LMDB transactions.
 
@@ -204,12 +184,12 @@ class LMDBConversationStore(metaclass=Singleton):
         if not self._env:
             raise RuntimeError("LMDB environment not initialized")
 
-        txn: lmdb.Transaction = self._env.begin(write=write)
+        txn: Transaction = self._env.begin(write=write)
         try:
             yield txn
             if write:
                 txn.commit()
-        except lmdb.Error:
+        except Error:
             if write:
                 txn.abort()
             raise
@@ -236,24 +216,22 @@ class LMDBConversationStore(metaclass=Singleton):
         except UnicodeDecodeError:
             return []
 
-    @staticmethod
-    def _update_index(txn: lmdb.Transaction, prefix: str, hash_val: str, storage_key: str):
+    def _update_index(self, txn: Transaction, prefix: str, hash_val: str, storage_key: str):
         """Add a storage key to the index for a given hash, avoiding duplicates."""
         idx_key = f"{prefix}{hash_val}".encode()
         existing = txn.get(idx_key)
-        keys = LMDBConversationStore._decode_index_value(existing) if existing else []
+        keys = self._decode_index_value(existing) if existing else []
         if storage_key not in keys:
             keys.append(storage_key)
             txn.put(idx_key, orjson.dumps(keys))
 
-    @staticmethod
-    def _remove_from_index(txn: lmdb.Transaction, prefix: str, hash_val: str, storage_key: str):
+    def _remove_from_index(self, txn: Transaction, prefix: str, hash_val: str, storage_key: str):
         """Remove a specific storage key from the index for a given hash."""
         idx_key = f"{prefix}{hash_val}".encode()
         existing = txn.get(idx_key)
         if not existing:
             return
-        keys = LMDBConversationStore._decode_index_value(existing)
+        keys = self._decode_index_value(existing)
         if storage_key in keys:
             keys.remove(storage_key)
             if keys:
@@ -263,29 +241,35 @@ class LMDBConversationStore(metaclass=Singleton):
 
     def store(
         self,
-        conv: ConversationInStore,
-        custom_key: str | None = None,
-    ) -> str:
+        client_id: str,
+        model: str,
+        messages: list[AppMessage],
+        metadata: list[str | None],
+    ) -> None:
         """
         Store a conversation model in LMDB.
 
         Args:
-            conv: Conversation model to store
-            custom_key: Optional custom key, if not provided, hash will be used
-
-        Returns:
-            str: The key used to store the messages (hash or custom key)
+            client_id: The client identifier
+            model: The model name
+            messages: Unsanitized API messages
+            metadata: Session metadata
         """
-        if not conv:
+        if not messages:
             raise ValueError("Messages list cannot be empty")
 
-        # Ensure consistent sanitization before hashing and storage
-        sanitized_messages = self.sanitize_messages(conv.messages)
-        conv.messages = sanitized_messages
-
+        now = datetime.now()
+        conv = ConversationInStore(
+            model=model,
+            client_id=client_id,
+            metadata=metadata,
+            messages=messages,
+            created_at=now,
+            updated_at=now,
+        )
         message_hash = _hash_conversation(conv.client_id, conv.model, conv.messages)
         fuzzy_hash = _hash_conversation(conv.client_id, conv.model, conv.messages, fuzzy=True)
-        storage_key = custom_key or message_hash
+        storage_key = message_hash
 
         now = datetime.now()
         if conv.created_at is None:
@@ -302,9 +286,8 @@ class LMDBConversationStore(metaclass=Singleton):
                 self._update_index(txn, self.FUZZY_LOOKUP_PREFIX, fuzzy_hash, storage_key)
 
                 logger.debug(f"Stored {len(conv.messages)} messages with key: {storage_key[:12]}")
-                return storage_key
 
-        except lmdb.Error as e:
+        except Error as e:
             logger.error(f"LMDB error while storing messages with key {storage_key[:12]}: {e}")
             raise
         except Exception as e:
@@ -334,17 +317,17 @@ class LMDBConversationStore(metaclass=Singleton):
 
                 logger.debug(f"Retrieved {len(conv.messages)} messages with key: {key[:12]}")
                 return conv
-        except (lmdb.Error, orjson.JSONDecodeError) as e:
+        except (Error, orjson.JSONDecodeError) as e:
             logger.error(f"Failed to retrieve/parse messages with key {key[:12]}: {e}")
             return None
         except Exception as e:
             logger.error(f"Unexpected error retrieving messages with key {key[:12]}: {e}")
             return None
 
-    def find(self, model: str, messages: list[Message]) -> ConversationInStore | None:
+    def find(self, model: str, messages: list[AppMessage]) -> ConversationInStore | None:
         """
         Search conversation data by message list.
-        Tries raw matching, then sanitized matching, and finally fuzzy matching.
+        Tries sanitized matching, and finally fuzzy matching.
 
         Args:
             model: Model name
@@ -357,16 +340,7 @@ class LMDBConversationStore(metaclass=Singleton):
             return None
 
         if conv := self._find_by_message_list(model, messages):
-            logger.debug(f"Session found for '{model}' with {len(messages)} raw messages.")
-            return conv
-
-        cleaned_messages = self.sanitize_messages(messages)
-        if cleaned_messages != messages and (
-            conv := self._find_by_message_list(model, cleaned_messages)
-        ):
-            logger.debug(
-                f"Session found for '{model}' with {len(cleaned_messages)} cleaned messages."
-            )
+            logger.debug(f"Session found for '{model}' with {len(messages)} cleaned messages.")
             return conv
 
         if conv := self._find_by_message_list(model, messages, fuzzy=True):
@@ -381,7 +355,7 @@ class LMDBConversationStore(metaclass=Singleton):
     def _find_by_message_list(
         self,
         model: str,
-        messages: list[Message],
+        messages: list[AppMessage],
         fuzzy: bool = False,
     ) -> ConversationInStore | None:
         """
@@ -423,7 +397,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
                                 if match_found:
                                     return conv
-            except lmdb.Error as e:
+            except Error as e:
                 logger.error(
                     f"LMDB error while searching for hash {message_hash} and client {c.id}: {e}"
                 )
@@ -438,7 +412,7 @@ class LMDBConversationStore(metaclass=Singleton):
         try:
             with self._get_transaction(write=False) as txn:
                 return txn.get(key.encode("utf-8")) is not None
-        except lmdb.Error as e:
+        except Error as e:
             logger.error(f"Failed to check existence of key {key}: {e}")
             return False
 
@@ -464,7 +438,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
                 logger.debug(f"Deleted messages with key: {key[:12]}")
                 return conv
-        except (lmdb.Error, orjson.JSONDecodeError) as e:
+        except (Error, orjson.JSONDecodeError) as e:
             logger.error(f"Failed to delete messages with key {key[:12]}: {e}")
             return None
 
@@ -490,7 +464,7 @@ class LMDBConversationStore(metaclass=Singleton):
                         count += 1
                         if limit and count >= limit:
                             break
-        except lmdb.Error as e:
+        except Error as e:
             logger.error(f"Failed to list keys: {e}")
         return keys
 
@@ -529,7 +503,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
                     if timestamp < cutoff:
                         expired_entries.append((key_str, conv))
-        except lmdb.Error as exc:
+        except Error as exc:
             logger.error(f"Failed to scan LMDB for retention cleanup: {exc}")
             raise
 
@@ -552,7 +526,7 @@ class LMDBConversationStore(metaclass=Singleton):
                         )
                         self._remove_from_index(txn, self.FUZZY_LOOKUP_PREFIX, fuzzy_hash, key_str)
                     removed += 1
-        except lmdb.Error as exc:
+        except Error as exc:
             logger.error(f"Failed to delete expired conversations: {exc}")
             raise
 
@@ -570,7 +544,7 @@ class LMDBConversationStore(metaclass=Singleton):
             return {}
         try:
             return self._env.stat()
-        except lmdb.Error as e:
+        except Error as e:
             logger.error(f"Failed to get database stats: {e}")
             return {}
 
@@ -584,68 +558,3 @@ class LMDBConversationStore(metaclass=Singleton):
     def __del__(self):
         """Cleanup on destruction."""
         self.close()
-
-    @staticmethod
-    def sanitize_messages(messages: list[Message]) -> list[Message]:
-        """Clean all messages of internal markers, hints and normalize tool calls."""
-        cleaned_messages = []
-        for msg in messages:
-            update_data = {}
-            content_changed = False
-
-            # Normalize reasoning_content
-            if msg.reasoning_content:
-                norm_reasoning = _normalize_text(msg.reasoning_content)
-                if norm_reasoning != msg.reasoning_content:
-                    update_data["reasoning_content"] = norm_reasoning
-                    content_changed = True
-
-            if isinstance(msg.content, str):
-                text = msg.content
-                tool_calls = msg.tool_calls
-
-                if msg.role == "assistant" and not tool_calls:
-                    text, tool_calls = extract_tool_calls(text)
-                else:
-                    text = strip_system_hints(text)
-
-                normalized_content = text.strip() or None
-
-                if normalized_content != msg.content:
-                    update_data["content"] = normalized_content
-                    content_changed = True
-                if tool_calls != msg.tool_calls:
-                    update_data["tool_calls"] = tool_calls or None
-                    content_changed = True
-
-            elif isinstance(msg.content, list):
-                new_content = []
-                all_extracted_calls = list(msg.tool_calls or [])
-                list_changed = False
-
-                for item in msg.content:
-                    if isinstance(item, ContentItem) and item.type == "text" and item.text:
-                        text = item.text
-                        if msg.role == "assistant" and not msg.tool_calls:
-                            text, extracted = extract_tool_calls(text)
-                            if extracted:
-                                all_extracted_calls.extend(extracted)
-                                list_changed = True
-                        else:
-                            text = strip_system_hints(text)
-
-                        if text != item.text:
-                            list_changed = True
-                            item = item.model_copy(update={"text": text.strip() or None})
-                    new_content.append(item)
-
-                if list_changed:
-                    update_data["content"] = new_content
-                    update_data["tool_calls"] = all_extracted_calls or None
-                    content_changed = True
-
-            if content_changed:
-                cleaned_messages.append(msg.model_copy(update=update_data))
-            else:
-                cleaned_messages.append(msg)
-        return cleaned_messages

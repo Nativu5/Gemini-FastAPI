@@ -1,24 +1,18 @@
+import io
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import orjson
-from gemini_webapi import GeminiClient, ModelOutput
+from gemini_webapi import GeminiClient
 from loguru import logger
 
-from app.models import Message
+from app.models import AppMessage
 from app.utils import g_config
 from app.utils.helper import (
     add_tag,
-    normalize_llm_text,
     save_file_to_tempfile,
     save_url_to_tempfile,
 )
-
-_UNSET = object()
-
-
-def _resolve(value: Any, fallback: Any):
-    return fallback if value is _UNSET else value
 
 
 class GeminiClientWrapper(GeminiClient):
@@ -28,36 +22,18 @@ class GeminiClientWrapper(GeminiClient):
         super().__init__(**kwargs)
         self.id = client_id
 
-    async def init(
-        self,
-        timeout: float = cast(float, _UNSET),
-        watchdog_timeout: float = cast(float, _UNSET),
-        auto_close: bool = False,
-        close_delay: float = cast(float, _UNSET),
-        auto_refresh: bool = cast(bool, _UNSET),
-        refresh_interval: float = cast(float, _UNSET),
-        verbose: bool = cast(bool, _UNSET),
-    ) -> None:
+    async def init(self, *args: Any, **kwargs: Any) -> None:
         """
-        Inject default configuration values.
+        Inject default configuration values from global settings.
         """
         config = g_config.gemini
-        timeout = cast(float, _resolve(timeout, config.timeout))
-        watchdog_timeout = cast(float, _resolve(watchdog_timeout, config.watchdog_timeout))
-        close_delay = timeout
-        auto_refresh = cast(bool, _resolve(auto_refresh, config.auto_refresh))
-        refresh_interval = cast(float, _resolve(refresh_interval, config.refresh_interval))
-        verbose = cast(bool, _resolve(verbose, config.verbose))
-
         try:
             await super().init(
-                timeout=timeout,
-                watchdog_timeout=watchdog_timeout,
-                auto_close=auto_close,
-                close_delay=close_delay,
-                auto_refresh=auto_refresh,
-                refresh_interval=refresh_interval,
-                verbose=verbose,
+                timeout=config.timeout,
+                watchdog_timeout=config.watchdog_timeout,
+                auto_refresh=config.auto_refresh,
+                refresh_interval=config.refresh_interval,
+                verbose=config.verbose,
             )
         except Exception:
             logger.exception(f"Failed to initialize GeminiClient {self.id}")
@@ -68,7 +44,10 @@ class GeminiClientWrapper(GeminiClient):
 
     @staticmethod
     async def process_message(
-        message: Message, tempdir: Path | None = None, tagged: bool = True, wrap_tool: bool = True
+        message: AppMessage,
+        tempdir: Path | None = None,
+        tagged: bool = True,
+        wrap_tool: bool = True,
     ) -> tuple[str, list[Path | str]]:
         """
         Process a Message into Gemini API format using the PascalCase technical protocol.
@@ -83,29 +62,31 @@ class GeminiClientWrapper(GeminiClient):
         elif isinstance(message.content, list):
             for item in message.content:
                 if item.type == "text":
-                    if item.text or message.role == "tool":
-                        text_fragments.append(item.text or "")
+                    item_text = getattr(item, "text", "") or ""
+                    if item_text or message.role == "tool":
+                        text_fragments.append(item_text)
                 elif item.type == "image_url":
-                    if not item.image_url:
-                        raise ValueError("Image URL cannot be empty")
-                    if url := item.image_url.get("url", None):
-                        files.append(await save_url_to_tempfile(url, tempdir))
-                    else:
-                        raise ValueError("Image URL must contain 'url' key")
+                    item_media_url = getattr(item, "url", None)
+                    if not item_media_url:
+                        raise ValueError(f"{item.type} cannot be empty")
+                    files.append(await save_url_to_tempfile(item_media_url, tempdir))
                 elif item.type == "file":
-                    if not item.file:
-                        raise ValueError("File cannot be empty")
-                    if file_data := item.file.get("file_data", None):
-                        filename = item.file.get("filename", "")
+                    file_data = getattr(item, "file_data", None)
+                    if file_data:
+                        filename = getattr(item, "filename", "") or ""
                         files.append(await save_file_to_tempfile(file_data, filename, tempdir))
-                    elif url := item.file.get("url", None):
-                        files.append(await save_url_to_tempfile(url, tempdir))
                     else:
-                        raise ValueError("File must contain 'file_data' or 'url' key")
+                        raise ValueError("File must contain 'file_data'")
+                elif item.type == "input_audio":
+                    file_data = getattr(item, "file_data", None)
+                    if file_data:
+                        files.append(await save_file_to_tempfile(file_data, "audio.wav", tempdir))
+                    else:
+                        raise ValueError("input_audio must contain 'file_data' key")
         elif message.content is None and message.role == "tool":
             text_fragments.append("")
         elif message.content is not None:
-            raise ValueError("Unsupported message content type.")
+            raise ValueError(f"Unsupported message content type: {type(message.content)}")
 
         if message.role == "tool":
             tool_name = message.name or "unknown"
@@ -154,10 +135,10 @@ class GeminiClientWrapper(GeminiClient):
 
     @staticmethod
     async def process_conversation(
-        messages: list[Message], tempdir: Path | None = None
-    ) -> tuple[str, list[Path | str]]:
+        messages: list[AppMessage], tempdir: Path | None = None
+    ) -> tuple[str, list[str | Path | bytes | io.BytesIO]]:
         conversation: list[str] = []
-        files: list[Path | str] = []
+        files: list[str | Path | bytes | io.BytesIO] = []
 
         i = 0
         while i < len(messages):
@@ -185,15 +166,3 @@ class GeminiClientWrapper(GeminiClient):
 
         conversation.append(add_tag("assistant", "", unclose=True))
         return "\n".join(conversation), files
-
-    @staticmethod
-    def extract_output(response: ModelOutput, include_thoughts: bool = True) -> str:
-        text = ""
-        if include_thoughts and response.thoughts:
-            text += f"<think>{response.thoughts}</think>\n"
-        if response.text:
-            text += response.text
-        else:
-            text += str(response)
-
-        return normalize_llm_text(text)

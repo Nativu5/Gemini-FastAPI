@@ -14,7 +14,7 @@ import orjson
 from curl_cffi.requests import AsyncSession
 from loguru import logger
 
-from app.models import FunctionCall, Message, ToolCall
+from app.models import AppMessage, AppToolCall, AppToolCallFunction
 
 VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
@@ -33,39 +33,35 @@ TOOL_WRAP_HINT = (
     "[/CallParameter]\n"
     "[/Call]\n"
     "[/ToolCalls]\n\n"
-    "CRITICAL: Do NOT mix natural language with protocol tags. Either respond naturally OR provide the protocol block alone. There is no middle ground.\n"
+    "CRITICAL: Do NOT mix natural language with protocol tags. Either respond naturally OR provide the protocol block alone. There is no middle ground."
 )
 TOOL_BLOCK_RE = re.compile(
-    r"\\?\[\s*ToolCalls\s*\\?]\s*(.*?)\s*\\?\[\s*\\?/\s*ToolCalls\s*\\?]",
+    r"\\?\[ToolCalls\\?](.*?)\\?\[\\?/ToolCalls\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TOOL_CALL_RE = re.compile(
-    r"\\?\[\s*Call\s*\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\s*\\?/\s*Call\s*\\?]",
+    r"\\?\[Call\\?:(?P<name>[^]]+)\\?](?P<body>.*?)\\?\[\\?/Call\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_BLOCK_RE = re.compile(
-    r"\\?\[\s*ToolResults\s*\\?]\s*(.*?)\s*\\?\[\s*\\?/\s*ToolResults\s*\\?]",
+    r"\\?\[ToolResults\\?](.*?)\\?\[\\?/ToolResults\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 RESPONSE_ITEM_RE = re.compile(
-    r"\\?\[\s*Result\s*\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\s*\\?/\s*Result\s*\\?]",
+    r"\\?\[Result\\?:(?P<name>[^]]+)\\?](?P<body>.*?)\\?\[\\?/Result\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_ARG_RE = re.compile(
-    r"\\?\[\s*CallParameter\s*\\?:\s*(?P<name>(?:[^]\\]|\\.)+)\s*\\?]\s*(?P<body>.*?)\s*\\?\[\s*\\?/\s*CallParameter\s*\\?]",
+    r"\\?\[CallParameter\\?:(?P<name>[^]]+)\\?](?P<body>.*?)\\?\[\\?/CallParameter\\?]",
     re.DOTALL | re.IGNORECASE,
 )
 TAGGED_RESULT_RE = re.compile(
-    r"\\?\[\s*ToolResult\s*\\?]\s*(.*?)\s*\\?\[\s*\\?/\s*ToolResult\s*\\?]",
+    r"\\?\[ToolResult\\?](.*?)\\?\[\\?/ToolResult\\?]",
     re.DOTALL | re.IGNORECASE,
 )
-CONTROL_TOKEN_RE = re.compile(
-    r"\\?\s*<\s*\\?\|\s*im\s*\\?_(?:start|end)\s*\\?\|\s*>\s*", re.IGNORECASE
-)
-CHATML_START_RE = re.compile(
-    r"\\?\s*<\s*\\?\|\s*im\s*\\?_start\s*\\?\|\s*>\s*(\w+)\s*\n?", re.IGNORECASE
-)
-CHATML_END_RE = re.compile(r"\\?\s*<\s*\\?\|\s*im\s*\\?_end\s*\\?\|\s*>\s*", re.IGNORECASE)
+CONTROL_TOKEN_RE = re.compile(r"\\?<\\?\|im\\?_(?:start|end)\\?\|\\?>", re.IGNORECASE)
+CHATML_START_RE = re.compile(r"\\?<\\?\|im\\?_start\\?\|\\?>(\w+)\n?", re.IGNORECASE)
+CHATML_END_RE = re.compile(r"\\?<\\?\|im\\?_end\\?\|\\?>", re.IGNORECASE)
 COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
 PARAM_FENCE_RE = re.compile(r"^(?P<fence>`{3,})")
 TOOL_HINT_STRIPPED = TOOL_WRAP_HINT.strip()
@@ -89,19 +85,17 @@ HINT_END_RE = (
 
 # --- Streaming Specific Patterns ---
 _START_PATTERNS = {
-    "TOOL": r"\\?\[\s*ToolCalls\s*\\?\]",
-    "ORPHAN": r"\\?\[\s*Call\s*\\?:\s*(?:[^\]\\]|\\.)+\s*\\?\]",
-    "RESP": r"\\?\[\s*ToolResults\s*\\?\]",
-    "ARG": r"\\?\[\s*CallParameter\s*\\?:\s*(?:[^\]\\]|\\.)+\s*\\?\]",
-    "RESULT": r"\\?\[\s*ToolResult\s*\\?\]",
-    "ITEM": r"\\?\[\s*Result\s*\\?:\s*(?:[^\]\\]|\\.)+\s*\\?\]",
-    "TAG": r"\\?\s*<\s*\\?\|\s*im\s*\\?_start\s*\\?\|\s*>",
+    "TOOL": r"\\?\[ToolCalls\\?]",
+    "ORPHAN": r"\\?\[Call\\?:[^]]+\\?]",
+    "RESP": r"\\?\[ToolResults\\?]",
+    "ARG": r"\\?\[CallParameter\\?:[^]]+\\?]",
+    "RESULT": r"\\?\[ToolResult\\?]",
+    "ITEM": r"\\?\[Result\\?:[^]]+\\?]",
+    "TAG": r"\\?<\\?\|im\\?_start\\?\|\\?>",
 }
 
-_PROTOCOL_ENDS = (
-    r"\\?\[\s*\\?/\s*(?:ToolCalls|Call|ToolResults|CallParameter|ToolResult|Result)\s*\\?\]"
-)
-_TAG_END = r"\\?\s*<\s*\\?\|\s*im\s*\\?_end\s*\\?\|\s*>"
+_PROTOCOL_ENDS = r"\\?\[\\?/(?:ToolCalls|Call|ToolResults|CallParameter|ToolResult|Result)\\?]"
+_TAG_END = r"\\?<\\?\|im\\?_end\\?\|\\?>"
 
 if TOOL_HINT_START_ESC and TOOL_HINT_END_ESC:
     _START_PATTERNS["HINT"] = rf"\n?{TOOL_HINT_START_ESC}:?\s*"
@@ -115,7 +109,7 @@ if TOOL_HINT_START_ESC and TOOL_HINT_END_ESC:
 
 STREAM_MASTER_RE = re.compile("|".join(_master_parts), re.IGNORECASE)
 STREAM_TAIL_RE = re.compile(
-    r"(?:\\|\\?\[[TCRP/]?\s*[^]]*|\\?\s*<\s*\\?\|?\s*i?\s*m?\s*\\?_?(?:s?t?a?r?t?|e?n?d?)\s*\\?\|?\s*>?|)$",
+    r"(?:\\|\\?\[[^]]*|\\?<\\?\|?i?m?\\?_?(?:s?t?a?r?t?|e?n?d?)\\?\|?\\?>?)$",
     re.IGNORECASE,
 )
 
@@ -180,7 +174,7 @@ def estimate_tokens(text: str | None) -> int:
 
 
 async def save_file_to_tempfile(
-    file_in_base64: str, file_name: str = "", tempdir: Path | None = None
+    file_in_base64: str | bytes, file_name: str = "", tempdir: Path | None = None
 ) -> Path:
     """Decode base64 file data and save to a temporary file."""
     with tempfile.NamedTemporaryFile(
@@ -195,11 +189,15 @@ async def save_url_to_tempfile(url: str, tempdir: Path | None = None) -> Path:
     """Download content from a URL and save to a temporary file."""
     data: bytes | None = None
     suffix: str | None = None
-    if url.startswith("data:image/"):
+    if url.startswith("data:"):
         metadata_part = url.split(",")[0]
         mime_type = metadata_part.split(":")[1].split(";")[0]
         data = base64.b64decode(url.split(",")[1])
-        suffix = mimetypes.guess_extension(mime_type) or f".{mime_type.split('/')[1]}"
+        suffix = mimetypes.guess_extension(mime_type)
+        if not suffix and "/" in mime_type:
+            suffix = f".{mime_type.split('/')[1]}"
+        elif not suffix:
+            suffix = ".bin"
     else:
         async with AsyncSession(impersonate="chrome", allow_redirects=True) as client:
             resp = await client.get(url)
@@ -278,7 +276,7 @@ def strip_system_hints(text: str) -> str:
     return cleaned
 
 
-def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[ToolCall]]:
+def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[AppToolCall]]:
     """
     Extract tool metadata and return text stripped of technical markers.
     Arguments are parsed into JSON and assigned deterministic call IDs.
@@ -286,7 +284,7 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
     if not text:
         return text, []
 
-    tool_calls: list[ToolCall] = []
+    tool_calls: list[AppToolCall] = []
 
     def _create_tool_call(name: str, raw_args: str) -> None:
         if not extract:
@@ -321,10 +319,10 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         call_id = f"call_{hashlib.sha256(seed).hexdigest()[:24]}"
 
         tool_calls.append(
-            ToolCall(
+            AppToolCall(
                 id=call_id,
                 type="function",
-                function=FunctionCall(name=name, arguments=arguments),
+                function=AppToolCallFunction(name=name, arguments=arguments),
             )
         )
 
@@ -341,12 +339,12 @@ def remove_tool_call_blocks(text: str) -> str:
     return cleaned
 
 
-def extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
+def extract_tool_calls(text: str) -> tuple[str, list[AppToolCall]]:
     """Extract tool calls and return cleaned text."""
     return _process_tools_internal(text, extract=True)
 
 
-def text_from_message(message: Message) -> str:
+def text_from_message(message: AppMessage) -> str:
     """Concatenate text and tool arguments from a message for token estimation."""
     base_text = ""
     if isinstance(message.content, str):
