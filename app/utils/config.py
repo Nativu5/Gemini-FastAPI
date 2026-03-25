@@ -71,6 +71,37 @@ class GeminiModelConfig(BaseModel):
         return v
 
 
+class GeminiGemPoliciesConfig(BaseModel):
+    """Configuration for built-in policy gems managed by the server."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable built-in policy gem synchronization during client initialization",
+    )
+    prefix: str = Field(
+        default="fastapi_policy_",
+        description="Name prefix used to identify policy gems created by this server",
+    )
+
+
+class GeminiGemsConfig(BaseModel):
+    """Configuration for gem behaviors exposed by the API."""
+
+    enabled: bool = Field(default=True, description="Enable gem API endpoints")
+    fetch_on_init: bool = Field(
+        default=True,
+        description="Fetch and cache gem inventory during client initialization",
+    )
+    include_hidden_on_fetch: bool = Field(
+        default=False,
+        description="Include hidden gems when fetching gem inventory",
+    )
+    policies: GeminiGemPoliciesConfig = Field(
+        default=GeminiGemPoliciesConfig(),
+        description="Built-in policy gem synchronization settings",
+    )
+
+
 class GeminiConfig(BaseModel):
     """Gemini API configuration"""
 
@@ -78,6 +109,10 @@ class GeminiConfig(BaseModel):
         ..., description="List of Gemini client credential pairs"
     )
     models: list[GeminiModelConfig] = Field(default=[], description="List of custom Gemini models")
+    gems: GeminiGemsConfig = Field(
+        default=GeminiGemsConfig(),
+        description="Gem endpoint and synchronization settings",
+    )
     model_strategy: Literal["append", "overwrite"] = Field(
         default="append",
         description="Strategy for loading models: 'append' merges custom with default, 'overwrite' uses only custom",

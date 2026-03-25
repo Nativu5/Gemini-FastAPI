@@ -224,6 +224,13 @@ gemini:
     - model_name: "gemini-3.0-pro"
       model_header:
         x-goog-ext-525001261-jspb: '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4],null,null,1]'
+  gems:
+    enabled: true
+    fetch_on_init: true
+    include_hidden_on_fetch: false
+    policies:
+      enabled: true
+      prefix: "fastapi_policy_"
 ```
 
 #### Environment Variables

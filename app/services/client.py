@@ -1,8 +1,10 @@
+import asyncio
 from pathlib import Path
 from typing import Any, cast
 
 import orjson
 from gemini_webapi import GeminiClient, ModelOutput
+from gemini_webapi.types import Gem
 from loguru import logger
 
 from app.models import Message
@@ -13,6 +15,8 @@ from app.utils.helper import (
     save_file_to_tempfile,
     save_url_to_tempfile,
 )
+
+from .policy_gems import sync_policy_gems
 
 _UNSET = object()
 
@@ -27,6 +31,8 @@ class GeminiClientWrapper(GeminiClient):
     def __init__(self, client_id: str, **kwargs):
         super().__init__(**kwargs)
         self.id = client_id
+        self._gem_lock = asyncio.Lock()
+        self._policy_gem_ids: dict[str, str] = {}
 
     async def init(
         self,
@@ -59,12 +65,125 @@ class GeminiClientWrapper(GeminiClient):
                 refresh_interval=refresh_interval,
                 verbose=verbose,
             )
+
+            # Keep gem cache and server-managed policy gems in a known-good state.
+            await self._initialize_gems()
         except Exception:
             logger.exception(f"Failed to initialize GeminiClient {self.id}")
             raise
 
     def running(self) -> bool:
         return self._running
+
+    async def _initialize_gems(self) -> None:
+        """Initialize gem cache and built-in policy gems based on server config."""
+        gem_cfg = g_config.gemini.gems
+        if not gem_cfg.enabled:
+            return
+
+        async with self._gem_lock:
+            include_hidden = gem_cfg.include_hidden_on_fetch
+
+            if gem_cfg.fetch_on_init:
+                await self.fetch_gems(include_hidden=include_hidden)
+
+            if gem_cfg.policies.enabled:
+                self._policy_gem_ids = await sync_policy_gems(
+                    self,
+                    prefix=gem_cfg.policies.prefix,
+                )
+                # Refresh once more so callers can immediately read the final state.
+                await self.fetch_gems(include_hidden=include_hidden)
+
+    def policy_gem_id(self, key: str) -> str | None:
+        """Return a synced policy gem id for a logical key, or None when unavailable."""
+        return self._policy_gem_ids.get(key)
+
+    async def refresh_gems(self, include_hidden: bool | None = None) -> list[Gem]:
+        """Fetch gems from Gemini and return a plain list for API responses."""
+        gem_cfg = g_config.gemini.gems
+        use_hidden = gem_cfg.include_hidden_on_fetch if include_hidden is None else include_hidden
+
+        async with self._gem_lock:
+            gem_jar = await self.fetch_gems(include_hidden=use_hidden)
+            return list(gem_jar)
+
+    def list_cached_gems(self) -> list[Gem]:
+        """Return cached gems, or an empty list when cache is not initialized yet."""
+        try:
+            return list(self.gems)
+        except RuntimeError:
+            return []
+
+    @staticmethod
+    def _find_gem_in_list(gems: list[Gem], gem_ref: str) -> Gem | None:
+        """Find a gem in a list by id or case-insensitive name."""
+        normalized = gem_ref.strip().lower()
+        for gem in gems:
+            if gem.id == gem_ref or gem.name.lower() == normalized:
+                return gem
+        return None
+
+    async def get_gem(self, gem_ref: str, include_hidden: bool | None = None) -> Gem:
+        """Find a gem by id or name. Name matching is case-insensitive."""
+        gems = self.list_cached_gems()
+        if not gems:
+            gems = await self.refresh_gems(include_hidden=include_hidden)
+
+        found = self._find_gem_in_list(gems, gem_ref)
+        if found is not None:
+            return found
+
+        raise ValueError(f"Gem '{gem_ref}' not found")
+
+    async def create_custom_gem(self, name: str, prompt: str, description: str = "") -> Gem:
+        """Create a custom gem and refresh local cache."""
+        async with self._gem_lock:
+            created = await self.create_gem(name=name, prompt=prompt, description=description)
+            await self.fetch_gems(include_hidden=g_config.gemini.gems.include_hidden_on_fetch)
+            return created
+
+    async def update_custom_gem(
+        self, gem_ref: str, name: str, prompt: str, description: str = ""
+    ) -> Gem:
+        """Update a custom gem identified by id or name and refresh local cache."""
+        async with self._gem_lock:
+            gems = self.list_cached_gems()
+            if not gems:
+                gems = list(
+                    await self.fetch_gems(
+                        include_hidden=g_config.gemini.gems.include_hidden_on_fetch,
+                    )
+                )
+            target = self._find_gem_in_list(gems, gem_ref)
+            if target is None:
+                raise ValueError(f"Gem '{gem_ref}' not found")
+
+            updated = await self.update_gem(
+                gem=target,
+                name=name,
+                prompt=prompt,
+                description=description,
+            )
+            await self.fetch_gems(include_hidden=g_config.gemini.gems.include_hidden_on_fetch)
+            return updated
+
+    async def delete_custom_gem(self, gem_ref: str) -> None:
+        """Delete a custom gem identified by id or name and refresh local cache."""
+        async with self._gem_lock:
+            gems = self.list_cached_gems()
+            if not gems:
+                gems = list(
+                    await self.fetch_gems(
+                        include_hidden=g_config.gemini.gems.include_hidden_on_fetch,
+                    )
+                )
+            target = self._find_gem_in_list(gems, gem_ref)
+            if target is None:
+                raise ValueError(f"Gem '{gem_ref}' not found")
+
+            await self.delete_gem(target)
+            await self.fetch_gems(include_hidden=g_config.gemini.gems.include_hidden_on_fetch)
 
     @staticmethod
     async def process_message(
