@@ -225,12 +225,25 @@ gemini:
       model_header:
         x-goog-ext-525001261-jspb: '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4],null,null,1]'
   gems:
-    enabled: true
+    # Disabled by default to avoid accidental creation/update/deletion of gems.
+    enabled: false
     fetch_on_init: true
     include_hidden_on_fetch: false
     policies:
-      enabled: true
+      enabled: false
       prefix: "fastapi_policy_"
+      default_policy:
+        enabled: false
+        key: "general_capability_guardrail"
+        # If `prompt` is null (or omitted), the implementation's built-in
+        # base system prompt will be used instead.
+        prompt: null
+
+> [!WARNING]
+> Enabling `gems.policies.enabled` will cause the server to create, update,
+> and delete policy gems in the configured Gemini account. This behavior is
+> intended for internal server-managed guardrails and should be opted into
+> explicitly in production deployments.
 ```
 
 #### Environment Variables

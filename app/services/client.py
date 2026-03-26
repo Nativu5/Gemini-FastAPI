@@ -88,9 +88,19 @@ class GeminiClientWrapper(GeminiClient):
                 await self.fetch_gems(include_hidden=include_hidden)
 
             if gem_cfg.policies.enabled:
+                # Force include_hidden=True during sync so hidden gems/duplicates
+                # are discovered and reconciled. Allow the policy prompt to be
+                # overridden via config (policies.default_policy.prompt) when
+                # `default_policy.enabled` is true.
+                default_prompt = None
+                policy_dp = getattr(gem_cfg.policies, "default_policy", None)
+                if policy_dp and getattr(policy_dp, "enabled", False):
+                    default_prompt = getattr(policy_dp, "prompt", None)
                 self._policy_gem_ids = await sync_policy_gems(
                     self,
                     prefix=gem_cfg.policies.prefix,
+                    include_hidden=True,
+                    default_prompt=default_prompt,
                 )
                 # Refresh once more so callers can immediately read the final state.
                 await self.fetch_gems(include_hidden=include_hidden)
@@ -118,9 +128,11 @@ class GeminiClientWrapper(GeminiClient):
     @staticmethod
     def _find_gem_in_list(gems: list[Gem], gem_ref: str) -> Gem | None:
         """Find a gem in a list by id or case-insensitive name."""
-        normalized = gem_ref.strip().lower()
+        ref_stripped = (gem_ref or "").strip()
+        normalized = ref_stripped.lower()
         for gem in gems:
-            if gem.id == gem_ref or gem.name.lower() == normalized:
+            gem_id = (gem.id or "").strip()
+            if gem_id == ref_stripped or gem.name.lower() == normalized:
                 return gem
         return None
 
