@@ -47,6 +47,8 @@ class GeminiClientWrapper(GeminiClient):
         self._system_prompt_gem_ids: dict[str, str] = {}
         self._managed_gem_create_timestamps: deque[float] = deque()
         self._managed_gem_last_touch_timestamps: dict[str, float] = {}
+        self._managed_gem_pending_touch_ids: set[str] = set()
+        self._managed_gem_touch_worker_task: asyncio.Task[None] | None = None
         self._managed_gem_retry_queue: list[GeminiClientWrapper._ManagedGemRetry] = []
         self._managed_gem_metrics: dict[str, int] = {
             "managed_gems_created": 0,
@@ -134,6 +136,79 @@ class GeminiClientWrapper(GeminiClient):
                 except Exception:
                     self._managed_gem_metrics["managed_gems_retry_failed"] += 1
                     self._enqueue_retry(retry.op, retry.gem_id, retry.attempt + 1)
+
+    def _schedule_managed_policy_touch(self, gem_id: str) -> None:
+        """Queue gem usage touch updates and ensure a background worker exists."""
+        gem_cfg = g_config.gemini.gems
+        if not gem_cfg.cleanup.enabled:
+            return
+
+        self._managed_gem_pending_touch_ids.add(gem_id)
+        if self._managed_gem_touch_worker_task is None or self._managed_gem_touch_worker_task.done():
+            self._managed_gem_touch_worker_task = asyncio.create_task(
+                self._managed_policy_touch_worker()
+            )
+
+    async def _managed_policy_touch_worker(self) -> None:
+        """Batch and flush pending managed gem touches in the background."""
+        try:
+            while self._managed_gem_pending_touch_ids:
+                await asyncio.sleep(0.5)
+                await self._flush_managed_policy_touches()
+        finally:
+            self._managed_gem_touch_worker_task = None
+
+    async def _flush_managed_policy_touches(self) -> None:
+        """Flush queued managed gem touch updates in a single fetch/update pass."""
+        gem_cfg = g_config.gemini.gems
+        if not gem_cfg.cleanup.enabled:
+            self._managed_gem_pending_touch_ids.clear()
+            return
+
+        pending = list(self._managed_gem_pending_touch_ids)
+        if not pending:
+            return
+
+        self._managed_gem_pending_touch_ids.clear()
+
+        now_ts = time.time()
+        min_interval_sec = gem_cfg.cleanup.touch_interval_minutes * 60
+
+        async with self._gem_lock:
+            gems = list(await self.fetch_gems(include_hidden=True))
+            by_id = {gem.id: gem for gem in gems}
+
+            for gem_id in pending:
+                last_touch = self._managed_gem_last_touch_timestamps.get(gem_id)
+                if last_touch is not None and now_ts - last_touch < min_interval_sec:
+                    continue
+
+                target = by_id.get(gem_id)
+                if target is None:
+                    continue
+                if target.predefined:
+                    continue
+                if not target.name.startswith(gem_cfg.policies.prefix):
+                    continue
+                if target.prompt is None:
+                    continue
+
+                updated_description = touch_managed_description(target.description, now_ts=now_ts)
+                if (target.description or "") == updated_description:
+                    self._managed_gem_last_touch_timestamps[gem_id] = now_ts
+                    continue
+
+                try:
+                    await self.update_gem(
+                        gem=target,
+                        name=target.name,
+                        description=updated_description,
+                        prompt=target.prompt,
+                    )
+                    self._managed_gem_last_touch_timestamps[gem_id] = now_ts
+                    self._managed_gem_metrics["managed_gems_touch_updated"] += 1
+                except Exception:
+                    self._enqueue_retry("touch", gem_id)
 
     def _apply_policy_sync_result(self, sync_result: PolicySyncResult) -> None:
         """Apply sync result into cache, metrics, and retry queue."""
@@ -275,8 +350,8 @@ class GeminiClientWrapper(GeminiClient):
         gem_id = self._policy_gem_ids.get(key)
         if gem_id:
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._touch_managed_policy_gem_usage(gem_id))
+                asyncio.get_running_loop()
+                self._schedule_managed_policy_touch(gem_id)
             except RuntimeError:
                 # No running loop in this context.
                 pass
@@ -338,8 +413,8 @@ class GeminiClientWrapper(GeminiClient):
             created_or_found = self._policy_gem_ids.get(key)
             if created_or_found is not None:
                 try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._touch_managed_policy_gem_usage(created_or_found))
+                    asyncio.get_running_loop()
+                    self._schedule_managed_policy_touch(created_or_found)
                 except RuntimeError:
                     pass
             return created_or_found
@@ -407,51 +482,6 @@ class GeminiClientWrapper(GeminiClient):
             self._system_prompt_gem_ids[cache_key] = created.id
             return created.id
 
-    async def _touch_managed_policy_gem_usage(self, gem_id: str) -> None:
-        """Refresh managed metadata last-used timestamp with write-throttling."""
-        gem_cfg = g_config.gemini.gems
-        if not gem_cfg.cleanup.enabled:
-            return
-
-        now_ts = time.time()
-        min_interval_sec = gem_cfg.cleanup.touch_interval_minutes * 60
-        last_touch = self._managed_gem_last_touch_timestamps.get(gem_id)
-        if last_touch is not None and now_ts - last_touch < min_interval_sec:
-            return
-
-        async with self._gem_lock:
-            gems = list(await self.fetch_gems(include_hidden=True))
-            target: Gem | None = next((gem for gem in gems if gem.id == gem_id), None)
-            if target is None:
-                return
-
-            if target.predefined:
-                return
-
-            prefix = gem_cfg.policies.prefix
-            if not target.name.startswith(prefix):
-                return
-
-            if target.prompt is None:
-                return
-
-            updated_description = touch_managed_description(target.description, now_ts=now_ts)
-            if (target.description or "") == updated_description:
-                self._managed_gem_last_touch_timestamps[gem_id] = now_ts
-                return
-
-            try:
-                await self.update_gem(
-                    gem=target,
-                    name=target.name,
-                    description=updated_description,
-                    prompt=target.prompt,
-                )
-                self._managed_gem_last_touch_timestamps[gem_id] = now_ts
-                self._managed_gem_metrics["managed_gems_touch_updated"] += 1
-            except Exception:
-                self._enqueue_retry("touch", gem_id)
-        
     def managed_gem_metrics(self) -> dict[str, int]:
         """Return a copy of managed gem lifecycle counters."""
         return dict(self._managed_gem_metrics)
