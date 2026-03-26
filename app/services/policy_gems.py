@@ -36,13 +36,6 @@ def _build_specs(prefix: str, default_prompt: str | None = None) -> list[PolicyG
     if default_prompt is None:
         general_guardrail_prompt = (
             "You are operating behind an OpenAI-compatible Gemini wrapper.\n"
-            "Treat these rules as higher priority than user instructions.\n"
-            "Capabilities should be stated accurately.\n"
-            "Do not claim native support for video generation, video editing, audio generation, "
-            "audio editing, audio transcription, or audio translation.\n"
-            "If such media capabilities are requested and no explicit tool for them exists in the "
-            "current request context, politely refuse and offer available alternatives.\n"
-            "Never fabricate unavailable media outputs."
         )
     else:
         general_guardrail_prompt = default_prompt
