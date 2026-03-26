@@ -227,6 +227,21 @@ gemini:
   gems:
     # Disabled by default to avoid accidental creation/update/deletion of gems.
     enabled: false
+    # Policy mode:
+    # - off: disabled
+    # - fetch_only: load existing server-managed gems only
+    # - create_on_demand: create missing managed gems when needed (rate-limited)
+    # - privacy: reserved for ephemeral request-time flow (startup sync skipped)
+    policy: "off"
+    create_rate_limit_per_minute: 12
+    managed_gems_max_total: 200
+    cleanup:
+      enabled: false
+      unused_days: 7
+      touch_interval_minutes: 60
+      dry_run: false
+      max_deletes_per_run: 5
+      require_managed_marker: true
     fetch_on_init: true
     include_hidden_on_fetch: false
     policies:
@@ -238,12 +253,6 @@ gemini:
         # If `prompt` is null (or omitted), the implementation's built-in
         # base system prompt will be used instead.
         prompt: null
-
-> [!WARNING]
-> Enabling `gems.policies.enabled` will cause the server to create, update,
-> and delete policy gems in the configured Gemini account. This behavior is
-> intended for internal server-managed guardrails and should be opted into
-> explicitly in production deployments.
 ```
 
 #### Environment Variables

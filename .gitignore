@@ -11,3 +11,5 @@ __pycache__
 .env
 config.debug.yaml
 data/
+
+tests/

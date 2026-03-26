@@ -32,10 +32,24 @@ gemini:
   models: []
   # Gem management (custom 'gems' managed in your Gemini account).
   # WARNING: Enabling policy sync may create, update, or delete gems in the
-  # associated Gemini account. Keep disabled in sample configs to avoid
-  # accidental mutations. Set these explicitly in production environments.
+  # associated Gemini account if it has our identifiers.
   gems:
     enabled: false                   # Enable gem API endpoints (defaults to OFF)
+    # Policy mode:
+    # - off: disabled
+    # - fetch_only: load existing server-managed gems (prefix-filtered), never create/update/delete
+    # - create_on_demand: create missing managed gems up to rate-limit budget
+    # - privacy: reserved for ephemeral request-time flow (startup sync is skipped)
+    policy: "off"
+    create_rate_limit_per_minute: 4 # Per-client budget for server-managed gem creations
+    managed_gems_max_total: 200      # Global cap for managed gems with our prefix
+    cleanup:
+      enabled: true                # Delete managed gems when unused for `unused_days`
+      unused_days: 7                # Delete if not used for this many days
+      touch_interval_minutes: 60    # Min minutes between metadata touch updates per gem
+      dry_run: false                # If true, logs stale candidates without deleting
+      max_deletes_per_run: 5        # Safety cap for deletions in a single sync pass
+      require_managed_marker: true  # Delete only gems carrying Gemini-FastAPI marker
     fetch_on_init: true              # Fetch and cache gems when each client starts
     include_hidden_on_fetch: false   # Include hidden gems when fetching inventory
     policies:

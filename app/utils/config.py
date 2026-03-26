@@ -75,8 +75,8 @@ class GeminiGemPoliciesConfig(BaseModel):
     """Configuration for built-in policy gems managed by the server."""
 
     enabled: bool = Field(
-        default=True,
-        description="Enable built-in policy gem synchronization during client initialization",
+        default=False,
+        description="Deprecated flag. Prefer `gemini.gems.policy` mode selection",
     )
     prefix: str = Field(
         default="fastapi_policy_",
@@ -84,10 +84,59 @@ class GeminiGemPoliciesConfig(BaseModel):
     )
 
 
+class GeminiGemCleanupConfig(BaseModel):
+    """Cleanup policy for server-managed gems."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable deletion of managed gems that have not been used recently",
+    )
+    unused_days: int = Field(
+        default=7,
+        ge=1,
+        description="Delete managed gems that were not used for this many days",
+    )
+    touch_interval_minutes: int = Field(
+        default=60,
+        ge=1,
+        description="Minimum minutes between usage-touch metadata updates for the same gem",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="Log cleanup candidates without deleting them",
+    )
+    max_deletes_per_run: int = Field(
+        default=5,
+        ge=1,
+        description="Maximum managed-gem deletions per synchronization run",
+    )
+    require_managed_marker: bool = Field(
+        default=True,
+        description="Delete only gems that contain Gemini-FastAPI managed marker metadata",
+    )
+
+
 class GeminiGemsConfig(BaseModel):
     """Configuration for gem behaviors exposed by the API."""
 
-    enabled: bool = Field(default=True, description="Enable gem API endpoints")
+    enabled: bool = Field(default=False, description="Enable gem API endpoints")
+    policy: Literal["off", "fetch_only", "create_on_demand", "privacy"] = Field(
+        default="off",
+        description=(
+            "Policy gem mode: off=disabled, fetch_only=read existing prefixed gems only, "
+            "create_on_demand=create missing managed gems, privacy=ephemeral mode"
+        ),
+    )
+    create_rate_limit_per_minute: int = Field(
+        default=12,
+        ge=1,
+        description="Maximum server-managed gem creations per minute per client",
+    )
+    managed_gems_max_total: int = Field(
+        default=200,
+        ge=1,
+        description="Maximum number of managed gems (by prefix) allowed per client",
+    )
     fetch_on_init: bool = Field(
         default=True,
         description="Fetch and cache gem inventory during client initialization",
@@ -99,6 +148,10 @@ class GeminiGemsConfig(BaseModel):
     policies: GeminiGemPoliciesConfig = Field(
         default=GeminiGemPoliciesConfig(),
         description="Built-in policy gem synchronization settings",
+    )
+    cleanup: GeminiGemCleanupConfig = Field(
+        default=GeminiGemCleanupConfig(),
+        description="Cleanup policy for managed gems",
     )
 
 
