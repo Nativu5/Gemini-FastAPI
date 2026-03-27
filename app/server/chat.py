@@ -71,6 +71,15 @@ from app.utils.helper import (
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 METADATA_TTL_MINUTES = 15
 
+_MISSING_CHAT_ERROR_MARKERS = (
+    "not found",
+    "404",
+    "invalid",
+    "metadata",
+    "conversation",
+    "chat",
+)
+
 router = APIRouter()
 
 
@@ -745,6 +754,10 @@ async def _find_reusable_session(
     messages: list[Message],
 ) -> tuple[ChatSession | None, GeminiClientWrapper | None, list[Message]]:
     """Find an existing chat session matching the longest suitable history prefix."""
+    if g_config.gemini.chat_mode == "temporary":
+        logger.debug("Temporary chat mode enabled; skipping metadata-based session reuse.")
+        return None, None, messages
+
     if len(messages) < 2:
         return None, None, messages
 
@@ -759,7 +772,14 @@ async def _find_reusable_session(
                     age_minutes = (now - updated_at).total_seconds() / 60
                     if age_minutes <= METADATA_TTL_MINUTES:
                         client = await pool.acquire(conv.client_id)
-                        session = client.start_chat(metadata=conv.metadata, model=model)
+                        try:
+                            session = client.start_chat(metadata=conv.metadata, model=model)
+                        except Exception as exc:
+                            logger.warning(
+                                f"Failed to reuse metadata chat at prefix length {search_end}: {exc}"
+                            )
+                            search_end -= 1
+                            continue
                         remain = messages[search_end:]
                         logger.debug(
                             f"Match found at prefix length {search_end}/{len(messages)}. Client: {conv.client_id}"
@@ -776,7 +796,6 @@ async def _find_reusable_session(
                 logger.warning(
                     f"Error checking LMDB for reusable session at length {search_end}: {e}"
                 )
-                break
         search_end -= 1
 
     logger.debug(f"No reusable session found for {len(messages)} messages.")
@@ -788,13 +807,14 @@ async def _send_with_split(
     text: str,
     files: list[Path | str | io.BytesIO] | None = None,
     stream: bool = False,
+    temporary: bool = False,
 ) -> AsyncGenerator[ModelOutput] | ModelOutput:
     """Send text to Gemini, splitting or converting to attachment if too long."""
     if len(text) <= MAX_CHARS_PER_REQUEST:
         try:
             if stream:
-                return session.send_message_stream(text, files=files)
-            return await session.send_message(text, files=files)
+                return session.send_message_stream(text, files=files, temporary=temporary)
+            return await session.send_message(text, files=files, temporary=temporary)
         except Exception as e:
             logger.exception(f"Error sending message to Gemini: {e}")
             raise
@@ -815,11 +835,71 @@ async def _send_with_split(
             "3. Execute the instructions or answer the questions found *inside* that file immediately.\n"
         )
         if stream:
-            return session.send_message_stream(instruction, files=final_files)
-        return await session.send_message(instruction, files=final_files)
+            return session.send_message_stream(instruction, files=final_files, temporary=temporary)
+        return await session.send_message(instruction, files=final_files, temporary=temporary)
     except Exception as e:
         logger.exception(f"Error sending large text as file to Gemini: {e}")
         raise
+
+
+def _is_missing_chat_error(exc: Exception) -> bool:
+    lowered = str(exc).lower()
+    if not lowered:
+        return False
+    return all(marker in lowered for marker in ("chat", "not found")) or any(
+        marker in lowered for marker in _MISSING_CHAT_ERROR_MARKERS
+    )
+
+
+async def _send_with_internal_fallback(
+    *,
+    pool: GeminiClientPool,
+    model: Model,
+    session: ChatSession,
+    client: GeminiClientWrapper,
+    current_input: str,
+    files: list[Path | str | io.BytesIO],
+    full_prepared_messages: list[Message],
+    tmp_dir: Path,
+    stream: bool,
+    reused_session: bool,
+    temporary: bool,
+) -> tuple[AsyncGenerator[ModelOutput] | ModelOutput, ChatSession, GeminiClientWrapper]:
+    try:
+        output = await _send_with_split(
+            session,
+            current_input,
+            files=files,
+            stream=stream,
+            temporary=temporary,
+        )
+        return output, session, client
+    except Exception as exc:
+        should_fallback = (
+            g_config.gemini.fallback_to_internal_on_missing_chat
+            and reused_session
+            and not stream
+            and _is_missing_chat_error(exc)
+        )
+        if not should_fallback:
+            raise
+
+        logger.warning(
+            "Metadata-backed chat reuse failed; retrying with internal history replay in a fresh chat."
+        )
+        fallback_client = await pool.acquire()
+        fallback_session = fallback_client.start_chat(model=model)
+        fallback_input, fallback_files = await GeminiClientWrapper.process_conversation(
+            full_prepared_messages, tmp_dir
+        )
+        output = await _send_with_split(
+            fallback_session,
+            fallback_input,
+            files=fallback_files,
+            stream=False,
+            temporary=temporary,
+        )
+        return output, fallback_session, fallback_client
 
 
 class StreamingOutputFilter:
@@ -1603,6 +1683,7 @@ async def create_chat_completion(
     )
 
     session, client, remain = await _find_reusable_session(db, pool, model, msgs)
+    reused_session = session is not None
 
     if session:
         if not remain:
@@ -1636,14 +1717,25 @@ async def create_chat_completion(
 
     completion_id = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(datetime.now(tz=UTC).timestamp())
+    use_google_temporary_mode = g_config.gemini.chat_mode == "temporary"
 
     try:
         assert session and client
         logger.debug(
             f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
         )
-        resp_or_stream = await _send_with_split(
-            session, m_input, files=files, stream=request.stream
+        resp_or_stream, session, client = await _send_with_internal_fallback(
+            pool=pool,
+            model=model,
+            session=session,
+            client=client,
+            current_input=m_input,
+            files=files,
+            full_prepared_messages=msgs,
+            tmp_dir=tmp_dir,
+            stream=bool(request.stream),
+            reused_session=reused_session,
+            temporary=use_google_temporary_mode,
         )
     except Exception as e:
         logger.exception("Gemini API error")
@@ -1785,6 +1877,7 @@ async def create_response(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     session, client, remain = await _find_reusable_session(db, pool, model, messages)
+    reused_session = session is not None
     if session:
         msgs = _prepare_messages_for_model(
             remain,
@@ -1812,14 +1905,25 @@ async def create_response(
 
     response_id = f"resp_{uuid.uuid4().hex}"
     created_time = int(datetime.now(tz=UTC).timestamp())
+    use_google_temporary_mode = g_config.gemini.chat_mode == "temporary"
 
     try:
         assert session and client
         logger.debug(
             f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
         )
-        resp_or_stream = await _send_with_split(
-            session, m_input, files=files, stream=request.stream
+        resp_or_stream, session, client = await _send_with_internal_fallback(
+            pool=pool,
+            model=model,
+            session=session,
+            client=client,
+            current_input=m_input,
+            files=files,
+            full_prepared_messages=messages,
+            tmp_dir=tmp_dir,
+            stream=bool(request.stream),
+            reused_session=reused_session,
+            temporary=use_google_temporary_mode,
         )
     except Exception as e:
         logger.exception("Gemini API error")

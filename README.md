@@ -211,6 +211,23 @@ To use Gemini-FastAPI, you need to extract your Gemini session cookies:
 
 Each client entry can be configured with a different proxy to work around rate limits. Omit the `proxy` field or set it to `null` or an empty string to keep a direct connection.
 
+### Chat Session Mode
+
+You can control whether the server reuses Google chat metadata or always starts fresh chats:
+
+```yaml
+gemini:
+  chat_mode: "normal" # "normal" (reuse metadata) or "temporary" (Google temporary chat, not saved to account)
+  fallback_to_internal_on_missing_chat: true # Retry with local history replay when reuse fails
+```
+
+Environment variable equivalents:
+
+```bash
+export CONFIG_GEMINI__CHAT_MODE="temporary"
+export CONFIG_GEMINI__FALLBACK_TO_INTERNAL_ON_MISSING_CHAT=true
+```
+
 ### Custom Models
 
 You can define custom models in `config/config.yaml` or via environment variables.

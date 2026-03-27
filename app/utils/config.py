@@ -96,6 +96,14 @@ class GeminiConfig(BaseModel):
         ge=1,
         description="Maximum characters Gemini Web can accept per request",
     )
+    chat_mode: Literal["normal", "temporary"] = Field(
+        default="normal",
+        description="Chat mode: 'normal' reuses Google chat metadata, 'temporary' always starts fresh chats",
+    )
+    fallback_to_internal_on_missing_chat: bool = Field(
+        default=True,
+        description="Retry by replaying local history when metadata-based Google chat reuse fails",
+    )
 
     @field_validator("models", mode="before")
     @classmethod
