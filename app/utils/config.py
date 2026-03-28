@@ -106,7 +106,7 @@ class GeminiConfig(BaseModel):
     )
     chat_mode: ChatMode = Field(
         default=ChatMode.NORMAL,
-        description="Chat mode: 'normal' reuses Google chat metadata, 'temporary' always starts fresh chats",
+        description="Chat mode: 'normal' uses standard chats, 'temporary' uses Google's temporary mode (not saved to account), enforces an effective input limit of 90% of max_chars_per_request, and compacts older turns into a summary when oversized",
     )
 
     @field_validator("models", mode="before")

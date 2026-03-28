@@ -213,17 +213,22 @@ Each client entry can be configured with a different proxy to work around rate l
 
 ### Chat Session Mode
 
-You can control whether the server reuses Google chat metadata or always starts fresh chats:
+You can control whether requests use normal Google chats or Google's temporary chat mode:
 
 ```yaml
 gemini:
   chat_mode: "normal" # "normal" (reuse metadata) or "temporary" (Google temporary chat, not saved to account)
+  max_chars_per_request: 1000000
 ```
+
+When `chat_mode` is set to `temporary`, the server applies an internal effective input limit of 90% of `max_chars_per_request`.
+If a temporary-mode request (or fallback full-history replay) exceeds this budget, older turns are compacted into a summary block while recent turns stay verbatim.
 
 Environment variable equivalents:
 
 ```bash
 export CONFIG_GEMINI__CHAT_MODE="temporary"
+export CONFIG_GEMINI__MAX_CHARS_PER_REQUEST=1000000
 ```
 
 ### Custom Models
