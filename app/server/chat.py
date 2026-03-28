@@ -94,6 +94,11 @@ def _effective_max_chars_per_request() -> int:
     return max(limit, 1)
 
 
+def _should_use_summary_compaction() -> bool:
+    """Return whether oversized context should be compacted instead of sent as file."""
+    return g_config.gemini.oversized_context_strategy == "compaction"
+
+
 def _build_history_summary_message(messages: list[Message]) -> Message | None:
     """Create a compact summary message for older turns to reduce oversized replay payloads."""
     if not messages:
@@ -920,19 +925,17 @@ async def _send_with_split(
             raise
 
     logger.info(
-        f"Message length ({len(text)}) exceeds effective limit ({effective_limit}). Converting text to file attachment."
+        f"Message length ({len(text)}) exceeds effective limit ({effective_limit})."
     )
+    logger.info("Converting oversized message to file attachment.")
     file_obj = io.BytesIO(text.encode("utf-8"))
     file_obj.name = "message.txt"
     try:
         final_files = list(files) if files else []
         final_files.append(file_obj)
         instruction = (
-            "The user's input exceeds the character limit and is provided in the attached file `message.txt`.\n\n"
-            "**System Instruction:**\n"
-            "1. Read the content of `message.txt`.\n"
-            "2. Treat that content as the **primary** user prompt for this turn.\n"
-            "3. Execute the instructions or answer the questions found *inside* that file immediately.\n"
+            "Context is attached in `message.txt`. "
+            "Acknowledge it briefly, then treat it as the primary user input for this turn and answer based on it."
         )
         if stream:
             return session.send_message_stream(instruction, files=final_files, temporary=temporary)
@@ -989,7 +992,7 @@ async def _send_with_internal_fallback(
         fallback_input, fallback_files = await _process_conversation_with_compaction(
             full_prepared_messages,
             tmp_dir,
-            allow_summary_compaction=True,
+            allow_summary_compaction=_should_use_summary_compaction(),
             reason="fallback replay",
         )
         output = await _send_with_split(
@@ -1802,7 +1805,7 @@ async def create_chat_completion(
         m_input, files = await _process_conversation_with_compaction(
             input_msgs,
             tmp_dir,
-            allow_summary_compaction=use_google_temporary_mode,
+            allow_summary_compaction=use_google_temporary_mode and _should_use_summary_compaction(),
             reason="temporary session replay",
         )
 
@@ -1817,7 +1820,7 @@ async def create_chat_completion(
             m_input, files = await _process_conversation_with_compaction(
                 msgs,
                 tmp_dir,
-                allow_summary_compaction=use_google_temporary_mode,
+                allow_summary_compaction=use_google_temporary_mode and _should_use_summary_compaction(),
                 reason="temporary fresh replay",
             )
         except Exception as e:
@@ -2001,7 +2004,7 @@ async def create_response(
         m_input, files = await _process_conversation_with_compaction(
             msgs,
             tmp_dir,
-            allow_summary_compaction=use_google_temporary_mode,
+            allow_summary_compaction=use_google_temporary_mode and _should_use_summary_compaction(),
             reason="temporary session replay",
         )
         logger.debug(
@@ -2014,7 +2017,7 @@ async def create_response(
             m_input, files = await _process_conversation_with_compaction(
                 messages,
                 tmp_dir,
-                allow_summary_compaction=use_google_temporary_mode,
+                allow_summary_compaction=use_google_temporary_mode and _should_use_summary_compaction(),
                 reason="temporary fresh replay",
             )
         except Exception as e:

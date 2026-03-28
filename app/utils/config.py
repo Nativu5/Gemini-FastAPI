@@ -104,9 +104,13 @@ class GeminiConfig(BaseModel):
         ge=1,
         description="Maximum characters Gemini Web can accept per request",
     )
+    oversized_context_strategy: Literal["compaction", "file"] = Field(
+        default="compaction",
+        description="Strategy for oversized context: 'compaction' summarizes older turns, 'file' sends oversized context as attachment",
+    )
     chat_mode: ChatMode = Field(
         default=ChatMode.NORMAL,
-        description="Chat mode: 'normal' uses standard chats, 'temporary' uses Google's temporary mode (not saved to account), enforces an effective input limit of 90% of max_chars_per_request, and compacts older turns into a summary when oversized",
+        description="Chat mode: 'normal' uses standard chats, 'temporary' uses Google's temporary mode (not saved to account) and enforces an effective input limit of 90% of max_chars_per_request",
     )
 
     @field_validator("models", mode="before")

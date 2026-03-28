@@ -28,7 +28,8 @@ gemini:
   refresh_interval: 600    # Refresh interval in seconds (Not less than 60s)
   verbose: false           # Enable verbose logging for Gemini requests
   max_chars_per_request: 1000000     # Maximum characters Gemini Web accepts per request. Non-pro users might have a lower limit
-  chat_mode: "normal"     # "normal" reuses Google chat metadata; "temporary" sends with Google's temporary mode (not saved to account), uses a 90% effective input limit, and compacts older turns into a summary when oversized
+  oversized_context_strategy: "compaction" # "compaction" summarizes older turns when oversized; "file" sends oversized context as attached file
+  chat_mode: "normal"     # "normal" reuses Google chat metadata; "temporary" sends with Google's temporary mode (not saved to account) and uses a 90% effective input limit
   model_strategy: "append" # Strategy: 'append' (default + custom) or 'overwrite' (custom only)
   models: []
 
