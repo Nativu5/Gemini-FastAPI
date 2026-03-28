@@ -796,6 +796,7 @@ async def _find_reusable_session(
                 logger.warning(
                     f"Error checking LMDB for reusable session at length {search_end}: {e}"
                 )
+                break
         search_end -= 1
 
     logger.debug(f"No reusable session found for {len(messages)} messages.")
