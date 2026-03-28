@@ -1,6 +1,7 @@
 import ast
 import os
 import sys
+from enum import Enum
 from typing import Any, Literal
 
 import orjson
@@ -71,6 +72,13 @@ class GeminiModelConfig(BaseModel):
         return v
 
 
+class ChatMode(str, Enum):
+    """Chat mode options for Gemini conversation handling."""
+
+    NORMAL = "normal"
+    TEMPORARY = "temporary"
+
+
 class GeminiConfig(BaseModel):
     """Gemini API configuration"""
 
@@ -96,13 +104,9 @@ class GeminiConfig(BaseModel):
         ge=1,
         description="Maximum characters Gemini Web can accept per request",
     )
-    chat_mode: Literal["normal", "temporary"] = Field(
-        default="normal",
+    chat_mode: ChatMode = Field(
+        default=ChatMode.NORMAL,
         description="Chat mode: 'normal' reuses Google chat metadata, 'temporary' always starts fresh chats",
-    )
-    fallback_to_internal_on_missing_chat: bool = Field(
-        default=True,
-        description="Retry by replaying local history when metadata-based Google chat reuse fails",
     )
 
     @field_validator("models", mode="before")

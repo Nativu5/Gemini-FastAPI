@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import re
 import reprlib
 import uuid
 from collections.abc import AsyncGenerator
@@ -54,6 +55,7 @@ from app.server.middleware import (
 )
 from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from app.utils import g_config
+from app.utils.config import ChatMode
 from app.utils.helper import (
     STREAM_MASTER_RE,
     STREAM_TAIL_RE,
@@ -71,13 +73,11 @@ from app.utils.helper import (
 MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 METADATA_TTL_MINUTES = 15
 
-_MISSING_CHAT_ERROR_MARKERS = (
-    "not found",
-    "404",
-    "invalid",
-    "metadata",
-    "conversation",
-    "chat",
+_MISSING_CHAT_ERROR_PATTERNS = (
+    # gemini_webapi maps ErrorCode.MODEL_INCONSISTENT (1050) to this message.
+    re.compile(r"\bmodel\s+is\s+inconsistent\s+with\s+the\s+conversation\s+history\b"),
+    # Defensive pattern for equivalent wording in wrappers/alternate versions.
+    re.compile(r"\bconversation\s+history\b[^\n]{0,120}\b(?:inconsistent|mismatch|does\s+not\s+match)\b"),
 )
 
 router = APIRouter()
@@ -754,7 +754,7 @@ async def _find_reusable_session(
     messages: list[Message],
 ) -> tuple[ChatSession | None, GeminiClientWrapper | None, list[Message]]:
     """Find an existing chat session matching the longest suitable history prefix."""
-    if g_config.gemini.chat_mode == "temporary":
+    if g_config.gemini.chat_mode == ChatMode.TEMPORARY:
         logger.debug("Temporary chat mode enabled; skipping metadata-based session reuse.")
         return None, None, messages
 
@@ -843,12 +843,10 @@ async def _send_with_split(
 
 
 def _is_missing_chat_error(exc: Exception) -> bool:
-    lowered = str(exc).lower()
-    if not lowered:
+    normalized = " ".join(part for part in (str(exc), repr(exc)) if part).lower()
+    if not normalized:
         return False
-    return all(marker in lowered for marker in ("chat", "not found")) or any(
-        marker in lowered for marker in _MISSING_CHAT_ERROR_MARKERS
-    )
+    return any(pattern.search(normalized) for pattern in _MISSING_CHAT_ERROR_PATTERNS)
 
 
 async def _send_with_internal_fallback(
@@ -876,8 +874,7 @@ async def _send_with_internal_fallback(
         return output, session, client
     except Exception as exc:
         should_fallback = (
-            g_config.gemini.fallback_to_internal_on_missing_chat
-            and reused_session
+            reused_session
             and not stream
             and _is_missing_chat_error(exc)
         )
@@ -1717,7 +1714,7 @@ async def create_chat_completion(
 
     completion_id = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(datetime.now(tz=UTC).timestamp())
-    use_google_temporary_mode = g_config.gemini.chat_mode == "temporary"
+    use_google_temporary_mode = g_config.gemini.chat_mode == ChatMode.TEMPORARY
 
     try:
         assert session and client
@@ -1905,7 +1902,7 @@ async def create_response(
 
     response_id = f"resp_{uuid.uuid4().hex}"
     created_time = int(datetime.now(tz=UTC).timestamp())
-    use_google_temporary_mode = g_config.gemini.chat_mode == "temporary"
+    use_google_temporary_mode = g_config.gemini.chat_mode == ChatMode.TEMPORARY
 
     try:
         assert session and client

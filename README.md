@@ -218,14 +218,12 @@ You can control whether the server reuses Google chat metadata or always starts 
 ```yaml
 gemini:
   chat_mode: "normal" # "normal" (reuse metadata) or "temporary" (Google temporary chat, not saved to account)
-  fallback_to_internal_on_missing_chat: true # Retry with local history replay when reuse fails
 ```
 
 Environment variable equivalents:
 
 ```bash
 export CONFIG_GEMINI__CHAT_MODE="temporary"
-export CONFIG_GEMINI__FALLBACK_TO_INTERNAL_ON_MISSING_CHAT=true
 ```
 
 ### Custom Models
