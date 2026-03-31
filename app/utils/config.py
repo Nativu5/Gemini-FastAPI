@@ -72,6 +72,13 @@ class GeminiModelConfig(BaseModel):
         return v
 
 
+class OversizedContextStrategy(str, Enum):
+    """Strategy for handling oversized context."""
+
+    COMPACTION = "compaction"
+    FILE = "file"
+
+
 class ChatMode(str, Enum):
     """Chat mode options for Gemini conversation handling."""
 
@@ -104,8 +111,8 @@ class GeminiConfig(BaseModel):
         ge=1,
         description="Maximum characters Gemini Web can accept per request",
     )
-    oversized_context_strategy: Literal["compaction", "file"] = Field(
-        default="compaction",
+    oversized_context_strategy: OversizedContextStrategy = Field(
+        default=OversizedContextStrategy.COMPACTION,
         description="Strategy for oversized context: 'compaction' summarizes older turns, 'file' sends oversized context as attachment",
     )
     chat_mode: ChatMode = Field(
