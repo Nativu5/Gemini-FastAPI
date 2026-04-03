@@ -72,6 +72,25 @@ class GeminiModelConfig(BaseModel):
         return v
 
 
+class GeminiGemDefaultPolicyConfig(BaseModel):
+    """Configuration for the optional default managed policy gem."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Create or update the default managed policy gem",
+    )
+    key: str = Field(
+        default="general_capability_guardrail",
+        description="Logical policy key to map for default policy gem",
+    )
+    prompt: str | None = Field(
+        default=None,
+        description=(
+            "Prompt override for the default policy gem; null uses the built-in prompt"
+        ),
+    )
+
+
 class GeminiGemPoliciesConfig(BaseModel):
     """Configuration for built-in policy gems managed by the server."""
 
@@ -82,6 +101,10 @@ class GeminiGemPoliciesConfig(BaseModel):
     prefix: str = Field(
         default="fastapi_policy_",
         description="Name prefix used to identify policy gems created by this server",
+    )
+    default_policy: GeminiGemDefaultPolicyConfig = Field(
+        default=GeminiGemDefaultPolicyConfig(),
+        description="Optional default policy gem bootstrap settings",
     )
 
 

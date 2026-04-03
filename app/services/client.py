@@ -1,8 +1,8 @@
 import asyncio
 import hashlib
 import time
-from dataclasses import dataclass
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 

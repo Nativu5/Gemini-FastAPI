@@ -257,7 +257,7 @@ gemini:
     # - create_on_demand: create missing managed gems when needed (rate-limited)
     # - privacy: reserved for ephemeral request-time flow (startup sync skipped)
     policy: "off"
-    create_rate_limit_per_minute: 12
+    create_rate_limit_per_minute: 4
     managed_gems_max_total: 200
     cleanup:
       enabled: false

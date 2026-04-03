@@ -44,9 +44,9 @@ gemini:
     # - privacy: reserved for ephemeral request-time flow (startup sync is skipped)
     policy: "off"
     create_rate_limit_per_minute: 4 # Per-client budget for server-managed gem creations
-    managed_gems_max_total: 200      # Global cap for managed gems with our prefix
+    managed_gems_max_total: 200      # Per-client cap for managed gems with our prefix
     cleanup:
-      enabled: true                # Delete managed gems when unused for `unused_days`
+      enabled: false               # Delete managed gems when unused for `unused_days`
       unused_days: 7                # Delete if not used for this many days
       touch_interval_minutes: 60    # Min minutes between metadata touch updates per gem
       dry_run: false                # If true, logs stale candidates without deleting

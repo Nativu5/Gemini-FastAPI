@@ -1798,13 +1798,14 @@ async def create_chat_completion(
     # Split leading user-provided system prompt so we can attach it as a managed gem
     # when create_on_demand is enabled.
     system_prompt_text, non_system_messages = _extract_leading_system_prompt(request.messages)
+    system_only_request = bool(system_prompt_text) and not non_system_messages
 
-    if not non_system_messages:
+    if not system_prompt_text:
         non_system_messages = request.messages
 
     # Prepared messages with system prompt removed (candidate gem path).
     msgs_without_system = _prepare_messages_for_model(
-        non_system_messages,
+        [] if system_only_request else non_system_messages,
         request.tools,
         request.tool_choice,
         extra_instr,
@@ -1820,20 +1821,25 @@ async def create_chat_completion(
 
     # Prefer searching reusable sessions against system-stripped history because
     # gem-based sessions persist that history shape.
-    msgs = msgs_without_system if system_prompt_text else msgs_with_system
+    msgs = msgs_without_system if (system_prompt_text and not system_only_request) else msgs_with_system
 
     session, client, remain = await _find_reusable_session(db, pool, model, msgs)
     reused_session = session is not None
     use_google_temporary_mode = g_config.gemini.chat_mode == ChatMode.TEMPORARY
 
     # Fallback search for legacy sessions that still contain explicit system messages.
-    if session is None and system_prompt_text and msgs_with_system != msgs_without_system:
+    if (
+        session is None
+        and system_prompt_text
+        and not system_only_request
+        and msgs_with_system != msgs_without_system
+    ):
         session, client, remain = await _find_reusable_session(db, pool, model, msgs_with_system)
         if session is not None:
             msgs = msgs_with_system
 
     managed_system_gem_id: str | None = None
-    if system_prompt_text:
+    if system_prompt_text and not system_only_request:
         target_client = client
         if target_client is None:
             target_client = await pool.acquire()
@@ -2044,11 +2050,12 @@ async def create_response(
     # Split leading system/instruction content so it can be mapped to a managed
     # gem when create_on_demand is enabled.
     system_prompt_text, conv_without_system = _extract_leading_system_prompt(conv_messages)
-    if not conv_without_system:
+    system_only_conversation = bool(system_prompt_text) and not conv_without_system
+    if not system_prompt_text:
         conv_without_system = conv_messages
 
     messages_without_system = _prepare_messages_for_model(
-        conv_without_system,
+        [] if system_only_conversation else conv_without_system,
         standard_tools or None,
         model_tool_choice,
         extra_instr or None,
@@ -2059,7 +2066,11 @@ async def create_response(
         model_tool_choice,
         extra_instr or None,
     )
-    messages = messages_without_system if system_prompt_text else messages_with_system
+    messages = (
+        messages_without_system
+        if (system_prompt_text and not system_only_conversation)
+        else messages_with_system
+    )
 
     pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
@@ -2072,13 +2083,18 @@ async def create_response(
     use_google_temporary_mode = g_config.gemini.chat_mode == ChatMode.TEMPORARY
 
     # Fallback reuse search for legacy sessions that still included explicit system text.
-    if session is None and system_prompt_text and messages_with_system != messages_without_system:
+    if (
+        session is None
+        and system_prompt_text
+        and not system_only_conversation
+        and messages_with_system != messages_without_system
+    ):
         session, client, remain = await _find_reusable_session(db, pool, model, messages_with_system)
         if session is not None:
             messages = messages_with_system
 
     managed_system_gem_id: str | None = None
-    if system_prompt_text:
+    if system_prompt_text and not system_only_conversation:
         target_client = client
         if target_client is None:
             target_client = await pool.acquire()
