@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import re
 import reprlib
 import uuid
 from collections.abc import AsyncGenerator
@@ -54,6 +55,7 @@ from app.server.middleware import (
 )
 from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from app.utils import g_config
+from app.utils.config import ChatMode, OversizedContextStrategy
 from app.utils.helper import (
     STREAM_MASTER_RE,
     STREAM_TAIL_RE,
@@ -68,10 +70,120 @@ from app.utils.helper import (
     text_from_message,
 )
 
-MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 METADATA_TTL_MINUTES = 15
+SUMMARY_KEEP_LAST_MESSAGES = 8
+SUMMARY_MAX_LINES = 24
+SUMMARY_MAX_LINE_CHARS = 320
+SUMMARY_MAX_TOTAL_CHARS = 6000
+COMPACTED_SUMMARY_PROMPT = (
+    "Conversation summary for older turns (compacted to stay within provider limits):\n"
+    "{summary}\n"
+    "Use this as context continuity for earlier turns."
+)
+
+_MISSING_CHAT_ERROR_PATTERNS = (
+    # gemini_webapi maps ErrorCode.MODEL_INCONSISTENT (1050) to this message.
+    re.compile(r"\bmodel\s+is\s+inconsistent\s+with\s+the\s+conversation\s+history\b"),
+    # Defensive pattern for equivalent wording in wrappers/alternate versions.
+    re.compile(r"\bconversation\s+history\b[^\n]{0,120}\b(?:inconsistent|mismatch|does\s+not\s+match)\b"),
+)
 
 router = APIRouter()
+
+
+def _effective_max_chars_per_request() -> int:
+    """Compute effective request size guardrail from config values."""
+    limit = g_config.gemini.max_chars_per_request
+    if g_config.gemini.chat_mode == ChatMode.TEMPORARY:
+        limit = int(limit * 0.9)
+    return max(limit, 1)
+
+
+def _build_history_summary_message(messages: list[Message]) -> Message | None:
+    """Create a compact summary message for older turns to reduce oversized replay payloads."""
+    if not messages:
+        return None
+
+    summary_lines: list[str] = []
+    used_chars = 0
+    for msg in messages:
+        if len(summary_lines) >= SUMMARY_MAX_LINES or used_chars >= SUMMARY_MAX_TOTAL_CHARS:
+            break
+
+        raw = text_from_message(msg).replace("\n", " ").strip()
+        if not raw and not msg.tool_calls:
+            continue
+
+        if msg.tool_calls:
+            raw = f"{raw} [tool_calls={len(msg.tool_calls)}]".strip()
+
+        if len(raw) > SUMMARY_MAX_LINE_CHARS:
+            raw = f"{raw[: SUMMARY_MAX_LINE_CHARS - 3]}..."
+
+        line = f"- {msg.role}: {raw}"
+        used_chars += len(line)
+        summary_lines.append(line)
+
+    if not summary_lines:
+        return None
+
+    summary_text = COMPACTED_SUMMARY_PROMPT.format(summary="\n".join(summary_lines))
+    return Message(role="system", content=summary_text)
+
+
+def _compact_messages_with_summary(messages: list[Message]) -> list[Message]:
+    """Keep recent turns verbatim and compact older turns into one summary message."""
+    if len(messages) <= SUMMARY_KEEP_LAST_MESSAGES:
+        return messages
+
+    older = messages[:-SUMMARY_KEEP_LAST_MESSAGES]
+    recent = messages[-SUMMARY_KEEP_LAST_MESSAGES:]
+    summary_msg = _build_history_summary_message(older)
+    if not summary_msg:
+        return messages
+
+    compacted: list[Message] = []
+    if messages and messages[0].role == "system":
+        first = messages[0].model_copy(deep=True)
+        if isinstance(first.content, str):
+            first.content = (
+                f"{first.content}\n\n{summary_msg.content}"
+                if first.content
+                else str(summary_msg.content)
+            )
+            compacted.append(first)
+        else:
+            compacted.append(summary_msg)
+    else:
+        compacted.append(summary_msg)
+
+    compacted.extend(recent)
+    return compacted
+
+
+async def _process_conversation_with_compaction(
+    messages: list[Message],
+    tmp_dir: Path,
+    allow_summary_compaction: bool,
+    reason: str,
+) -> tuple[str, list[Path | str]]:
+    """Build conversation payload and optionally compact oversized histories."""
+    model_input, files = await GeminiClientWrapper.process_conversation(messages, tmp_dir)
+    effective_limit = _effective_max_chars_per_request()
+    if len(model_input) <= effective_limit or not allow_summary_compaction:
+        return model_input, files
+
+    compacted = _compact_messages_with_summary(messages)
+    if compacted == messages:
+        return model_input, files
+
+    compacted_input, compacted_files = await GeminiClientWrapper.process_conversation(
+        compacted, tmp_dir
+    )
+    logger.warning(
+        f"Input too large for {reason} ({len(model_input)}>{effective_limit}); compacted history to {len(compacted_input)} chars before send."
+    )
+    return compacted_input, compacted_files
 
 
 @dataclass
@@ -781,7 +893,14 @@ async def _find_reusable_session(
                     age_minutes = (now - updated_at).total_seconds() / 60
                     if age_minutes <= METADATA_TTL_MINUTES:
                         client = await pool.acquire(conv.client_id)
-                        session = client.start_chat(metadata=conv.metadata, model=model)
+                        try:
+                            session = client.start_chat(metadata=conv.metadata, model=model)
+                        except Exception as exc:
+                            logger.warning(
+                                f"Failed to reuse metadata chat at prefix length {search_end}: {exc}"
+                            )
+                            search_end -= 1
+                            continue
                         remain = messages[search_end:]
                         logger.debug(
                             f"Match found at prefix length {search_end}/{len(messages)}. Client: {conv.client_id}"
@@ -810,38 +929,98 @@ async def _send_with_split(
     text: str,
     files: list[Path | str | io.BytesIO] | None = None,
     stream: bool = False,
+    temporary: bool = False,
 ) -> AsyncGenerator[ModelOutput] | ModelOutput:
     """Send text to Gemini, splitting or converting to attachment if too long."""
-    if len(text) <= MAX_CHARS_PER_REQUEST:
+    effective_limit = _effective_max_chars_per_request()
+    if len(text) <= effective_limit:
         try:
             if stream:
-                return session.send_message_stream(text, files=files)
-            return await session.send_message(text, files=files)
+                return session.send_message_stream(text, files=files, temporary=temporary)
+            return await session.send_message(text, files=files, temporary=temporary)
         except Exception as e:
             logger.exception(f"Error sending message to Gemini: {e}")
             raise
 
     logger.info(
-        f"Message length ({len(text)}) exceeds limit ({MAX_CHARS_PER_REQUEST}). Converting text to file attachment."
+        f"Message length ({len(text)}) exceeds effective limit ({effective_limit})."
     )
+    logger.info("Converting oversized message to file attachment.")
     file_obj = io.BytesIO(text.encode("utf-8"))
     file_obj.name = "message.txt"
     try:
         final_files = list(files) if files else []
         final_files.append(file_obj)
         instruction = (
-            "The user's input exceeds the character limit and is provided in the attached file `message.txt`.\n\n"
-            "**System Instruction:**\n"
-            "1. Read the content of `message.txt`.\n"
-            "2. Treat that content as the **primary** user prompt for this turn.\n"
-            "3. Execute the instructions or answer the questions found *inside* that file immediately.\n"
+            "Context is attached in `message.txt`. "
+            "Acknowledge it briefly, then treat it as the primary user input for this turn and answer based on it."
         )
         if stream:
-            return session.send_message_stream(instruction, files=final_files)
-        return await session.send_message(instruction, files=final_files)
+            return session.send_message_stream(instruction, files=final_files, temporary=temporary)
+        return await session.send_message(instruction, files=final_files, temporary=temporary)
     except Exception as e:
         logger.exception(f"Error sending large text as file to Gemini: {e}")
         raise
+
+
+def _is_missing_chat_error(exc: Exception) -> bool:
+    normalized = " ".join(part for part in (str(exc), repr(exc)) if part).lower()
+    if not normalized:
+        return False
+    return any(pattern.search(normalized) for pattern in _MISSING_CHAT_ERROR_PATTERNS)
+
+
+async def _send_with_internal_fallback(
+    *,
+    pool: GeminiClientPool,
+    model: Model,
+    session: ChatSession,
+    client: GeminiClientWrapper,
+    current_input: str,
+    files: list[Path | str | io.BytesIO],
+    full_prepared_messages: list[Message],
+    tmp_dir: Path,
+    stream: bool,
+    reused_session: bool,
+    temporary: bool,
+) -> tuple[AsyncGenerator[ModelOutput] | ModelOutput, ChatSession, GeminiClientWrapper]:
+    try:
+        output = await _send_with_split(
+            session,
+            current_input,
+            files=files,
+            stream=stream,
+            temporary=temporary,
+        )
+        return output, session, client
+    except Exception as exc:
+        should_fallback = (
+            reused_session
+            and not stream
+            and _is_missing_chat_error(exc)
+        )
+        if not should_fallback:
+            raise
+
+        logger.warning(
+            "Metadata-backed chat reuse failed; retrying with internal history replay in a fresh chat."
+        )
+        fallback_client = await pool.acquire()
+        fallback_session = fallback_client.start_chat(model=model)
+        fallback_input, fallback_files = await _process_conversation_with_compaction(
+            full_prepared_messages,
+            tmp_dir,
+            allow_summary_compaction=(g_config.gemini.oversized_context_strategy == OversizedContextStrategy.COMPACTION),
+            reason="fallback replay",
+        )
+        output = await _send_with_split(
+            fallback_session,
+            fallback_input,
+            files=fallback_files,
+            stream=False,
+            temporary=temporary,
+        )
+        return output, fallback_session, fallback_client
 
 
 class StreamingOutputFilter:
@@ -1644,6 +1823,8 @@ async def create_chat_completion(
     msgs = msgs_without_system if system_prompt_text else msgs_with_system
 
     session, client, remain = await _find_reusable_session(db, pool, model, msgs)
+    reused_session = session is not None
+    use_google_temporary_mode = g_config.gemini.chat_mode == ChatMode.TEMPORARY
 
     # Fallback search for legacy sessions that still contain explicit system messages.
     if session is None and system_prompt_text and msgs_with_system != msgs_without_system:
@@ -1685,7 +1866,12 @@ async def create_chat_completion(
             extra_instr,
             False,
         )
-        m_input, files = await GeminiClientWrapper.process_conversation(input_msgs, tmp_dir)
+        m_input, files = await _process_conversation_with_compaction(
+            input_msgs,
+            tmp_dir,
+            allow_summary_compaction=use_google_temporary_mode and (g_config.gemini.oversized_context_strategy == OversizedContextStrategy.COMPACTION),
+            reason="temporary session replay",
+        )
 
         logger.debug(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(input_msgs)} prepared messages."
@@ -1696,7 +1882,12 @@ async def create_chat_completion(
                 client = await pool.acquire()
             session = client.start_chat(model=model, gem=managed_system_gem_id)
             # Use the already prepared 'msgs' for a fresh session
-            m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
+            m_input, files = await _process_conversation_with_compaction(
+                msgs,
+                tmp_dir,
+                allow_summary_compaction=use_google_temporary_mode and (g_config.gemini.oversized_context_strategy == OversizedContextStrategy.COMPACTION),
+                reason="temporary fresh replay",
+            )
         except Exception as e:
             logger.exception("Error in preparing conversation")
             raise HTTPException(
@@ -1705,14 +1896,23 @@ async def create_chat_completion(
 
     completion_id = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(datetime.now(tz=UTC).timestamp())
-
     try:
         assert session and client
         logger.debug(
             f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
         )
-        resp_or_stream = await _send_with_split(
-            session, m_input, files=files, stream=request.stream
+        resp_or_stream, session, client = await _send_with_internal_fallback(
+            pool=pool,
+            model=model,
+            session=session,
+            client=client,
+            current_input=m_input,
+            files=files,
+            full_prepared_messages=msgs,
+            tmp_dir=tmp_dir,
+            stream=bool(request.stream),
+            reused_session=reused_session,
+            temporary=use_google_temporary_mode,
         )
     except Exception as e:
         logger.exception("Gemini API error")
@@ -1868,6 +2068,8 @@ async def create_response(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     session, client, remain = await _find_reusable_session(db, pool, model, messages)
+    reused_session = session is not None
+    use_google_temporary_mode = g_config.gemini.chat_mode == ChatMode.TEMPORARY
 
     # Fallback reuse search for legacy sessions that still included explicit system text.
     if session is None and system_prompt_text and messages_with_system != messages_without_system:
@@ -1893,7 +2095,6 @@ async def create_response(
     # If message shape changed after gem resolution, search reusable session again.
     if session is None and messages in (messages_without_system, messages_with_system):
         session, client, remain = await _find_reusable_session(db, pool, model, messages)
-
     if session:
         msgs = _prepare_messages_for_model(
             remain,
@@ -1904,7 +2105,12 @@ async def create_response(
         )
         if not msgs:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
-        m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
+        m_input, files = await _process_conversation_with_compaction(
+            msgs,
+            tmp_dir,
+            allow_summary_compaction=use_google_temporary_mode and (g_config.gemini.oversized_context_strategy == OversizedContextStrategy.COMPACTION),
+            reason="temporary session replay",
+        )
         logger.debug(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(msgs)} prepared messages."
         )
@@ -1913,7 +2119,12 @@ async def create_response(
             if client is None:
                 client = await pool.acquire()
             session = client.start_chat(model=model, gem=managed_system_gem_id)
-            m_input, files = await GeminiClientWrapper.process_conversation(messages, tmp_dir)
+            m_input, files = await _process_conversation_with_compaction(
+                messages,
+                tmp_dir,
+                allow_summary_compaction=use_google_temporary_mode and (g_config.gemini.oversized_context_strategy == OversizedContextStrategy.COMPACTION),
+                reason="temporary fresh replay",
+            )
         except Exception as e:
             logger.exception("Error in preparing conversation")
             raise HTTPException(
@@ -1922,14 +2133,23 @@ async def create_response(
 
     response_id = f"resp_{uuid.uuid4().hex}"
     created_time = int(datetime.now(tz=UTC).timestamp())
-
     try:
         assert session and client
         logger.debug(
             f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
         )
-        resp_or_stream = await _send_with_split(
-            session, m_input, files=files, stream=request.stream
+        resp_or_stream, session, client = await _send_with_internal_fallback(
+            pool=pool,
+            model=model,
+            session=session,
+            client=client,
+            current_input=m_input,
+            files=files,
+            full_prepared_messages=messages,
+            tmp_dir=tmp_dir,
+            stream=bool(request.stream),
+            reused_session=reused_session,
+            temporary=use_google_temporary_mode,
         )
     except Exception as e:
         logger.exception("Gemini API error")

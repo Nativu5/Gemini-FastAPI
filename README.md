@@ -211,6 +211,30 @@ To use Gemini-FastAPI, you need to extract your Gemini session cookies:
 
 Each client entry can be configured with a different proxy to work around rate limits. Omit the `proxy` field or set it to `null` or an empty string to keep a direct connection.
 
+### Chat Session Mode
+
+You can control whether requests use normal Google chats or Google's temporary chat mode:
+
+```yaml
+gemini:
+  chat_mode: "normal" # "normal" (reuse metadata) or "temporary" (Google temporary chat, not saved to account)
+  max_chars_per_request: 1000000
+  oversized_context_strategy: "compaction" # "compaction" or "file"
+```
+
+When `chat_mode` is set to `temporary`, the server applies an internal effective input limit of 90% of `max_chars_per_request`.
+When context exceeds the effective budget, handling is controlled by `oversized_context_strategy`:
+- `compaction`: summarize older turns and keep recent turns verbatim.
+- `file`: attach oversized context as `message.txt` and process it from file.
+
+Environment variable equivalents:
+
+```bash
+export CONFIG_GEMINI__CHAT_MODE="temporary"
+export CONFIG_GEMINI__MAX_CHARS_PER_REQUEST=1000000
+export CONFIG_GEMINI__OVERSIZED_CONTEXT_STRATEGY="compaction"
+```
+
 ### Custom Models
 
 You can define custom models in `config/config.yaml` or via environment variables.
