@@ -1,7 +1,7 @@
 import ast
 import os
 import sys
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
 
 import orjson
@@ -178,14 +178,14 @@ class GeminiGemsConfig(BaseModel):
         description="Cleanup policy for managed gems",
     )
 
-class OversizedContextStrategy(str, Enum):
+class OversizedContextStrategy(StrEnum):
     """Strategy for handling oversized context."""
 
     COMPACTION = "compaction"
     FILE = "file"
 
 
-class ChatMode(str, Enum):
+class ChatMode(StrEnum):
     """Chat mode options for Gemini conversation handling."""
 
     NORMAL = "normal"
