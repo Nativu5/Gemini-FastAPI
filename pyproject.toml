@@ -3,33 +3,30 @@ name = "gemini-fastapi"
 version = "1.0.0"
 description = "FastAPI Server built on Gemini Web API"
 readme = "README.md"
-requires-python = "==3.13.*"
+requires-python = ">=3.13"
 dependencies = [
-    "curl-cffi>=0.14.0",
-    "fastapi>=0.135.0",
-    "gemini-webapi>=1.19.2",
-    "httptools>=0.7.1",
-    "lmdb>=1.7.5",
-    "loguru>=0.7.3",
-    "orjson>=3.11.7",
-    "pydantic-settings[yaml]>=2.13.1",
-    "uvicorn>=0.41.0",
-    "uvloop>=0.22.1; sys_platform != 'win32'",
+  "curl-cffi>=0.16.2",
+  "fastapi>=0.141.1",
+  "gemini-webapi>=2.1.1,<3",
+  "httptools>=0.8.0",
+  "jsonschema>=4.26.0",
+  "lmdb>=2.3.0",
+  "loguru>=0.7.3",
+  "orjson>=3.11.9",
+  "pydantic-settings[yaml]>=2.15.0",
+  "regex>=2026.7.19",
+  "uvicorn>=0.52.4",
+  "uvloop>=0.22.1; sys_platform != 'win32'",
 ]
 
 [project.urls]
 Repository = "https://github.com/Nativu5/Gemini-FastAPI"
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=9.0.2",
-    "ruff>=0.15.4",
-]
+dev = ["httpx2", "pyright", "pytest", "ruff", "ty"]
 
 [dependency-groups]
-dev = [
-    "gemini-fastapi[dev]",
-]
+dev = ["gemini-fastapi[dev]"]
 
 [tool.ruff]
 line-length = 100
@@ -37,28 +34,42 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = [
-    "E",    # pycodestyle errors
-    "F",    # pyflakes
-    "W",    # pycodestyle warnings
-    "I",    # isort
-    "UP",   # pyupgrade
-    "B",    # flake8-bugbear
-    "C4",   # flake8-comprehensions
-    "SIM",  # flake8-simplify
-    "RUF",  # ruff-specific rules
-    "TID",  # flake8-tidy-imports
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "G",   # flake8-logging-format
+  "I",   # isort
+  "LOG", # flake8-logging
+  "N",   # pep8-naming
+  "PIE", # flake8-pie
+  "PT",  # flake8-pytest-style
+  "RET", # flake8-return
+  "RUF", # ruff-specific rules
+  "SIM", # flake8-simplify
+  "TID", # flake8-tidy-imports
+  "UP",  # pyupgrade
+  "W",   # pycodestyle warnings
 ]
 ignore = [
-    "E501", # line too long
+  "E501", # line too long, enforced by the formatter for code
 ]
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = [
-    "fastapi.Depends",
-    "fastapi.Query",
-    "fastapi.security.HTTPBearer",
+  "fastapi.Depends",
+  "fastapi.Query",
+  "fastapi.security.HTTPBearer",
 ]
 
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.pyright]
+typeCheckingMode = "standard"
+reportUnreachable = "warning"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

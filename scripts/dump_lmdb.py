@@ -5,25 +5,29 @@ from typing import Any
 
 import lmdb
 import orjson
+from lmdb import Transaction
 
 
-def _decode_value(value: bytes) -> Any:
+def _decode_value(value: bytes | memoryview) -> Any:
     """Decode a value from LMDB to Python data."""
+    value = bytes(value)
     try:
         return orjson.loads(value)
     except orjson.JSONDecodeError:
         return value.decode("utf-8", errors="replace")
 
 
-def _dump_all(txn: lmdb.Transaction) -> list[dict[str, Any]]:
+def _dump_all(txn: Transaction) -> list[dict[str, Any]]:
     """Return all records from the database."""
     result: list[dict[str, Any]] = []
-    for key, value in txn.cursor():
-        result.append({"key": key.decode("utf-8"), "value": _decode_value(value)})
+    result.extend(
+        {"key": bytes(key).decode("utf-8"), "value": _decode_value(value)}
+        for key, value in txn.cursor()
+    )
     return result
 
 
-def _dump_selected(txn: lmdb.Transaction, keys: Iterable[str]) -> list[dict[str, Any]]:
+def _dump_selected(txn: Transaction, keys: Iterable[str]) -> list[dict[str, Any]]:
     """Return records for the provided keys."""
     result: list[dict[str, Any]] = []
     for key in keys:

@@ -1,4 +1,5 @@
 import asyncio
+import random
 from collections import deque
 
 from loguru import logger
@@ -24,39 +25,48 @@ class GeminiClientPool(metaclass=Singleton):
         for c in g_config.gemini.clients:
             client = GeminiClientWrapper(
                 client_id=c.id,
-                secure_1psid=c.secure_1psid,
-                secure_1psidts=c.secure_1psidts,
-                proxy=c.proxy,
+                **c.model_dump(exclude={"id"}),
             )
             self._clients.append(client)
             self._id_map[c.id] = client
             self._round_robin.append(client)
             self._restart_locks[c.id] = asyncio.Lock()
 
+    async def _init_one(self, client: GeminiClientWrapper) -> bool:
+        """Initialize a single client; returns True on success."""
+        return await self._init_attempt(client)
+
+    async def _init_attempt(self, client: GeminiClientWrapper) -> bool:
+        """Run library init; returns True on success."""
+        try:
+            await client.init()
+            return True
+        except Exception:
+            return False
+
     async def init(self) -> None:
-        """Initialize all clients in the pool."""
-        success_count = 0
-        for client in self._clients:
-            if not client.running():
-                try:
-                    await client.init(
-                        timeout=g_config.gemini.timeout,
-                        watchdog_timeout=g_config.gemini.watchdog_timeout,
-                        auto_refresh=g_config.gemini.auto_refresh,
-                        verbose=g_config.gemini.verbose,
-                        refresh_interval=g_config.gemini.refresh_interval,
-                    )
-                except Exception:
-                    logger.exception(f"Failed to initialize client {client.id}")
+        """Initialize all clients in the pool with staggered start times."""
+        clients_to_init = [c for c in self._clients if not c.running()]
+        for i, client in enumerate(clients_to_init):
+            await self._init_one(client)
 
-            if client.running():
-                success_count += 1
+            if i < len(clients_to_init) - 1:
+                delay = random.uniform(5, 30)
+                logger.info(f"Staggering next initialization by {delay:.2f}s")
+                await asyncio.sleep(delay)
 
+        success_count = sum(bool(client.running()) for client in self._clients)
         if success_count == 0:
             raise RuntimeError("Failed to initialize any Gemini clients")
 
-    async def acquire(self, client_id: str | None = None) -> GeminiClientWrapper:
-        """Return a healthy client by id or using round-robin."""
+    async def acquire(
+        self, client_id: str | None = None, require_account: bool = False
+    ) -> GeminiClientWrapper:
+        """Return a healthy client by id or using round-robin.
+
+        `require_account` excludes guest sessions, for requests they cannot serve at all - file
+        uploads. Otherwise a guest is used only once no authenticated client is left.
+        """
         if not self._round_robin:
             raise RuntimeError("No Gemini clients configured")
 
@@ -70,12 +80,32 @@ class GeminiClientPool(metaclass=Singleton):
                 f"Gemini client {client_id} is not running and could not be restarted"
             )
 
-        for _ in range(len(self._round_robin)):
-            client = self._round_robin[0]
-            self._round_robin.rotate(-1)
-            if await self._ensure_client_ready(client):
-                return client
+        # Authenticated clients first. A client whose cookies expired keeps answering text
+        # prompts as a guest, so it stays usable and must not take the pool down, but it has no
+        # history, no uploads and no model choice - traffic belongs elsewhere while it can.
+        for account_only in (True,) if require_account else (True, False):
+            for _ in range(len(self._round_robin)):
+                client = self._round_robin[0]
+                self._round_robin.rotate(-1)
+                # Rechecked after readiness: a restart can itself land in a guest session.
+                if account_only and client.is_guest():
+                    continue
+                if await self._ensure_client_ready(client) and not (
+                    account_only and client.is_guest()
+                ):
+                    return client
 
+            if account_only and not require_account and any(c.is_guest() for c in self._clients):
+                logger.warning(
+                    "No authenticated Gemini client is available; falling back to a guest "
+                    "session until cookies are refreshed."
+                )
+
+        if require_account:
+            raise RuntimeError(
+                "No authenticated Gemini client is available. This request needs a file upload, "
+                "which a guest session cannot do - refresh the client cookies."
+            )
         raise RuntimeError("No Gemini clients are currently available")
 
     async def _ensure_client_ready(self, client: GeminiClientWrapper) -> bool:
@@ -91,25 +121,28 @@ class GeminiClientPool(metaclass=Singleton):
             if client.running():
                 return True
 
-            try:
-                await client.init(
-                    timeout=g_config.gemini.timeout,
-                    watchdog_timeout=g_config.gemini.watchdog_timeout,
-                    auto_refresh=g_config.gemini.auto_refresh,
-                    verbose=g_config.gemini.verbose,
-                    refresh_interval=g_config.gemini.refresh_interval,
-                )
+            if await self._init_attempt(client):
                 logger.info(f"Restarted Gemini client {client.id} after it stopped.")
                 return True
-            except Exception:
-                logger.exception(f"Failed to restart Gemini client {client.id}")
-                return False
+            return False
 
     @property
     def clients(self) -> list[GeminiClientWrapper]:
         """Return managed clients."""
         return self._clients
 
+    async def close(self) -> None:
+        """Close all clients in the pool."""
+        if not self._clients:
+            return
+
+        logger.info(f"Closing {len(self._clients)} Gemini clients...")
+        await asyncio.gather(
+            *(client.close() for client in self._clients if client.running()),
+            return_exceptions=True,
+        )
+        logger.info("All Gemini clients closed.")
+
     def status(self) -> dict[str, bool]:
-        """Return running status for each client."""
-        return {client.id: client.running() for client in self._clients}
+        """Return healthy status for each client."""
+        return {client.id: client.is_healthy() for client in self._clients}

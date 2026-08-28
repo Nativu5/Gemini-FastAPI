@@ -57,7 +57,7 @@ def _setup_logging_intercept() -> None:
                 filename = frame.f_code.co_filename
                 is_logging = filename == logging.__file__
                 is_frozen = "importlib" in filename and "_bootstrap" in filename
-                if depth > 0 and not (is_logging or is_frozen):
+                if depth > 0 and not is_logging and not is_frozen:
                     break
                 frame = frame.f_back
                 depth += 1
@@ -65,4 +65,4 @@ def _setup_logging_intercept() -> None:
             logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
     # Remove all existing handlers and add our interceptor
-    logging.basicConfig(handlers=[InterceptHandler()], level="INFO", force=True)
+    logging.basicConfig(handlers=[InterceptHandler()], level="DEBUG", force=True)
