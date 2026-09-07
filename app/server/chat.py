@@ -13,9 +13,8 @@ from typing import Any
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from gemini_webapi import ModelOutput
+from gemini_webapi import AvailableModel, ModelOutput
 from gemini_webapi.client import ChatSession
-from gemini_webapi.constants import Model
 from gemini_webapi.types.image import GeneratedImage, Image
 from loguru import logger
 
@@ -800,21 +799,50 @@ def _instructions_to_messages(
     return instruction_messages
 
 
-def _get_model_by_name(name: str) -> Model:
-    """Retrieve a Model instance by name."""
+def _get_model_by_name(name: str, pool: GeminiClientPool | None = None) -> AvailableModel:
+    """Retrieve an AvailableModel instance by name."""
     strategy = g_config.gemini.model_strategy
     custom_models = {m.model_name: m for m in g_config.gemini.models if m.model_name}
 
     if name in custom_models:
-        return Model.from_dict(custom_models[name].model_dump())
+        return AvailableModel.from_dict(custom_models[name].model_dump())
 
     if strategy == "overwrite":
         raise ValueError(f"Model '{name}' not found in custom models (strategy='overwrite').")
 
-    return Model.from_name(name)
+    pool = pool or GeminiClientPool()
+    for client in pool.clients:
+        try:
+            return client.resolve_model(name)
+        except (ValueError, Exception):
+            continue
+
+    available_names: set[str] = set()
+    for client in pool.clients:
+        if models := client.list_models():
+            available_names.update(m.model_name for m in models if m.is_available)
+
+    if available_names:
+        raise ValueError(
+            f"Unknown model name: '{name}'. Available models: {', '.join(sorted(available_names))}"
+        )
+    raise ValueError(f"Unknown model name: '{name}'.")
 
 
-def _get_available_models() -> list[ModelData]:
+def _resolve_client_model(
+    client: GeminiClientWrapper, model: AvailableModel
+) -> AvailableModel:
+    """Ensure the model matches the specific client's account tier if possible."""
+    custom_models = {m.model_name: m for m in g_config.gemini.models if m.model_name}
+    if model.model_name in custom_models:
+        return model
+    try:
+        return client.resolve_model(model.model_name)
+    except (ValueError, Exception):
+        return model
+
+
+def _get_available_models(pool: GeminiClientPool | None = None) -> list[ModelData]:
     """Return a list of available models based on configuration strategy."""
     now = int(datetime.now(tz=UTC).timestamp())
     strategy = g_config.gemini.model_strategy
@@ -832,20 +860,26 @@ def _get_available_models() -> list[ModelData]:
 
     if strategy == "append":
         custom_ids = {m.model_name for m in custom_models}
-        for model in Model:
-            m_name = model.model_name
-            if not m_name or m_name == "unspecified":
+        seen_ids: set[str] = set(custom_ids)
+        pool = pool or GeminiClientPool()
+        for client in pool.clients:
+            models = client.list_models()
+            if not models:
                 continue
-            if m_name in custom_ids:
-                continue
-
-            models_data.append(
-                ModelData(
-                    id=m_name,
-                    created=now,
-                    owned_by="gemini-web",
+            for model in models:
+                if not model.is_available:
+                    continue
+                m_name = model.model_name
+                if not m_name or m_name == "unspecified" or m_name in seen_ids:
+                    continue
+                seen_ids.add(m_name)
+                models_data.append(
+                    ModelData(
+                        id=m_name,
+                        created=now,
+                        owned_by="gemini-web",
+                    )
                 )
-            )
 
     return models_data
 
@@ -853,7 +887,7 @@ def _get_available_models() -> list[ModelData]:
 async def _find_reusable_session(
     db: LMDBConversationStore,
     pool: GeminiClientPool,
-    model: Model,
+    model: AvailableModel,
     messages: list[Message],
 ) -> tuple[ChatSession | None, GeminiClientWrapper | None, list[Message]]:
     """Find an existing chat session matching the longest suitable history prefix."""
@@ -872,7 +906,10 @@ async def _find_reusable_session(
                     if age_minutes <= METADATA_TTL_MINUTES:
                         client = await pool.acquire(conv.client_id)
                         try:
-                            session = client.start_chat(metadata=conv.metadata, model=model)
+                            session = client.start_chat(
+                                metadata=conv.metadata,
+                                model=_resolve_client_model(client, model),
+                            )
                         except Exception as exc:
                             logger.warning(
                                 f"Failed to reuse metadata chat at prefix length {search_end}: {exc}"
@@ -951,7 +988,7 @@ def _is_missing_chat_error(exc: Exception) -> bool:
 async def _send_with_internal_fallback(
     *,
     pool: GeminiClientPool,
-    model: Model,
+    model: AvailableModel,
     session: ChatSession,
     client: GeminiClientWrapper,
     current_input: str,
@@ -984,7 +1021,9 @@ async def _send_with_internal_fallback(
             "Metadata-backed chat reuse failed; retrying with internal history replay in a fresh chat."
         )
         fallback_client = await pool.acquire()
-        fallback_session = fallback_client.start_chat(model=model)
+        fallback_session = fallback_client.start_chat(
+            model=_resolve_client_model(fallback_client, model)
+        )
         fallback_input, fallback_files = await _process_conversation_with_compaction(
             full_prepared_messages,
             tmp_dir,
@@ -1097,7 +1136,7 @@ def _create_real_streaming_response(
     model_name: str,
     messages: list[Message],
     db: LMDBConversationStore,
-    model: Model,
+    model: AvailableModel,
     client_wrapper: GeminiClientWrapper,
     session: ChatSession,
     base_url: str,
@@ -1288,7 +1327,7 @@ def _create_responses_real_streaming_response(
     model_name: str,
     messages: list[Message],
     db: LMDBConversationStore,
-    model: Model,
+    model: AvailableModel,
     client_wrapper: GeminiClientWrapper,
     session: ChatSession,
     request: ResponseCreateRequest,
@@ -1764,7 +1803,7 @@ async def create_chat_completion(
     base_url = str(raw_request.base_url)
     pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
-        model = _get_model_by_name(request.model)
+        model = _get_model_by_name(request.model, pool=pool)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if not request.messages:
@@ -1811,7 +1850,7 @@ async def create_chat_completion(
     else:
         try:
             client = await pool.acquire()
-            session = client.start_chat(model=model)
+            session = client.start_chat(model=_resolve_client_model(client, model))
             # Use the already prepared 'msgs' for a fresh session
             m_input, files = await _process_conversation_with_compaction(
                 msgs,
@@ -1980,7 +2019,7 @@ async def create_response(
     )
     pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
-        model = _get_model_by_name(request.model)
+        model = _get_model_by_name(request.model, pool=pool)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -2009,7 +2048,7 @@ async def create_response(
     else:
         try:
             client = await pool.acquire()
-            session = client.start_chat(model=model)
+            session = client.start_chat(model=_resolve_client_model(client, model))
             m_input, files = await _process_conversation_with_compaction(
                 messages,
                 tmp_dir,
