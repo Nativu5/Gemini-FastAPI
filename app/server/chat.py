@@ -661,6 +661,28 @@ def _prepare_messages_for_model(
     return prepared
 
 
+def _extract_leading_system_prompt(messages: list[Message]) -> tuple[str | None, list[Message]]:
+    """Extract and remove leading system messages, returning joined system text.
+
+    Only leading system messages are extracted to preserve regular conversation flow.
+    """
+    if not messages:
+        return None, messages
+
+    idx = 0
+    system_parts: list[str] = []
+    while idx < len(messages) and messages[idx].role == "system":
+        text = text_from_message(messages[idx]).strip()
+        if text:
+            system_parts.append(text)
+        idx += 1
+
+    if not system_parts:
+        return None, messages
+
+    return "\n\n".join(system_parts), messages[idx:]
+
+
 def _response_items_to_messages(
     items: str | list[ResponseInputItem],
 ) -> tuple[list[Message], str | list[ResponseInputItem]]:
@@ -1773,17 +1795,69 @@ async def create_chat_completion(
     structured_requirement = _build_structured_requirement(request.response_format)
     extra_instr = [structured_requirement.instruction] if structured_requirement else None
 
-    # This ensures that server-injected system instructions are part of the history
-    msgs = _prepare_messages_for_model(
+    # Split leading user-provided system prompt so we can attach it as a managed gem
+    # when create_on_demand is enabled.
+    system_prompt_text, non_system_messages = _extract_leading_system_prompt(request.messages)
+    system_only_request = bool(system_prompt_text) and not non_system_messages
+
+    if not system_prompt_text:
+        non_system_messages = request.messages
+
+    # Prepared messages with system prompt removed (candidate gem path).
+    msgs_without_system = _prepare_messages_for_model(
+        [] if system_only_request else non_system_messages,
+        request.tools,
+        request.tool_choice,
+        extra_instr,
+    )
+
+    # Prepared messages with full system prompt retained (fallback path).
+    msgs_with_system = _prepare_messages_for_model(
         request.messages,
         request.tools,
         request.tool_choice,
         extra_instr,
     )
 
+    # Prefer searching reusable sessions against system-stripped history because
+    # gem-based sessions persist that history shape.
+    msgs = msgs_without_system if (system_prompt_text and not system_only_request) else msgs_with_system
+
     session, client, remain = await _find_reusable_session(db, pool, model, msgs)
     reused_session = session is not None
     use_google_temporary_mode = g_config.gemini.chat_mode == ChatMode.TEMPORARY
+
+    # Fallback search for legacy sessions that still contain explicit system messages.
+    if (
+        session is None
+        and system_prompt_text
+        and not system_only_request
+        and msgs_with_system != msgs_without_system
+    ):
+        session, client, remain = await _find_reusable_session(db, pool, model, msgs_with_system)
+        if session is not None:
+            msgs = msgs_with_system
+
+    managed_system_gem_id: str | None = None
+    if system_prompt_text and not system_only_request:
+        target_client = client
+        if target_client is None:
+            target_client = await pool.acquire()
+            client = target_client
+
+        managed_system_gem_id = await target_client.system_prompt_gem_id_or_create(system_prompt_text)
+        if managed_system_gem_id:
+            # When gem is available, keep system text out of the prompt payload.
+            msgs = msgs_without_system
+            if session is not None:
+                session.gem = managed_system_gem_id
+        else:
+            # Fall back to explicit system-text path.
+            msgs = msgs_with_system
+
+    # If we changed message mode after initial reuse lookup, re-check reuse quickly.
+    if session is None and msgs in (msgs_without_system, msgs_with_system):
+        session, client, remain = await _find_reusable_session(db, pool, model, msgs)
 
     if session:
         if not remain:
@@ -1810,8 +1884,9 @@ async def create_chat_completion(
         )
     else:
         try:
-            client = await pool.acquire()
-            session = client.start_chat(model=model)
+            if client is None:
+                client = await pool.acquire()
+            session = client.start_chat(model=model, gem=managed_system_gem_id)
             # Use the already prepared 'msgs' for a fresh session
             m_input, files = await _process_conversation_with_compaction(
                 msgs,
@@ -1972,12 +2047,31 @@ async def create_response(
         request.tool_choice if isinstance(request.tool_choice, (str, ToolChoiceFunction)) else None
     )
 
-    messages = _prepare_messages_for_model(
+    # Split leading system/instruction content so it can be mapped to a managed
+    # gem when create_on_demand is enabled.
+    system_prompt_text, conv_without_system = _extract_leading_system_prompt(conv_messages)
+    system_only_conversation = bool(system_prompt_text) and not conv_without_system
+    if not system_prompt_text:
+        conv_without_system = conv_messages
+
+    messages_without_system = _prepare_messages_for_model(
+        [] if system_only_conversation else conv_without_system,
+        standard_tools or None,
+        model_tool_choice,
+        extra_instr or None,
+    )
+    messages_with_system = _prepare_messages_for_model(
         conv_messages,
         standard_tools or None,
         model_tool_choice,
         extra_instr or None,
     )
+    messages = (
+        messages_without_system
+        if (system_prompt_text and not system_only_conversation)
+        else messages_with_system
+    )
+
     pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
         model = _get_model_by_name(request.model)
@@ -1987,6 +2081,36 @@ async def create_response(
     session, client, remain = await _find_reusable_session(db, pool, model, messages)
     reused_session = session is not None
     use_google_temporary_mode = g_config.gemini.chat_mode == ChatMode.TEMPORARY
+
+    # Fallback reuse search for legacy sessions that still included explicit system text.
+    if (
+        session is None
+        and system_prompt_text
+        and not system_only_conversation
+        and messages_with_system != messages_without_system
+    ):
+        session, client, remain = await _find_reusable_session(db, pool, model, messages_with_system)
+        if session is not None:
+            messages = messages_with_system
+
+    managed_system_gem_id: str | None = None
+    if system_prompt_text and not system_only_conversation:
+        target_client = client
+        if target_client is None:
+            target_client = await pool.acquire()
+            client = target_client
+
+        managed_system_gem_id = await target_client.system_prompt_gem_id_or_create(system_prompt_text)
+        if managed_system_gem_id:
+            messages = messages_without_system
+            if session is not None:
+                session.gem = managed_system_gem_id
+        else:
+            messages = messages_with_system
+
+    # If message shape changed after gem resolution, search reusable session again.
+    if session is None and messages in (messages_without_system, messages_with_system):
+        session, client, remain = await _find_reusable_session(db, pool, model, messages)
     if session:
         msgs = _prepare_messages_for_model(
             remain,
@@ -2008,8 +2132,9 @@ async def create_response(
         )
     else:
         try:
-            client = await pool.acquire()
-            session = client.start_chat(model=model)
+            if client is None:
+                client = await pool.acquire()
+            session = client.start_chat(model=model, gem=managed_system_gem_id)
             m_input, files = await _process_conversation_with_compaction(
                 messages,
                 tmp_dir,

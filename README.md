@@ -248,6 +248,35 @@ gemini:
     - model_name: "gemini-3.0-pro"
       model_header:
         x-goog-ext-525001261-jspb: '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4],null,null,1]'
+  gems:
+    # Disabled by default to avoid accidental creation/update/deletion of gems.
+    enabled: false
+    # Policy mode:
+    # - off: disabled
+    # - fetch_only: load existing server-managed gems only
+    # - create_on_demand: create missing managed gems when needed (rate-limited)
+    # - privacy: reserved for ephemeral request-time flow (startup sync skipped)
+    policy: "off"
+    create_rate_limit_per_minute: 4
+    managed_gems_max_total: 200
+    cleanup:
+      enabled: false
+      unused_days: 7
+      touch_interval_minutes: 60
+      dry_run: false
+      max_deletes_per_run: 5
+      require_managed_marker: true
+    fetch_on_init: true
+    include_hidden_on_fetch: false
+    policies:
+      enabled: false
+      prefix: "fastapi_policy_"
+      default_policy:
+        enabled: false
+        key: "general_capability_guardrail"
+        # If `prompt` is null (or omitted), the implementation's built-in
+        # base system prompt will be used instead.
+        prompt: null
 ```
 
 #### Environment Variables
