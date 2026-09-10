@@ -21,7 +21,7 @@ TOOL_WRAP_HINT = (
     "\n\n### SYSTEM: TOOL CALLING PROTOCOL (MANDATORY) ###\n"
     "If tool execution is required, you MUST adhere to this EXACT protocol. No exceptions.\n\n"
     "1. OUTPUT RESTRICTION: Your response MUST contain ONLY the [ToolCalls] block. Conversational filler, preambles, or concluding remarks are STRICTLY PROHIBITED.\n"
-    "2. WRAPPING LOGIC: Every parameter value MUST be enclosed in a markdown code block. Use 3 backticks (```) by default. If the value contains backticks, the outer fence MUST be longer than any sequence inside (e.g., ````).\n"
+    "2. WRAPPING LOGIC: Every parameter value MUST be enclosed in a markdown code block. Use 3 backticks (```) by default. If the value contains backticks, the outer fence MUST be longer than any sequence inside (e.g., ````). String typed values MUST be quoted (\")\n"
     "3. TAG SYMMETRY: All tags MUST be balanced and closed in the exact reverse order of opening. Incomplete or unclosed blocks are strictly prohibited.\n\n"
     "REQUIRED SYNTAX:\n"
     "[ToolCalls]\n"
@@ -277,6 +277,12 @@ def strip_system_hints(text: str) -> str:
 
     return cleaned
 
+def parse_arg_value(val):
+    result = _strip_param_fences(val)
+    try:
+        return orjson.loads(result)
+    except orjson.JSONDecodeError:
+        return result
 
 def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[ToolCall]]:
     """
@@ -301,7 +307,7 @@ def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[
         arg_matches = TAGGED_ARG_RE.findall(raw_args)
         if arg_matches:
             args_dict = {
-                arg_name.strip(): _strip_param_fences(arg_value)
+                arg_name.strip(): parse_arg_value(arg_value)
                 for arg_name, arg_value in arg_matches
             }
             arguments = orjson.dumps(args_dict).decode("utf-8")
