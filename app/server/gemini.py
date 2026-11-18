@@ -84,6 +84,7 @@ from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversation
 from app.utils.helper import (
     StructuredOutputValidationError,
     calculate_usage,
+    dump_model,
     guess_extension_for_mime,
     normalize_llm_text,
     normalize_openapi_schema,
@@ -747,8 +748,11 @@ async def gemini_generate_content(
         tool_calls,
     )
 
-    return _to_gemini_response(
-        visible_output, tool_calls, thoughts, usage_tuple, sent.model_name, image_parts
+    # Unset fields are left out, as Google does and as the streaming route already did.
+    return dump_model(
+        _to_gemini_response(
+            visible_output, tool_calls, thoughts, usage_tuple, sent.model_name, image_parts
+        )
     )
 
 
