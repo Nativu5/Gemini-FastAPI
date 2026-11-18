@@ -63,7 +63,6 @@ from app.models.gemini_models import (
 from app.server.chat import (
     StreamingOutputFilter,
     _build_structured_requirement,
-    _get_available_models,
     _image_to_base64,
     _media_markdown,
     _persist_conversation,
@@ -72,6 +71,7 @@ from app.server.chat import (
     _resolve_model_name,
     _send_request,
     _tool_choice_failure,
+    available_models,
 )
 from app.server.middleware import (
     get_media_store_dir,
@@ -459,7 +459,7 @@ def _model_info(model_id: str) -> GeminiModelInfo:
 @router.get("/v1beta/models")
 async def gemini_list_models(api_key: str = Depends(verify_gemini_api_key)):
     """List available models (Gemini API format)."""
-    models = await _get_available_models(GeminiClientPool())
+    models = available_models(GeminiClientPool())
 
     logger.info(f"[Gemini API] Retrieved {len(models)} models")
     if not models:

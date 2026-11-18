@@ -27,7 +27,7 @@ from app.utils.singleton import Singleton
 _VOLATILE_TRANS_TABLE = str.maketrans("", "", string.whitespace + string.punctuation)
 
 
-def _cid_of(metadata: list[str | None] | None) -> str | None:
+def cid_of(metadata: list[str | None] | None) -> str | None:
     """Chat id from a metadata list, which stores it at index 0."""
     return metadata[0] if metadata else None
 
@@ -111,11 +111,6 @@ def _hash_message(message: AppMessage, fuzzy: bool = False) -> str:
 
         core_data["content"] = content_items or None
 
-    # `reasoning_content` is deliberately NOT hashed. `_persist_conversation` stores every
-    # assistant turn it produces with `reasoning_content=None`, while both request converters
-    # populate it from whatever the client echoes back - and this server does emit reasoning on
-    # both surfaces. Hashing it would make the stored turn and the replayed turn disagree by
-    # construction, so the newest prefix could never match and reuse would collapse.
     if message.tool_calls:
         calls_data = []
         for tc in message.tool_calls:
@@ -776,7 +771,7 @@ class LMDBConversationStore(metaclass=Singleton):
         seen_remote_cids: set[str] = set()
         for _, conv, is_auto_delete in expired_entries:
             if is_auto_delete and conv.chat_scope is None:
-                cid = _cid_of(conv.metadata)
+                cid = cid_of(conv.metadata)
                 if cid and cid not in active_cids and cid not in seen_remote_cids:
                     seen_remote_cids.add(cid)
                     remote_to_stage.append((conv.client_id, cid))

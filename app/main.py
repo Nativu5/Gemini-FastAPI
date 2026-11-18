@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from loguru import logger
 
-from .server.chat import refresh_available_models_cache
+from .server.chat import available_models
 from .server.chat import router as chat_router
 from .server.gemini import add_exception_handlers
 from .server.gemini import router as gemini_router
@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
     pool = GeminiClientPool()
     try:
         await pool.init()
-        await refresh_available_models_cache(pool)
+        available_models(pool)  # listed now, so `created` is the startup time
     except Exception as e:
         logger.exception(f"Failed to initialize Gemini clients: {e}")
         raise

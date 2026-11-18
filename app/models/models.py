@@ -21,7 +21,6 @@ class StructuredOutputRequirement:
     schema_name: str
     schema: dict[str, Any]
     instruction: str
-    raw_format: dict[str, Any]
     strict: bool = True
     """Whether schema adherence is guaranteed to the client.
 

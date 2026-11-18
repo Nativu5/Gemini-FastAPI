@@ -15,7 +15,7 @@ from app.main import create_app
 from app.server import chat, gemini, middleware
 from app.services.lmdb import LMDBConversationStore
 from app.utils import g_config
-from app.utils.config import GeminiClientSettings
+from app.utils.config import GeminiClientSettings, GeminiGemPolicyMode
 
 CLIENT_ID = "client-id-1"
 MODEL = "gemini-test"
@@ -90,9 +90,6 @@ class _Client:
     def is_guest(self) -> bool:
         return False
 
-    def can_upload(self) -> bool:
-        return True
-
     def usable_model(self, model: Any) -> Any:
         return model
 
@@ -102,7 +99,9 @@ class _Client:
     def start_chat(self, **kwargs: Any) -> _Session:
         return _Session(self._upstream, self, **kwargs)
 
-    async def system_prompt_gem_id_or_create(self, prompt: str) -> str:
+    async def system_prompt_gem_id_or_create(self, prompt: str) -> str | None:
+        if g_config.gemini.gems.policy == GeminiGemPolicyMode.OFF:
+            return None
         gems = self._upstream.gems
         return gems.setdefault(prompt, f"gem_{len(gems) + 1}")
 

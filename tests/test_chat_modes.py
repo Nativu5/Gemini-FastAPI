@@ -57,4 +57,4 @@ def test_a_chat_is_never_continued_across_the_auto_delete_boundary(
 ):
     monkeypatch.setattr(g_config.gemini, "chat_mode", active_mode)
 
-    assert _is_reusable_chat(_stored(stored_mode), _account_client(), temporary=False) is reusable
+    assert _is_reusable_chat(_stored(stored_mode), _account_client()) is reusable

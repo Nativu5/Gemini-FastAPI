@@ -120,6 +120,20 @@ def test_responses_replays_a_generated_image_as_its_link_not_its_bytes(api, stre
     assert image["result"] not in replayed.text
 
 
+def test_chat_completions_continues_the_chat_when_the_client_echoes_the_reasoning(api):
+    """The stream carries `reasoning_content`; a client that sends it back still continues."""
+    api.upstream.replies.append(reply("Answer.", thoughts="Hm.", thoughts_delta="Hm."))
+    question = {"role": "user", "content": "First question"}
+    api.post("/v1/chat/completions", json={"model": MODEL, "messages": [question]})
+    echoed = {"role": "assistant", "content": "Answer.", "reasoning_content": "Hm."}
+    again = {"role": "user", "content": "Second question"}
+
+    api.post("/v1/chat/completions", json={"model": MODEL, "messages": [question, echoed, again]})
+
+    assert _continued(api)
+    assert "Hm." not in api.upstream.sent[-1].text
+
+
 def test_chat_completions_continues_the_chat_when_the_reply_comes_back_as_text_parts(api):
     """Some clients send every message as a list of parts; that is the same text as one string."""
     api.upstream.replies.append(reply("Hello."))

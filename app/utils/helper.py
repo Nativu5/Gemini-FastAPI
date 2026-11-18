@@ -932,7 +932,6 @@ def convert_to_app_messages(messages: list[ChatCompletionMessage]) -> list[AppMe
                 tool_calls=tool_calls,
                 tool_call_id=msg.tool_call_id,
                 name=msg.name,
-                reasoning_content=getattr(msg, "reasoning_content", None),
             )
         )
     return app_messages

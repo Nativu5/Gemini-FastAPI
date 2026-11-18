@@ -62,7 +62,7 @@ _EMPTY_USAGE = ResponseUsage(input_tokens=0, output_tokens=0, total_tokens=0)
 
 def _requirement(schema: dict, *, strict: bool = True) -> StructuredOutputRequirement:
     return StructuredOutputRequirement(
-        schema_name="r", schema=schema, instruction="", raw_format={}, strict=strict
+        schema_name="r", schema=schema, instruction="", strict=strict
     )
 
 

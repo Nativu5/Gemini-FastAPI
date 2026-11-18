@@ -56,29 +56,6 @@ def test_a_different_model_does_not_match(store):
     assert store.find("gemini-3-flash", messages) is None
 
 
-def test_echoed_reasoning_still_matches_the_stored_turn(store):
-    """Reuse must survive a client replaying the reasoning this server emitted.
-
-    `_persist_conversation` stores every assistant turn it produces with `reasoning_content=None`,
-    but both request converters populate it from whatever the client sends back - and replaying
-    the previous output is the normal pattern on the Responses API. If the hash counted reasoning,
-    the newest stored prefix could never match and session reuse would collapse.
-    """
-    stored = [
-        AppMessage(role="user", content="hello"),
-        AppMessage(role="assistant", content="hi there", reasoning_content=None),
-    ]
-    store.store(CLIENT_ID, MODEL, stored, metadata=["c", "r", "rc"])
-
-    echoed = [
-        AppMessage(role="user", content="hello"),
-        AppMessage(role="assistant", content="hi there", reasoning_content="let me think..."),
-    ]
-    found = store.find(MODEL, echoed)
-    assert found is not None
-    assert found.metadata == ["c", "r", "rc"]
-
-
 def test_inline_media_with_the_same_bytes_matches_and_different_bytes_does_not(store):
     """The content digest is what keeps two distinct images from colliding."""
 

@@ -45,7 +45,10 @@ from app.models import (
     ResponseFormatText,
     ResponseFormatTextJSONSchemaConfig,
     ResponseFunctionToolCall,
+    ResponseInputFile,
+    ResponseInputImage,
     ResponseInputMessage,
+    ResponseInputText,
     ResponseOutputContent,
     ResponseOutputMessage,
     ResponseOutputText,
@@ -64,8 +67,9 @@ from app.server.middleware import (
     verify_api_key,
 )
 from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
+from app.services.lmdb import cid_of
 from app.utils import g_config
-from app.utils.config import ChatMode, GeminiGemPolicyMode
+from app.utils.config import ChatMode
 from app.utils.helper import (
     SCHEMA_ADHERENCE_PROMPT,
     STREAM_FLUSH_TAIL_RE,
@@ -82,6 +86,7 @@ from app.utils.helper import (
     detect_image_extension,
     dump_model,
     extract_image_dimensions,
+    extract_named_tool_choice,
     normalize_app_message_role,
     normalize_llm_text,
     process_llm_output,
@@ -99,7 +104,6 @@ TEMPORARY_MAX_CHARS_PER_REQUEST = int(MAX_CHARS_PER_REQUEST * 0.9)
 
 router = APIRouter()
 _AVAILABLE_MODELS_CACHE: list[ModelData] | None = None
-_AVAILABLE_MODELS_CACHE_LOCK = asyncio.Lock()
 
 
 type ProcessedImageData = tuple[str, int | None, int | None, str, str]
@@ -291,50 +295,6 @@ def _create_responses_standard_payload(
     )
 
 
-def _create_chat_completion_standard_payload(
-    completion_id: str,
-    created_time: int,
-    model_name: str,
-    visible_output: str | None,
-    tool_calls: list[AppToolCall] | None,
-    finish_reason: Literal["stop", "length", "tool_calls", "content_filter"],
-    usage: dict,
-    reasoning_content: str | None = None,
-) -> ChatCompletionResponse:
-    """Unified factory for building Chat Completion response objects."""
-    tc_converted = None
-    if tool_calls:
-        tc_converted = [
-            ChatCompletionMessageToolCall(
-                id=tc.id,
-                type="function",
-                function=FunctionCall(name=tc.function.name, arguments=tc.function.arguments),
-            )
-            for tc in tool_calls
-        ]
-
-    message = ChatCompletionResponseMessage(
-        content=visible_output or None,
-        tool_calls=tc_converted,
-        reasoning_content=reasoning_content or None,
-    )
-
-    return ChatCompletionResponse(
-        id=completion_id,
-        object="chat.completion",
-        created=created_time,
-        model=model_name,
-        choices=[
-            ChatCompletionChoice(
-                index=0,
-                message=message,
-                finish_reason=finish_reason,
-            )
-        ],
-        usage=CompletionUsage(**usage),
-    )
-
-
 def _persist_conversation(
     db: LMDBConversationStore,
     model_name: str,
@@ -343,38 +303,33 @@ def _persist_conversation(
     messages: list[AppMessage],
     storage_output: str | list[AppContentItem] | None,
     tool_calls: list[AppToolCall] | None,
-) -> str | None:
-    """Unified logic to save conversation history to LMDB."""
+) -> None:
+    """Record this turn as the client's latest chat and store the history so a later request
+    can continue it. A storage failure is logged, not raised: the reply is already made."""
     # This turn is now the last chat this client opened; any window it replaced is closed. Set
     # before the store, so a persistence failure cannot leave a closed window looking reusable,
     # and in every mode, since an expired cookie can turn a client ephemeral without warning.
-    client.latest_chat_cid = _cid_of(metadata)
+    client.latest_chat_cid = cid_of(metadata)
     chat_scope = client.chat_scope(_use_temporary_chat_mode())
 
     try:
-        current_assistant_message = AppMessage(
-            role="assistant",
-            content=storage_output or None,
-            tool_calls=tool_calls or None,
-            reasoning_content=None,
+        reply = AppMessage(
+            role="assistant", content=storage_output or None, tool_calls=tool_calls or None
         )
-        full_history = [*messages, current_assistant_message]
 
         # An ephemeral chat is worth storing like any other while its window is live, tagged with
         # that window so a later session cannot mistake it for one of its own.
         db.store(
             client_id=client.id,
             model=model_name,
-            messages=full_history,
+            messages=[*messages, reply],
             metadata=metadata,
             chat_scope=chat_scope,
             chat_mode=g_config.gemini.chat_mode,
         )
         logger.debug("Conversation saved to LMDB.")
-        return "success"
     except Exception as e:
         logger.warning(f"Failed to save {len(messages) + 1} messages to LMDB: {e}")
-        return None
 
 
 def _build_structured_requirement(
@@ -393,7 +348,7 @@ def _build_structured_requirement(
     A schema that is well-formed JSON but not valid JSON Schema is asked for without being
     enforced, rather than failing the request; only a malformed `response_format` is rejected.
     """
-    if not response_format or not isinstance(response_format, dict):
+    if not response_format:
         return None
 
     format_type = response_format.get("type")
@@ -402,7 +357,6 @@ def _build_structured_requirement(
             schema_name="response",
             schema={},
             instruction=STRUCTURED_JSON_WRAP_HINT,
-            raw_format=response_format,
             strict=False,
         )
 
@@ -455,7 +409,6 @@ def _build_structured_requirement(
         schema_name=schema_name,
         schema=enforced_schema,
         instruction=instruction,
-        raw_format=response_format,
         strict=strict,
     )
 
@@ -494,12 +447,14 @@ def _log_ignored_openai_options(
     request: ChatCompletionRequest | ResponseCreateRequest,
 ) -> None:
     """Debug-log generation controls that were accepted but cannot reach Gemini Web."""
-    control_fields = (
-        ("temperature", "top_p", "max_completion_tokens", "parallel_tool_calls")
-        if isinstance(request, ChatCompletionRequest)
-        else ("temperature", "top_p", "max_output_tokens", "parallel_tool_calls")
-    )
-    if ignored := {name for name in control_fields if name in request.model_fields_set}:
+    control_fields = {
+        "temperature",
+        "top_p",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "parallel_tool_calls",
+    }
+    if ignored := control_fields & request.model_fields_set:
         logger.debug(
             "Ignoring option(s) unsupported by the Gemini Web upstream: "
             f"{', '.join(sorted(ignored))}"
@@ -523,13 +478,9 @@ def _tool_choice_failure(
     """
     if tool_choice == "required" and not tool_calls and not (has_images and has_image_tool):
         return "The model did not return a required tool result"
-    if (
-        target_name := (
-            tool_choice.function.name
-            if isinstance(tool_choice, ChatCompletionNamedToolChoice)
-            else (tool_choice.name if isinstance(tool_choice, ToolChoiceFunction) else None)
-        )
-    ) and all(call.function.name != target_name for call in tool_calls):
+    if (target_name := extract_named_tool_choice(tool_choice)) and all(
+        call.function.name != target_name for call in tool_calls
+    ):
         return f"The model did not call the required function {target_name!r}"
     if isinstance(tool_choice, ToolChoiceTypes) and not has_images:
         return "The model did not return a required image generation result"
@@ -544,12 +495,10 @@ def _tool_choice_declaration_error(
     """Reject forced choices that do not name a declared compatible tool."""
     if tool_choice == "required" and not function_names and not has_image_tool:
         return "tool_choice='required' requires at least one tool"
-    if isinstance(tool_choice, ChatCompletionNamedToolChoice):
-        target_name = tool_choice.function.name
-        if target_name not in function_names:
-            return f"tool_choice names undeclared function {target_name!r}"
-    if isinstance(tool_choice, ToolChoiceFunction) and tool_choice.name not in function_names:
-        return f"tool_choice names undeclared function {tool_choice.name!r}"
+    if (
+        target_name := extract_named_tool_choice(tool_choice)
+    ) and target_name not in function_names:
+        return f"tool_choice names undeclared function {target_name!r}"
     if isinstance(tool_choice, ToolChoiceTypes) and not has_image_tool:
         return "tool_choice='image_generation' requires an image_generation tool"
     return None
@@ -611,33 +560,22 @@ def _prepare_messages_for_model(
         if msg.role == "tool" and not msg.name and msg.tool_call_id:
             msg.name = tool_id_to_name.get(msg.tool_call_id)
 
-    instructions: list[str] = []
-    tool_prompt_injected = False
-    if inject_system_defaults and tools and (tool_prompt := build_tool_prompt(tools, tool_choice)):
-        instructions.append(tool_prompt)
-        tool_prompt_injected = True
+    instructions = (
+        [build_tool_prompt(tools, tool_choice)] if inject_system_defaults and tools else []
+    )
+    instructions += [instruction for instruction in extra_instructions or [] if instruction]
+    if instructions:
+        combined_instructions = "\n\n".join(instructions)
+        if prepared and prepared[0].role == "system" and isinstance(prepared[0].content, str):
+            existing = prepared[0].content or ""
+            if combined_instructions not in existing:
+                separator = "\n\n" if existing else ""
+                prepared[0].content = f"{existing}{separator}{combined_instructions}"
+        else:
+            prepared.insert(0, AppMessage(role="system", content=combined_instructions))
 
-    if extra_instructions:
-        instructions.extend(instr for instr in extra_instructions if instr)
-        logger.debug(
-            f"Applied {len(extra_instructions)} extra instructions for tool/structured output."
-        )
-
-    if not instructions:
-        if tools and tool_choice != "none" and not tool_prompt_injected:
-            append_tool_hint_to_last_user_message(prepared)
-        return prepared
-
-    combined_instructions = "\n\n".join(instructions)
-    if prepared and prepared[0].role == "system" and isinstance(prepared[0].content, str):
-        existing = prepared[0].content or ""
-        if combined_instructions not in existing:
-            separator = "\n\n" if existing else ""
-            prepared[0].content = f"{existing}{separator}{combined_instructions}"
-    else:
-        prepared.insert(0, AppMessage(role="system", content=combined_instructions))
-
-    if tools and tool_choice != "none" and not tool_prompt_injected:
+    # A continued chat was given the tool prompt when it was opened; it is only reminded.
+    if tools and tool_choice != "none" and not inject_system_defaults:
         append_tool_hint_to_last_user_message(prepared)
 
     return prepared
@@ -667,22 +605,14 @@ def _extract_leading_system_prompt(
     return "\n\n".join(system_parts), messages[idx:]
 
 
-def _system_prompt_gem_enabled() -> bool:
-    """Return whether leading system prompts may be offloaded to managed gems."""
-    return g_config.gemini.gems.policy != GeminiGemPolicyMode.OFF
-
-
 async def _resolve_system_prompt_gem(
-    client: GeminiClientWrapper,
-    system_prompt_text: str | None,
-    *,
-    system_only: bool,
+    client: GeminiClientWrapper, system_prompt: str | None
 ) -> str | None:
-    """Resolve or create a managed gem for the leading system prompt, falling back on error."""
-    if not system_prompt_text or system_only or not _system_prompt_gem_enabled():
+    """Id of the gem that carries this system prompt, or None to send the prompt inline."""
+    if not system_prompt:
         return None
     try:
-        return await client.system_prompt_gem_id_or_create(system_prompt_text)
+        return await client.system_prompt_gem_id_or_create(system_prompt)
     except Exception as exc:
         logger.warning(
             f"Failed to resolve managed system-prompt gem on client {client.id}; "
@@ -692,57 +622,49 @@ async def _resolve_system_prompt_gem(
 
 
 def _convert_responses_to_app_messages(
-    items: Any,
+    items: str
+    | list[
+        ResponseInputMessage
+        | ResponseOutputMessage
+        | ResponseReasoningItem
+        | ResponseFunctionToolCall
+        | FunctionCallOutput
+        | ImageGenerationCall
+    ],
 ) -> list[AppMessage]:
-    """Convert Responses API input items into internal AppMessage objects, skipping incomplete tool calls."""
-    messages: list[AppMessage] = []
+    """Convert Responses API input items into internal messages.
 
+    Consecutive assistant items - a message, its reasoning, its function calls - are one turn of
+    the model and become one message.
+    """
     if isinstance(items, str):
-        messages.append(AppMessage(role="user", content=items))
-        logger.debug("Normalized Responses input: single string message.")
-        return messages
+        return [AppMessage(role="user", content=items)]
 
+    messages: list[AppMessage] = []
     for item in items:
         if isinstance(item, (ResponseInputMessage, ResponseOutputMessage)):
-            raw_role = getattr(item, "role", "user")
-            role = normalize_app_message_role(raw_role)
-
-            content = item.content
-            if isinstance(content, str):
-                messages.append(AppMessage(role=role, content=content))
-            else:
-                converted: list[AppContentItem] = []
-                reasoning_parts: list[str] = []
-                for part in content:
-                    if part.type in ("input_text", "output_text"):
-                        if text_value := getattr(part, "text", "") or "":
-                            converted.append(AppContentItem(type="text", text=text_value))
-                    elif part.type == "reasoning_text":
-                        if text_value := getattr(part, "text", "") or "":
-                            reasoning_parts.append(text_value)
-                    elif part.type == "input_image":
-                        if image_url := getattr(part, "image_url", None):
-                            converted.append(AppContentItem(type="image_url", url=image_url))
-                    elif part.type == "input_file":
-                        file_url = getattr(part, "file_url", None)
-                        file_data = getattr(part, "file_data", None)
-                        if file_url or file_data:
-                            converted.append(
-                                AppContentItem(
-                                    type="file",
-                                    url=file_url,
-                                    file_data=file_data,
-                                    filename=getattr(part, "filename", None),
-                                )
-                            )
-                reasoning_val = "\n\n".join(reasoning_parts) if reasoning_parts else None
-                messages.append(
-                    AppMessage(
-                        role=role,
-                        content=converted or None,
-                        reasoning_content=reasoning_val,
+            role = normalize_app_message_role(item.role)
+            if isinstance(item.content, str):
+                messages.append(AppMessage(role=role, content=item.content))
+                continue
+            converted: list[AppContentItem] = []
+            for part in item.content:
+                if isinstance(part, (ResponseInputText, ResponseOutputText)):
+                    if part.text:
+                        converted.append(AppContentItem(type="text", text=part.text))
+                elif isinstance(part, ResponseInputImage):
+                    if part.image_url:
+                        converted.append(AppContentItem(type="image_url", url=part.image_url))
+                elif isinstance(part, ResponseInputFile) and (part.file_url or part.file_data):
+                    converted.append(
+                        AppContentItem(
+                            type="file",
+                            url=part.file_url,
+                            file_data=part.file_data,
+                            filename=part.filename,
+                        )
                     )
-                )
+            messages.append(AppMessage(role=role, content=converted or None))
 
         elif isinstance(item, ResponseFunctionToolCall):
             call_id = item.call_id or item.id
@@ -768,13 +690,14 @@ def _convert_responses_to_app_messages(
             if isinstance(item.output, list):
                 converted_output: list[AppContentItem] = []
                 for part in item.output:
-                    if part.type == "input_text":
+                    if isinstance(part, ResponseInputText):
                         converted_output.append(AppContentItem(type="text", text=part.text or ""))
-                    elif part.type == "input_image" and part.image_url:
-                        converted_output.append(
-                            AppContentItem(type="image_url", url=part.image_url)
-                        )
-                    elif part.type == "input_file":
+                    elif isinstance(part, ResponseInputImage):
+                        if part.image_url:
+                            converted_output.append(
+                                AppContentItem(type="image_url", url=part.image_url)
+                            )
+                    else:
                         converted_output.append(
                             AppContentItem(
                                 type="file",
@@ -794,115 +717,28 @@ def _convert_responses_to_app_messages(
                 )
             )
         elif isinstance(item, ResponseReasoningItem):
-            reasoning_val = None
-            if item.content:
-                reasoning_val = "\n\n".join(x.text for x in item.content if x.text)
-            messages.append(
-                AppMessage(
-                    role="assistant",
-                    reasoning_content=reasoning_val,
-                )
-            )
-        elif isinstance(item, ImageGenerationCall):
-            # The reply text already links the image; its base64 is no use to the model as text.
-            continue
+            # The reasoning itself is not sent back to the model, but the item still marks a
+            # turn of the model: a reply that was only reasoning is stored as an empty one.
+            messages.append(AppMessage(role="assistant"))
+        # An image_generation_call is skipped: the reply text already links the image, and its
+        # base64 is no use to the model as text.
 
-        else:
-            if hasattr(item, "role"):
-                raw_role = getattr(item, "role", "user")
-                role = normalize_app_message_role(raw_role)
-                messages.append(
-                    AppMessage(
-                        role=role,
-                        content=str(getattr(item, "content", "")),
-                    )
-                )
+    def as_items(content: str | list[AppContentItem] | None) -> list[AppContentItem]:
+        return (
+            [AppContentItem(type="text", text=content)]
+            if isinstance(content, str)
+            else content or []
+        )
 
-    compacted_messages: list[AppMessage] = []
+    turns: list[AppMessage] = []
     for msg in messages:
-        if not compacted_messages:
-            compacted_messages.append(msg)
+        last = turns[-1] if turns else None
+        if last is None or last.role != "assistant" or msg.role != "assistant":
+            turns.append(msg)
             continue
-
-        last_msg = compacted_messages[-1]
-        if last_msg.role == "assistant" and msg.role == "assistant":
-            reasoning_parts = []
-            if last_msg.reasoning_content:
-                reasoning_parts.append(last_msg.reasoning_content)
-            if msg.reasoning_content:
-                reasoning_parts.append(msg.reasoning_content)
-
-            merged_content = []
-            if isinstance(last_msg.content, str):
-                merged_content.append(AppContentItem(type="text", text=last_msg.content))
-            elif isinstance(last_msg.content, list):
-                merged_content.extend(last_msg.content)
-
-            if isinstance(msg.content, str):
-                merged_content.append(AppContentItem(type="text", text=msg.content))
-            elif isinstance(msg.content, list):
-                merged_content.extend(msg.content)
-
-            merged_tools = []
-            if last_msg.tool_calls:
-                merged_tools.extend(last_msg.tool_calls)
-            if msg.tool_calls:
-                merged_tools.extend(msg.tool_calls)
-
-            last_msg.reasoning_content = "\n\n".join(reasoning_parts) if reasoning_parts else None
-            last_msg.content = merged_content or None
-            last_msg.tool_calls = merged_tools or None
-        else:
-            compacted_messages.append(msg)
-
-    logger.debug(f"Normalized Responses input: {len(compacted_messages)} message items.")
-    return compacted_messages
-
-
-def _convert_instructions_to_app_messages(
-    instructions: str | list[ResponseInputMessage] | None,
-) -> list[AppMessage]:
-    """Normalize instructions payload into AppMessage objects."""
-    if not instructions:
-        return []
-
-    if isinstance(instructions, str):
-        return [AppMessage(role="system", content=instructions)]
-
-    instruction_messages: list[AppMessage] = []
-    for instruction in instructions:
-        if instruction.type and instruction.type != "message":
-            continue
-
-        role = normalize_app_message_role(instruction.role)
-
-        content = instruction.content
-        if isinstance(content, str):
-            instruction_messages.append(AppMessage(role=role, content=content))
-        else:
-            converted: list[AppContentItem] = []
-            for part in content:
-                if part.type in ("input_text", "output_text"):
-                    if text_value := getattr(part, "text", "") or "":
-                        converted.append(AppContentItem(type="text", text=text_value))
-                elif part.type == "input_image":
-                    if image_url := getattr(part, "image_url", None):
-                        converted.append(AppContentItem(type="image_url", url=image_url))
-                elif part.type == "input_file":
-                    file_url = getattr(part, "file_url", None)
-                    file_data = getattr(part, "file_data", None)
-                    if file_url or file_data:
-                        converted.append(
-                            AppContentItem(
-                                type="file",
-                                url=file_url,
-                                file_data=file_data,
-                                filename=getattr(part, "filename", None),
-                            )
-                        )
-            instruction_messages.append(AppMessage(role=role, content=converted or None))
-
-    return instruction_messages
+        last.content = [*as_items(last.content), *as_items(msg.content)] or None
+        last.tool_calls = [*(last.tool_calls or []), *(msg.tool_calls or [])] or None
+    return turns
 
 
 def _resolve_model_name(pool: GeminiClientPool, name: str) -> str:
@@ -932,7 +768,7 @@ def _resolve_model_name(pool: GeminiClientPool, name: str) -> str:
     raise ValueError(f"Model '{name}' is not available on any Gemini client.")
 
 
-async def _build_available_models(pool: GeminiClientPool) -> list[ModelData]:
+def _build_available_models(pool: GeminiClientPool) -> list[ModelData]:
     """Build the available model list from the models the clients discovered."""
     now = int(datetime.now(tz=UTC).timestamp())
     models_data = []
@@ -960,33 +796,16 @@ async def _build_available_models(pool: GeminiClientPool) -> list[ModelData]:
     return models_data
 
 
-async def refresh_available_models_cache(pool: GeminiClientPool) -> list[ModelData]:
-    """Refresh and return the cached model list while clients are available."""
+def available_models(pool: GeminiClientPool) -> list[ModelData]:
+    """The models the clients discovered, listed once and kept: `created` is when that was."""
     global _AVAILABLE_MODELS_CACHE
-
-    async with _AVAILABLE_MODELS_CACHE_LOCK:
-        models = await _build_available_models(pool)
-        _AVAILABLE_MODELS_CACHE = models
-        logger.info(f"Cached {len(models)} available model(s).")
-        return list(models)
+    if _AVAILABLE_MODELS_CACHE is None:
+        _AVAILABLE_MODELS_CACHE = _build_available_models(pool)
+        logger.info(f"Cached {len(_AVAILABLE_MODELS_CACHE)} available model(s).")
+    return list(_AVAILABLE_MODELS_CACHE)
 
 
-async def _get_available_models(pool: GeminiClientPool) -> list[ModelData]:
-    """Return cached available models, populating the cache if it has not been warmed yet."""
-    if _AVAILABLE_MODELS_CACHE is not None:
-        return list(_AVAILABLE_MODELS_CACHE)
-
-    return await refresh_available_models_cache(pool)
-
-
-def _cid_of(metadata: list[str | None] | None) -> str | None:
-    """Chat id from a metadata list, which stores it at index 0."""
-    return metadata[0] if metadata else None
-
-
-def _is_reusable_chat(
-    conv: ConversationInStore, client: GeminiClientWrapper, temporary: bool
-) -> bool:
+def _is_reusable_chat(conv: ConversationInStore, client: GeminiClientWrapper) -> bool:
     """Whether a stored chat can still be continued on this client.
 
     A normal chat lives in the account's history and stays continuable indefinitely, so only the
@@ -1015,7 +834,7 @@ def _is_reusable_chat(
         )
         return False
 
-    scope = client.chat_scope(temporary)
+    scope = client.chat_scope(_use_temporary_chat_mode())
     if conv.chat_scope is None and scope is None:
         return True
 
@@ -1032,7 +851,7 @@ def _is_reusable_chat(
         logger.debug(f"Client {client.id} has no chat on record; starting a fresh conversation.")
         return False
 
-    cid = _cid_of(conv.metadata)
+    cid = cid_of(conv.metadata)
     if cid and cid == latest:
         return True
 
@@ -1048,7 +867,6 @@ async def _find_reusable_session(
     pool: GeminiClientPool,
     resolved_model: str,
     messages: list[AppMessage],
-    temporary: bool = False,
     require_account: bool = False,
 ) -> tuple[
     ChatSession | None, GeminiClientWrapper | None, list[AppMessage], ConversationInStore | None
@@ -1074,7 +892,7 @@ async def _find_reusable_session(
                         break
                     # Checked after acquiring: acquire may restart a closed client, which rerolls
                     # the scope and clears the tracked cid, invalidating any ephemeral window.
-                    if not _is_reusable_chat(conv, client, temporary):
+                    if not _is_reusable_chat(conv, client):
                         # Every prefix of one conversation carries the same cid and scope, so if
                         # the longest match is not the live window, no shorter one will be either.
                         break
@@ -1102,12 +920,14 @@ def _use_temporary_chat_mode() -> bool:
     return g_config.gemini.chat_mode == ChatMode.TEMPORARY
 
 
-def _effective_max_chars_per_request(temporary: bool) -> int:
-    """Return the payload guardrail for the active chat mode."""
-    return TEMPORARY_MAX_CHARS_PER_REQUEST if temporary else MAX_CHARS_PER_REQUEST
+def _max_chars_per_request() -> int:
+    """Longest prompt sent as text in the active chat mode; anything longer goes as a file."""
+    if _use_temporary_chat_mode():
+        return TEMPORARY_MAX_CHARS_PER_REQUEST
+    return MAX_CHARS_PER_REQUEST
 
 
-def _requires_upload(messages: list[AppMessage], temporary: bool) -> bool:
+def _requires_upload(messages: list[AppMessage]) -> bool:
     """Whether serving these messages needs a file upload, which a guest session cannot do.
 
     Attachments do; so does input long enough to be sent as `message.txt`. The length is measured
@@ -1124,82 +944,45 @@ def _requires_upload(messages: list[AppMessage], temporary: bool) -> bool:
                     return True
                 total += len(item.text or "")
 
-    return total > _effective_max_chars_per_request(temporary)
-
-
-def _can_upload(session: ChatSession) -> bool:
-    """Whether the client behind this session may attach files."""
-    client = session.geminiclient
-    return client.can_upload() if isinstance(client, GeminiClientWrapper) else True
+    return total > _max_chars_per_request()
 
 
 async def _send_with_split(
-    session: ChatSession,
-    text: str,
-    files: list[Any] | None = None,
-    stream: bool = False,
-    temporary: bool = False,
+    session: ChatSession, text: str, files: list[Any], stream: bool
 ) -> AsyncGenerator[ModelOutput] | ModelOutput:
-    """Send text to Gemini with configured generation options, using an attachment if too long."""
-    limit = _effective_max_chars_per_request(temporary)
-    if len(text) <= limit:
-        try:
-            if stream:
-                return session.send_message_stream(
-                    text,
-                    files=files,
-                    temporary=temporary,
-                    extended_thinking=g_config.gemini.extended_thinking,
-                )
-            return await session.send_message(
-                text,
-                files=files,
-                temporary=temporary,
-                extended_thinking=g_config.gemini.extended_thinking,
+    """Send text to Gemini, as an attachment when it is too long for a prompt."""
+    limit = _max_chars_per_request()
+    if len(text) > limit:
+        if cast(GeminiClientWrapper, session.geminiclient).is_guest():
+            # Routing prefers an authenticated client, so this is hit only when the request
+            # still landed on a guest: none other was available, or the chat belongs to one.
+            raise RuntimeError(
+                f"Message length ({len(text)}) exceeds limit ({limit}) and would have to be "
+                "sent as an attachment, which a guest session cannot upload. Refresh the client "
+                "cookies or shorten the request."
             )
-        except Exception as e:
-            logger.error(f"Error sending message to Gemini: {e}")
-            raise
-
-    if not _can_upload(session):
-        # Only reachable once every client is a guest, since routing prefers an authenticated one.
-        raise RuntimeError(
-            f"Message length ({len(text)}) exceeds limit ({limit}) and would have to be sent as "
-            "an attachment, which a guest session cannot upload. Refresh the client cookies or "
-            "shorten the request."
+        logger.info(
+            f"Message length ({len(text)}) exceeds limit ({limit}). Converting text to file attachment."
         )
-
-    logger.info(
-        f"Message length ({len(text)}) exceeds limit ({limit}). Converting text to file attachment."
-    )
-    file_obj = io.BytesIO(text.encode("utf-8"))
-    file_obj.name = "message.txt"
-    try:
-        final_files: list[Any] = list(files) if files else []
-        final_files.insert(0, file_obj)
-        instruction = (
+        file_obj = io.BytesIO(text.encode("utf-8"))
+        file_obj.name = "message.txt"
+        files = [file_obj, *files]
+        text = (
             "The user's input exceeds the character limit and is provided in the attached file `message.txt`.\n\n"
             "**System Instruction:**\n"
             "1. Read the content of `message.txt`.\n"
             "2. Treat that content as the **primary** user prompt for this turn.\n"
             "3. Execute the instructions or answer the questions found *inside* that file immediately.\n"
         )
-        if stream:
-            return session.send_message_stream(
-                instruction,
-                files=final_files,
-                temporary=temporary,
-                extended_thinking=g_config.gemini.extended_thinking,
-            )
-        return await session.send_message(
-            instruction,
-            files=final_files,
-            temporary=temporary,
-            extended_thinking=g_config.gemini.extended_thinking,
-        )
-    except Exception as e:
-        logger.error(f"Error sending large text as file to Gemini: {e}")
-        raise
+
+    send = session.send_message_stream if stream else session.send_message
+    result = send(
+        text,
+        files=files,
+        temporary=_use_temporary_chat_mode(),
+        extended_thinking=g_config.gemini.extended_thinking,
+    )
+    return result if isinstance(result, AsyncGenerator) else await result
 
 
 async def _restream(
@@ -1217,7 +1000,6 @@ async def _send_and_await_first_chunk(
     *,
     files: list[Any],
     stream: bool,
-    temporary: bool,
 ) -> AsyncGenerator[ModelOutput] | ModelOutput:
     """Send to Gemini, pulling the first streamed chunk so start-of-stream errors surface here.
 
@@ -1225,11 +1007,11 @@ async def _send_and_await_first_chunk(
     without this the request would not reach Google until the caller iterates - by which point
     the HTTP response has already been committed and a failure can no longer be recovered.
     """
-    output = await _send_with_split(session, text, files=files, stream=stream, temporary=temporary)
-    if not stream:
+    output = await _send_with_split(session, text, files, stream)
+    if isinstance(output, ModelOutput):
         return output
 
-    generator = cast(AsyncGenerator[ModelOutput], output)
+    generator = output
     try:
         first = await anext(generator)
     except StopAsyncIteration:
@@ -1253,7 +1035,6 @@ async def _send_with_internal_fallback(
     stored_conversation: ConversationInStore | None,
     tmp_dir: Path,
     stream: bool,
-    temporary: bool,
 ) -> tuple[AsyncGenerator[ModelOutput] | ModelOutput, ChatSession, GeminiClientWrapper]:
     """Send the request, replaying the full history in a fresh chat if reused metadata is dead.
 
@@ -1263,7 +1044,7 @@ async def _send_with_internal_fallback(
     """
     try:
         output = await _send_and_await_first_chunk(
-            session, current_input, files=files, stream=stream, temporary=temporary
+            session, current_input, files=files, stream=stream
         )
         return output, session, client
     except ModelInvalidError:
@@ -1285,20 +1066,13 @@ async def _send_with_internal_fallback(
         )
         # Built before acquiring, so a replay that needs an upload is not handed to a guest.
         fallback_client = await pool.acquire(
-            require_account=bool(fallback_files)
-            or len(fallback_input) > _effective_max_chars_per_request(temporary)
+            require_account=bool(fallback_files) or len(fallback_input) > _max_chars_per_request()
         )
         fallback_session = fallback_client.start_chat(
             model=fallback_client.usable_model(resolved_model)
         )
-        # Keep the caller's streaming mode: the endpoints reject a ModelOutput when the client
-        # asked for a stream, so downgrading here would turn a recovery into a 502.
         output = await _send_and_await_first_chunk(
-            fallback_session,
-            fallback_input,
-            files=list(fallback_files),
-            stream=stream,
-            temporary=temporary,
+            fallback_session, fallback_input, files=list(fallback_files), stream=stream
         )
         return output, fallback_session, fallback_client
 
@@ -1331,19 +1105,17 @@ async def _send_request(
     the request, 502 when Gemini fails.
     """
     system_prompt, without_system = _extract_leading_system_prompt(history)
-    system_only = bool(system_prompt) and not without_system
-    temporary = _use_temporary_chat_mode()
-    needs_upload = _requires_upload(prepared, temporary)
+    if not without_system:
+        system_prompt = None  # a request that is only a system prompt keeps it as its message
+    needs_upload = _requires_upload(prepared)
     session, client, remain, stored_conv = await _find_reusable_session(
-        db, pool, resolved_model, prepared, temporary=temporary, require_account=needs_upload
+        db, pool, resolved_model, prepared, require_account=needs_upload
     )
 
     if session and client:
         if not remain:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
-        if gem_id := await _resolve_system_prompt_gem(
-            client, system_prompt, system_only=system_only
-        ):
+        if gem_id := await _resolve_system_prompt_gem(client, system_prompt):
             session.gem = gem_id
         to_send = _prepare_messages_for_model(
             remain, tools, tool_choice, instructions if repeat_instructions else None, False
@@ -1355,9 +1127,7 @@ async def _send_request(
     else:
         try:
             client = await pool.acquire(require_account=needs_upload)
-            gem_id = await _resolve_system_prompt_gem(
-                client, system_prompt, system_only=system_only
-            )
+            gem_id = await _resolve_system_prompt_gem(client, system_prompt)
             # A system prompt carried by a gem is left out of the message itself.
             to_send = (
                 _prepare_messages_for_model(without_system, tools, tool_choice, instructions)
@@ -1388,7 +1158,6 @@ async def _send_request(
             stored_conversation=stored_conv,
             tmp_dir=tmp_dir,
             stream=stream,
-            temporary=temporary,
         )
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
@@ -1569,7 +1338,7 @@ def _sse_error(
 
 
 def _create_real_streaming_response(
-    resp_or_stream: AsyncGenerator[ModelOutput] | ModelOutput,
+    generator: AsyncGenerator[ModelOutput],
     completion_id: str,
     created_time: int,
     model_name: str,
@@ -1599,9 +1368,6 @@ def _create_real_streaming_response(
         seen_media_urls = set()
         seen_image_urls = set()
 
-        async def _make_async_gen(item: ModelOutput) -> AsyncGenerator[ModelOutput]:
-            yield item
-
         async def discard_media_tasks() -> None:
             """Cancel and reap media downloads on a path that will never publish their results.
 
@@ -1628,11 +1394,6 @@ def _create_real_streaming_response(
 
         try:
             try:
-                if hasattr(resp_or_stream, "__aiter__"):
-                    generator = cast(AsyncGenerator[ModelOutput], resp_or_stream)
-                else:
-                    generator = _make_async_gen(cast(ModelOutput, resp_or_stream))
-
                 async for chunk in generator:
                     last_output = chunk
                     if not has_started:
@@ -1830,7 +1591,7 @@ def _create_real_streaming_response(
 
 
 def _create_responses_real_streaming_response(
-    resp_or_stream: AsyncGenerator[ModelOutput] | ModelOutput,
+    generator: AsyncGenerator[ModelOutput],
     response_id: str,
     created_time: int,
     model_name: str,
@@ -2059,15 +1820,6 @@ def _create_responses_real_streaming_response(
                 )
 
             try:
-                if hasattr(resp_or_stream, "__aiter__"):
-                    generator = cast(AsyncGenerator[ModelOutput], resp_or_stream)
-                else:
-
-                    async def _make_async_gen(item: ModelOutput) -> AsyncGenerator[ModelOutput]:
-                        yield item
-
-                    generator = _make_async_gen(cast(ModelOutput, resp_or_stream))
-
                 async for chunk in generator:
                     last_output = chunk
 
@@ -2402,7 +2154,7 @@ def _create_responses_real_streaming_response(
 @router.get("/v1/models", response_model=ModelListResponse)
 async def list_models(api_key: str = Depends(verify_api_key)):
     pool = GeminiClientPool()
-    models = await _get_available_models(pool)
+    models = available_models(pool)
     return ModelListResponse(data=models)
 
 
@@ -2457,12 +2209,7 @@ async def create_chat_completion(
         stream=bool(request.stream),
     )
 
-    if request.stream:
-        if isinstance(resp_or_stream, ModelOutput):
-            logger.error("Expected a streaming response from Gemini but got a complete output.")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail="Streaming response unavailable."
-            )
+    if not isinstance(resp_or_stream, ModelOutput):  # which is what `stream` asked for
         return _create_real_streaming_response(
             resp_or_stream,
             completion_id,
@@ -2476,12 +2223,6 @@ async def create_chat_completion(
             base_url,
             structured_requirement,
             request.tool_choice,
-        )
-
-    if not isinstance(resp_or_stream, ModelOutput):
-        logger.error("Expected a complete output from Gemini but got a stream.")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Unexpected streaming response."
         )
 
     try:
@@ -2554,21 +2295,37 @@ async def create_chat_completion(
         storage_output += media_markdown
 
     p_tok, c_tok, t_tok, r_tok = calculate_usage(app_messages, storage_output, tool_calls, thoughts)
-    usage = {
-        "prompt_tokens": p_tok,
-        "completion_tokens": c_tok,
-        "total_tokens": t_tok,
-        "completion_tokens_details": {"reasoning_tokens": r_tok},
-    }
-    payload = _create_chat_completion_standard_payload(
-        completion_id,
-        created_time,
-        request.model,
-        visible_output,
-        tool_calls or None,
-        "tool_calls" if tool_calls else "stop",
-        usage,
-        thoughts,
+    payload = ChatCompletionResponse(
+        id=completion_id,
+        created=created_time,
+        model=request.model,
+        choices=[
+            ChatCompletionChoice(
+                index=0,
+                message=ChatCompletionResponseMessage(
+                    content=visible_output or None,
+                    tool_calls=[
+                        ChatCompletionMessageToolCall(
+                            id=call.id,
+                            type="function",
+                            function=FunctionCall(
+                                name=call.function.name, arguments=call.function.arguments
+                            ),
+                        )
+                        for call in tool_calls
+                    ]
+                    or None,
+                    reasoning_content=thoughts or None,
+                ),
+                finish_reason="tool_calls" if tool_calls else "stop",
+            )
+        ],
+        usage=CompletionUsage(
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+            total_tokens=t_tok,
+            completion_tokens_details={"reasoning_tokens": r_tok},
+        ),
     )
     _persist_conversation(
         db,
@@ -2624,8 +2381,9 @@ async def create_response(
     )
     if img_instr:
         extra_instr.append(img_instr)
-    preface = _convert_instructions_to_app_messages(request.instructions)
-    conv_messages = [*preface, *base_messages] if preface else base_messages
+    conv_messages = base_messages
+    if request.instructions:
+        conv_messages = [AppMessage(role="system", content=request.instructions), *base_messages]
     model_tool_choice = (
         request.tool_choice if isinstance(request.tool_choice, (str, ToolChoiceFunction)) else None
     )
@@ -2659,12 +2417,7 @@ async def create_response(
         stream=bool(request.stream),
     )
 
-    if request.stream:
-        if isinstance(resp_or_stream, ModelOutput):
-            logger.error("Expected a streaming response from Gemini but got a complete output.")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail="Streaming response unavailable."
-            )
+    if not isinstance(resp_or_stream, ModelOutput):  # which is what `stream` asked for
         return _create_responses_real_streaming_response(
             resp_or_stream,
             response_id,
@@ -2679,12 +2432,6 @@ async def create_response(
             base_url,
             structured_requirement,
             bool(image_tools),
-        )
-
-    if not isinstance(resp_or_stream, ModelOutput):
-        logger.error("Expected a complete output from Gemini but got a stream.")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Unexpected streaming response."
         )
 
     try:
