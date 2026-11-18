@@ -171,7 +171,7 @@ class GeminiConfig(BaseModel):
     clients: list[GeminiClientSettings] = Field(
         ..., description="List of Gemini client credential pairs"
     )
-    timeout: int = Field(default=450, ge=30, description="Init timeout in seconds")
+    timeout: int = Field(default=450, ge=30, description="Request timeout in seconds")
     watchdog_timeout: int = Field(default=120, ge=30, description="Watchdog timeout in seconds")
     auto_refresh: bool = Field(True, description="Enable auto-refresh for Gemini sessions")
     refresh_interval: int = Field(
@@ -180,7 +180,7 @@ class GeminiConfig(BaseModel):
         description="Interval in seconds to refresh Gemini sessions (Not less than 60s)",
     )
     auto_close: bool = Field(
-        default=True, description="Enable auto-close for Gemini sessions after inactivity"
+        default=False, description="Enable auto-close for Gemini sessions after inactivity"
     )
     close_delay: int = Field(
         default=900, ge=30, description="Inactivity delay in seconds before auto-closing"
@@ -227,17 +227,17 @@ class GeminiConfig(BaseModel):
     )
     allow_private_url_fetch: bool = Field(
         default=False,
-        description="Allow server-side fetching of private/loopback image URLs (SSRF risk; default blocks them)",
+        description="Allow server-side fetching of private/loopback URLs (SSRF risk; default blocks them)",
     )
     url_fetch_timeout: int = Field(
         default=15,
         ge=1,
         le=120,
-        description="Timeout in seconds for server-side URL image fetches",
+        description="Timeout in seconds for server-side URL fetches",
     )
     gems: GeminiGemsConfig = Field(
         default=GeminiGemsConfig(),
-        description="Managed gem synchronization and request-time system-prompt gem settings",
+        description="System-prompt gem policy, limits and cleanup",
     )
 
 

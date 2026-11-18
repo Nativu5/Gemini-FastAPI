@@ -51,9 +51,8 @@ class GeminiClientWrapper(GeminiClient):
         self._gem_use_recorded_at: dict[str, float] = {}  # gem id -> time of the last update
 
     async def init(self, *args: Any, **kwargs: Any) -> None:
-        """
-        Inject default configuration values from global settings.
-        """
+        """Initialize with the settings in `g_config.gemini`. Arguments are ignored: the
+        library passes its own when it restarts a client, and the configuration decides."""
         config = g_config.gemini
         init_kwargs: dict[str, Any] = {
             "timeout": config.timeout,
@@ -186,12 +185,7 @@ class GeminiClientWrapper(GeminiClient):
             logger.warning(f"Failed to record the last use of gem {gem.name!r}: {exc}")
 
     def is_healthy(self) -> bool:
-        """
-        Check if the client is healthy.
-
-        A client is healthy if it is active (running or initialized with auto-close)
-        and the account status is available.
-        """
+        """Running, or closed for inactivity after a good start, on an account in good standing."""
         is_active = self._running or (self.auto_close and self._initialized)
         return is_active and self.account_status == AccountStatus.AVAILABLE
 
@@ -245,10 +239,7 @@ class GeminiClientWrapper(GeminiClient):
     async def _process_content_item(
         item: Any, role: str, tempdir: Path | None
     ) -> tuple[str | None, Path | str | None]:
-        """
-        Process a single content item (text, image_url, file, input_audio).
-        Returns a tuple of (text_fragment, file_path).
-        """
+        """One content item as (text, file); at most one of the two is set."""
         if item.type == "text":
             item_text = getattr(item, "text", "") or ""
             if item_text or role == "tool":
@@ -274,9 +265,7 @@ class GeminiClientWrapper(GeminiClient):
     async def _extract_content_and_files(
         message: AppMessage, tempdir: Path | None
     ) -> tuple[list[str], list[Path | str]]:
-        """
-        Extract text fragments and files from message content.
-        """
+        """The text pieces and the files of a message, each in the order they appear."""
         files: list[Path | str] = []
         text_fragments: list[str] = []
 

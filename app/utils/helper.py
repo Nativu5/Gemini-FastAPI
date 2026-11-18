@@ -626,7 +626,8 @@ def strip_tagged_blocks(text: str) -> str:
 
 
 def strip_system_hints(text: str) -> str:
-    """Remove system hints, ChatML tags, and technical protocol markers from text."""
+    """Undo markdown escaping, then remove echoed hints, ChatML tags (tool-role blocks with
+    their content) and every tool-call and tool-result block."""
     if not text:
         return text
 
@@ -685,7 +686,7 @@ def extract_tool_calls(text: str) -> tuple[str, list[AppToolCall]]:
 
 
 def text_from_message(message: AppMessage) -> str:
-    """Concatenate text and tool arguments from a message for token estimation."""
+    """The text of a message followed by the arguments of its tool calls."""
     base_text = ""
     if isinstance(message.content, str):
         base_text = message.content
@@ -781,7 +782,7 @@ def calculate_usage(
 
 
 def normalize_app_message_role(role_name: str) -> AppMessageRole:
-    """Normalize and validate input role string to a valid AppMessage role."""
+    """Map an API role to an internal one; a role this server does not know becomes system."""
     roles: dict[str, AppMessageRole] = {
         "developer": "system",
         "function": "tool",

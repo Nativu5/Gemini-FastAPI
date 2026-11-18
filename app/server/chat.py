@@ -337,7 +337,7 @@ def _build_structured_requirement(
 ) -> StructuredOutputRequirement | None:
     """Translate an OpenAI-style response_format into fenced-JSON prompt instructions.
 
-    `json_schema` becomes an enforced requirement, `json_object` a best-effort one carrying an
+    `json_schema` becomes a validated requirement, `json_object` a best-effort one carrying an
     empty schema, and every other type - including the `text` default - is dropped, since a mode
     this wrapper cannot represent must not block the rest of the request.
 

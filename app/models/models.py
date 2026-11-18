@@ -58,9 +58,8 @@ class ChatCompletionRequestContentItem(BaseModel):
 class ChatCompletionAssistantContentItem(BaseModel):
     """Content item for assistant messages.
 
-    ``refusal`` is an official OpenAI content part.
-    ``reasoning`` is a community extension used to persist chain-of-thought
-    text for reusable-session matching.
+    ``refusal`` is an official OpenAI content part. ``reasoning`` is not: some clients send
+    it, so it is accepted for their requests to validate.
     """
 
     type: Literal["text", "refusal", "reasoning"]
@@ -232,7 +231,7 @@ class ResponseInputMessage(BaseModel):
 
 
 class ResponseFunctionToolCall(BaseModel):
-    """An assistant function-call item replayed as part of the input history."""
+    """A function-call item: in the output, or replayed as part of the input history."""
 
     type: Literal["function_call"] | None = Field(default="function_call")
     id: str | None = Field(default=None)

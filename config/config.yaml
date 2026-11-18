@@ -28,7 +28,7 @@ gemini:
       secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE" # Gemini Secure 1PSIDTS
       proxy: null # Optional proxy URL (null/empty means direct connection)
       impersonate: null # Optional browser impersonation target (null uses library default)
-  timeout: 450 # Init timeout in seconds (Not less than 30s)
+  timeout: 450 # Request timeout in seconds (Not less than 30s)
   watchdog_timeout: 120 # Watchdog timeout in seconds (Not less than 30s)
   auto_refresh: true # Auto-refresh session cookies
   refresh_interval: 600 # Refresh interval in seconds (Not less than 60s)
@@ -37,8 +37,8 @@ gemini:
   verbose: true # Enable verbose logging for Gemini requests
   extended_thinking: false # Enable Gemini extended thinking mode for message generation
   max_chars_per_request: 1000000 # Maximum characters Gemini Web accepts per request. Non-pro users might have a lower limit
-  allow_private_url_fetch: false # Allow server-side fetching of private/loopback image URLs (SSRF risk; default blocks them)
-  url_fetch_timeout: 15 # Timeout in seconds for server-side URL image fetches
+  allow_private_url_fetch: false # Allow server-side fetching of private/loopback URLs (SSRF risk; default blocks them)
+  url_fetch_timeout: 15 # Timeout in seconds for server-side URL fetches
   # What happens to the chats this server opens in the Google account:
   #   "normal"      - kept until you delete them.
   #   "temporary"   - never saved. Google may close a temporary chat at any time without an error, so a
@@ -49,8 +49,9 @@ gemini:
   auto_delete_ttl: 86400 # Idle seconds before an "auto_delete" chat is deleted (Not less than 60s)
   # Guest client health policy: "strict" fails if any client is unhealthy; "adaptive" fails only if all are unhealthy; "permissive" only logs a warning.
   guest_mode: "adaptive"
-  # Send the system prompt at the start of a request as a gem (saved custom instructions) in the
-  # Google account instead of inline. Guest sessions cannot use gems and always send it inline.
+  # Send the system prompt at the start of a /v1/chat/completions or /v1/responses request as a
+  # gem (saved custom instructions) in the Google account instead of inline. Guest sessions and
+  # /v1beta requests always send it inline.
   # Google is retiring Gems (personal accounts: read-only from 2026-11-17, removed 2026-12-17;
   # Workspace: March 2027; education: June 2027), so this only works while the account has them.
   gems:
@@ -79,4 +80,4 @@ storage:
   retention_days: 14
 
 logging:
-  level: "DEBUG" # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "DEBUG" # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL

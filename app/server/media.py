@@ -8,7 +8,8 @@ from app.server.middleware import get_media_store_dir, verify_media_token
 
 router = APIRouter()
 # The extension is whatever the upstream save produced, so it has to allow more than plain
-# alphanumerics (`.tar.gz`, `.x-m4a`) while still excluding every path separator and `..`.
+# alphanumerics (`.tar.gz`, `.x-m4a`) while still excluding every path separator, and with
+# it any way to step out of the store.
 MEDIA_FILENAME_RE = re.compile(r"(?:img|media)_[0-9a-f]{32}\.[A-Za-z0-9][A-Za-z0-9.\-_]{0,15}\Z")
 
 
