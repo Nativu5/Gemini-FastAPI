@@ -1,4 +1,4 @@
-"""Tests for managed policy gems configuration, lifecycle, and system-prompt routing."""
+"""Tests for managed gems: configuration, cleanup, and system-prompt routing."""
 
 import asyncio
 import time
@@ -17,9 +17,9 @@ from app.services import client as client_module
 from app.services.client import GeminiClientWrapper
 from app.services.lmdb import LMDBConversationStore
 from app.services.policy_gems import (
+    delete_unused_gems,
     extract_managed_last_used_at,
     has_managed_marker,
-    sync_policy_gems,
     touch_managed_description,
 )
 from app.utils.config import (
@@ -31,125 +31,27 @@ from app.utils.config import (
 
 
 class _FakeGemClient:
-    """In-memory stub implementing GeminiClient gem RPCs for unit tests."""
+    """In-memory stand-in for the gem RPCs the cleanup uses."""
 
-    def __init__(self, initial_gems: list[Gem] | None = None):
-        self._store: dict[str, Gem] = {}
-        for gem in initial_gems or []:
-            self._store[gem.id] = gem
-        self._gems = GemJar(self._store)
-        self._seq = 0
-        self.created: list[str] = []
-        self.updated: list[str] = []
-        self.deleted: list[str] = []
-        self.fetch_calls: list[bool] = []
-
-    @property
-    def gems(self) -> GemJar:
-        return self._gems
+    def __init__(self, gems: list[Gem]):
+        self._store = {gem.id: gem for gem in gems}
 
     async def fetch_gems(self, include_hidden: bool = False, **kwargs: Any) -> GemJar:
-        self.fetch_calls.append(include_hidden)
-        self._gems = GemJar(self._store)
-        return self._gems
-
-    async def create_gem(self, name: str, prompt: str, description: str = "") -> Gem:
-        self._seq += 1
-        gem_id = f"gem_{self._seq}"
-        gem = Gem(id=gem_id, name=name, prompt=prompt, description=description, predefined=False)
-        self._store[gem_id] = gem
-        self.created.append(name)
-        return gem
-
-    async def update_gem(
-        self, gem: Gem | str, name: str, prompt: str, description: str = ""
-    ) -> Gem:
-        gem_id = gem.id if isinstance(gem, Gem) else gem
-        updated = Gem(
-            id=gem_id, name=name, prompt=prompt, description=description, predefined=False
-        )
-        self._store[gem_id] = updated
-        self.updated.append(gem_id)
-        return updated
+        return GemJar(self._store)
 
     async def delete_gem(self, gem: Gem | str, **kwargs: Any) -> None:
-        gem_id = gem.id if isinstance(gem, Gem) else gem
-        self._store.pop(gem_id, None)
-        self.deleted.append(gem_id)
+        self._store.pop(gem.id if isinstance(gem, Gem) else gem, None)
 
 
 def test_gem_config_defaults_are_safe_and_consistent():
     config = GeminiConfig(clients=[], auto_refresh=True, verbose=True)
-    assert config.gems.enabled is False
     assert config.gems.policy == GeminiGemPolicyMode.OFF
     assert config.gems.create_rate_limit_per_minute == 4
     assert config.gems.managed_gems_max_total == 200
-    assert config.gems.policies.default_policy.enabled is False
     assert config.gems.cleanup.enabled is False
 
 
-def test_sync_policy_gems_skips_default_policy_when_disabled():
-    fake = _FakeGemClient()
-    result = asyncio.run(
-        sync_policy_gems(
-            cast(Any, fake),
-            default_policy_enabled=False,
-            mode="create_on_demand",
-        )
-    )
-    assert result.gem_ids == {}
-    assert result.created_count == 0
-    assert fake.created == []
-
-
-def test_sync_policy_gems_creates_and_updates_when_enabled():
-    fake = _FakeGemClient()
-    res1 = asyncio.run(
-        sync_policy_gems(
-            cast(Any, fake),
-            prefix="fastapi_policy_",
-            default_policy_enabled=True,
-            default_policy_key="custom_guard",
-            default_prompt="Always answer concisely.",
-            mode="create_on_demand",
-        )
-    )
-    assert res1.created_count == 1
-    assert "custom_guard" in res1.gem_ids
-    gem_id = res1.gem_ids["custom_guard"]
-    assert has_managed_marker(fake._store[gem_id].description)
-    assert extract_managed_last_used_at(fake._store[gem_id].description) is not None
-
-    # Second run with identical prompt makes no edits.
-    res2 = asyncio.run(
-        sync_policy_gems(
-            cast(Any, fake),
-            prefix="fastapi_policy_",
-            default_policy_enabled=True,
-            default_policy_key="custom_guard",
-            default_prompt="Always answer concisely.",
-            mode="create_on_demand",
-        )
-    )
-    assert res2.created_count == 0
-    assert res2.updated_count == 0
-
-    # Changing prompt updates the existing gem in place.
-    res3 = asyncio.run(
-        sync_policy_gems(
-            cast(Any, fake),
-            prefix="fastapi_policy_",
-            default_policy_enabled=True,
-            default_policy_key="custom_guard",
-            default_prompt="Updated prompt.",
-            mode="create_on_demand",
-        )
-    )
-    assert res3.updated_count == 1
-    assert fake._store[gem_id].prompt == "Updated prompt."
-
-
-def test_sync_policy_gems_cleanup_respects_marker_and_returns_deleted_ids():
+def test_cleanup_deletes_only_stale_gems_that_carry_our_marker():
     old_ts = int(time.time() - 10 * 24 * 60 * 60)
     stale_marked = Gem(
         id="gem_stale",
@@ -165,23 +67,21 @@ def test_sync_policy_gems_cleanup_respects_marker_and_returns_deleted_ids():
         prompt="keep me",
         predefined=False,
     )
-    fake = _FakeGemClient([stale_marked, unmarked])
-
-    res = asyncio.run(
-        sync_policy_gems(
-            cast(Any, fake),
-            prefix="fastapi_policy_",
-            default_policy_enabled=False,
-            mode="fetch_only",
-            cleanup_unused_days=7,
-            cleanup_require_managed_marker=True,
-        )
+    fresh_marked = Gem(
+        id="gem_fresh",
+        name="fastapi_policy_sys_new",
+        description=touch_managed_description("Managed", now_ts=time.time()),
+        prompt="new",
+        predefined=False,
     )
-    assert res.deleted_count == 1
-    assert res.deleted_ids == ["gem_stale"]
-    assert res.skipped_missing_marker_count == 1
-    assert "gem_unmarked" in fake._store
-    assert "gem_stale" not in fake._store
+    fake = _FakeGemClient([stale_marked, unmarked, fresh_marked])
+
+    deleted = asyncio.run(
+        delete_unused_gems(cast(Any, fake), prefix="fastapi_policy_", unused_days=7)
+    )
+
+    assert deleted == ["gem_stale"]
+    assert set(fake._store) == {"gem_unmarked", "gem_fresh"}
 
 
 def test_wrapper_guest_session_skips_gem_operations(monkeypatch):
@@ -189,7 +89,10 @@ def test_wrapper_guest_session_skips_gem_operations(monkeypatch):
     wrapper._running = True
     monkeypatch.setattr(wrapper, "is_guest", lambda: True)
 
-    gems_cfg = GeminiGemsConfig(enabled=True, policy=GeminiGemPolicyMode.CREATE_ON_DEMAND)
+    gems_cfg = GeminiGemsConfig(
+        policy=GeminiGemPolicyMode.CREATE_ON_DEMAND,
+        cleanup=GeminiGemCleanupConfig(enabled=True),
+    )
     monkeypatch.setattr(client_module.g_config.gemini, "gems", gems_cfg)
 
     async def _fail(*args: Any, **kwargs: Any) -> Any:
@@ -198,7 +101,7 @@ def test_wrapper_guest_session_skips_gem_operations(monkeypatch):
     monkeypatch.setattr(wrapper, "fetch_gems", _fail)
     monkeypatch.setattr(wrapper, "create_gem", _fail)
 
-    asyncio.run(wrapper._initialize_gems())
+    asyncio.run(wrapper._delete_unused_gems())
     assert asyncio.run(wrapper.system_prompt_gem_id_or_create("You are helpful.")) is None
 
 
@@ -225,7 +128,6 @@ def test_wrapper_system_prompt_gem_dedup_rate_limit_and_cleanup_prune(monkeypatc
     monkeypatch.setattr(wrapper, "create_gem", _create_gem)
 
     gems_cfg = GeminiGemsConfig(
-        enabled=True,
         policy=GeminiGemPolicyMode.CREATE_ON_DEMAND,
         create_rate_limit_per_minute=1,
         managed_gems_max_total=10,
@@ -280,7 +182,6 @@ def test_a_failed_last_use_update_is_tried_again_on_the_next_use(monkeypatch):
     monkeypatch.setattr(wrapper, "fetch_gems", _fetch_gems)
     monkeypatch.setattr(wrapper, "update_gem", _update_gem)
     gems_cfg = GeminiGemsConfig(
-        enabled=True,
         policy=GeminiGemPolicyMode.CREATE_ON_DEMAND,
         cleanup=GeminiGemCleanupConfig(enabled=True),
     )
@@ -330,7 +231,6 @@ def test_chat_completion_persists_canonical_history_and_isolates_changed_system_
     store = LMDBConversationStore.open_isolated(db_path=str(tmp_path / "lmdb"))
     try:
         gems_cfg = GeminiGemsConfig(
-            enabled=True,
             policy=GeminiGemPolicyMode.CREATE_ON_DEMAND,
         )
         monkeypatch.setattr(chat.g_config.gemini, "gems", gems_cfg)

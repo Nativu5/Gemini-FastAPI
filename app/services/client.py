@@ -5,7 +5,7 @@ import io
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any
 
 import orjson
 from gemini_webapi import GeminiClient
@@ -23,9 +23,8 @@ from app.utils.helper import (
 )
 
 from .policy_gems import (
-    PolicySyncResult,
+    delete_unused_gems,
     extract_managed_last_used_at,
-    sync_policy_gems,
     touch_managed_description,
 )
 
@@ -67,14 +66,6 @@ class GeminiClientWrapper(GeminiClient):
         used = len(self._managed_gem_create_timestamps)
         return max(0, per_minute - used)
 
-    def _consume_managed_gem_create_budget(self, count: int) -> None:
-        """Record managed gem create usage for rate limiting."""
-        if count <= 0:
-            return
-        now = time.monotonic()
-        for _ in range(count):
-            self._managed_gem_create_timestamps.append(now)
-
     def _prune_deleted_system_gem_ids(self, deleted_ids: list[str]) -> None:
         """Remove deleted gem ids from in-memory system prompt cache."""
         if not deleted_ids:
@@ -89,8 +80,7 @@ class GeminiClientWrapper(GeminiClient):
 
     def _schedule_managed_policy_touch(self, gem_id: str) -> None:
         """Queue gem usage touch updates and ensure a background worker exists."""
-        gem_cfg = g_config.gemini.gems
-        if not gem_cfg.enabled or not gem_cfg.cleanup.enabled or self.is_guest():
+        if not g_config.gemini.gems.cleanup.enabled or self.is_guest():
             return
 
         self._managed_gem_pending_touch_ids.add(gem_id)
@@ -116,12 +106,7 @@ class GeminiClientWrapper(GeminiClient):
     async def _flush_managed_policy_touches(self) -> None:
         """Flush queued managed gem touch updates in a single fetch/update pass."""
         gem_cfg = g_config.gemini.gems
-        if (
-            not gem_cfg.enabled
-            or not gem_cfg.cleanup.enabled
-            or not self.running()
-            or self.is_guest()
-        ):
+        if not gem_cfg.cleanup.enabled or not self.running() or self.is_guest():
             self._managed_gem_pending_touch_ids.clear()
             return
 
@@ -190,7 +175,7 @@ class GeminiClientWrapper(GeminiClient):
             await super().init(**init_kwargs)
             self._initialized = True
             self.latest_chat_cid = None
-            await self._initialize_gems()
+            await self._delete_unused_gems()
         except Exception:
             self._initialized = False
             logger.exception(f"Failed to initialize GeminiClient {self.id}")
@@ -209,73 +194,26 @@ class GeminiClientWrapper(GeminiClient):
     def running(self) -> bool:
         return self._running
 
-    async def _initialize_gems(self) -> None:
-        """Initialize gem cache and built-in policy gems based on server config."""
+    async def _delete_unused_gems(self) -> None:
+        """Delete the managed gems that went unused for longer than the configured retention."""
         gem_cfg = g_config.gemini.gems
-        if not gem_cfg.enabled or self.is_guest():
+        if (
+            gem_cfg.policy == GeminiGemPolicyMode.OFF
+            or not gem_cfg.cleanup.enabled
+            or self.is_guest()
+        ):
             return
 
         async with self._gem_lock:
-            if self.is_guest():
-                return
-
-            include_hidden = gem_cfg.include_hidden_on_fetch
-            policy_mode = gem_cfg.policy
-
-            if policy_mode == GeminiGemPolicyMode.OFF:
-                if gem_cfg.fetch_on_init:
-                    await self.fetch_gems(include_hidden=include_hidden)
-                return
-
-            if policy_mode in (
-                GeminiGemPolicyMode.FETCH_ONLY,
-                GeminiGemPolicyMode.CREATE_ON_DEMAND,
-            ):
-                sync_mode = cast(Literal["fetch_only", "create_on_demand"], str(policy_mode))
-                default_policy = gem_cfg.policies.default_policy
-
-                create_budget = None
-                if policy_mode == GeminiGemPolicyMode.CREATE_ON_DEMAND:
-                    create_budget = self._acquire_managed_gem_create_budget(
-                        gem_cfg.create_rate_limit_per_minute
-                    )
-
-                cleanup_days = gem_cfg.cleanup.unused_days if gem_cfg.cleanup.enabled else None
-
-                sync_result: PolicySyncResult = await sync_policy_gems(
-                    self,
-                    prefix=gem_cfg.policies.prefix,
-                    include_hidden=True,
-                    default_policy_enabled=default_policy.enabled,
-                    default_policy_key=default_policy.key,
-                    default_prompt=default_policy.prompt,
-                    mode=sync_mode,
-                    create_budget=create_budget,
-                    cleanup_unused_days=cleanup_days,
-                    cleanup_dry_run=gem_cfg.cleanup.dry_run,
-                    cleanup_max_deletes_per_run=gem_cfg.cleanup.max_deletes_per_run,
-                    cleanup_require_managed_marker=gem_cfg.cleanup.require_managed_marker,
-                    managed_max_total=gem_cfg.managed_gems_max_total,
-                )
-                self._prune_deleted_system_gem_ids(sync_result.deleted_ids)
-
-                if policy_mode == GeminiGemPolicyMode.CREATE_ON_DEMAND:
-                    self._consume_managed_gem_create_budget(sync_result.created_count)
-
-                logger.info(
-                    "Managed gem sync stats client='{}': created={}, updated={}, deleted={}, "
-                    "dry_run_deletes={}, failed_deletes={}, managed_total={}",
-                    self.id,
-                    sync_result.created_count,
-                    sync_result.updated_count,
-                    sync_result.deleted_count,
-                    sync_result.dry_run_delete_count,
-                    len(sync_result.failed_delete_ids),
-                    sync_result.managed_total_count,
-                )
-
-                # Refresh once more so callers observe the configured hidden visibility.
-                await self.fetch_gems(include_hidden=include_hidden)
+            deleted = await delete_unused_gems(
+                self,
+                prefix=gem_cfg.policies.prefix,
+                unused_days=gem_cfg.cleanup.unused_days,
+                dry_run=gem_cfg.cleanup.dry_run,
+                max_deletes=gem_cfg.cleanup.max_deletes_per_run,
+                require_marker=gem_cfg.cleanup.require_managed_marker,
+            )
+        self._prune_deleted_system_gem_ids(deleted)
 
     async def system_prompt_gem_id_or_create(self, system_prompt: str) -> str | None:
         """Return or create a managed gem id for a raw system prompt text."""
@@ -284,14 +222,8 @@ class GeminiClientWrapper(GeminiClient):
             return None
 
         gem_cfg = g_config.gemini.gems
-        if not gem_cfg.enabled:
-            return None
-
         policy_mode = gem_cfg.policy
-        if policy_mode not in (
-            GeminiGemPolicyMode.FETCH_ONLY,
-            GeminiGemPolicyMode.CREATE_ON_DEMAND,
-        ):
+        if policy_mode == GeminiGemPolicyMode.OFF:
             return None
 
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -356,7 +288,7 @@ class GeminiClientWrapper(GeminiClient):
             now_ts = time.time()
             description = touch_managed_description(base_description, now_ts=now_ts)
             created = await self.create_gem(name=name, prompt=prompt, description=description)
-            self._consume_managed_gem_create_budget(1)
+            self._managed_gem_create_timestamps.append(time.monotonic())
             self._managed_gem_last_touch_timestamps[created.id] = now_ts
             self._system_prompt_gem_ids[cache_key] = created.id
             return created.id

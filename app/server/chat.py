@@ -668,11 +668,7 @@ def _extract_leading_system_prompt(
 
 def _system_prompt_gem_enabled() -> bool:
     """Return whether leading system prompts may be offloaded to managed gems."""
-    gem_cfg = g_config.gemini.gems
-    return gem_cfg.enabled and gem_cfg.policy in (
-        GeminiGemPolicyMode.FETCH_ONLY,
-        GeminiGemPolicyMode.CREATE_ON_DEMAND,
-    )
+    return g_config.gemini.gems.policy != GeminiGemPolicyMode.OFF
 
 
 async def _resolve_system_prompt_gem(

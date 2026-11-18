@@ -208,7 +208,7 @@ Models are discovered from each account at startup, so there is nothing to confi
 
 ### Gems
 
-Off by default. To use it, set `gemini.gems.enabled: true` and choose a `gemini.gems.policy`. The system prompt at the start of a `/v1/chat/completions` or `/v1/responses` request is then stored once as a gem (Gemini's saved custom instructions) in the Google account and referenced from then on, instead of being sent inside the message. Conversations with the same system prompt share one gem.
+Off by default; set `gemini.gems.policy` to turn it on. The system prompt at the start of a `/v1/chat/completions` or `/v1/responses` request is then stored once as a gem (Gemini's saved custom instructions) in the Google account and referenced from then on, instead of being sent inside the message. Conversations with the same system prompt share one gem.
 
 | `policy` | System prompt |
 | --- | --- |

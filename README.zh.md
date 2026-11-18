@@ -208,7 +208,7 @@ export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 
 ### Gem
 
-默认关闭。启用需要设置 `gemini.gems.enabled: true` 并选择 `gemini.gems.policy`。启用后，`/v1/chat/completions` 或 `/v1/responses` 请求开头的系统提示词会作为一个 Gem（Gemini 中保存的自定义指令）在 Google 账号里保存一次，之后的请求只引用它，而不再把提示词放进消息正文。系统提示词相同的会话共用一个 Gem。
+默认关闭，通过 `gemini.gems.policy` 启用。启用后，`/v1/chat/completions` 或 `/v1/responses` 请求开头的系统提示词会作为一个 Gem（Gemini 中保存的自定义指令）在 Google 账号里保存一次，之后的请求只引用它，而不再把提示词放进消息正文。系统提示词相同的会话共用一个 Gem。
 
 | `policy` | 系统提示词 |
 | --- | --- |
