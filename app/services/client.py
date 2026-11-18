@@ -4,7 +4,6 @@ import hashlib
 import io
 import time
 from collections import deque
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -34,16 +33,6 @@ from .policy_gems import (
 # the choice to Google.
 type ModelSpec = str | AvailableModel | None
 
-_MAX_MANAGED_GEM_RETRY_ATTEMPTS = 5
-
-
-@dataclass
-class _ManagedGemRetry:
-    op: str
-    gem_id: str
-    attempt: int
-    next_retry_at: float
-
 
 class GeminiClientWrapper(GeminiClient):
     """Gemini client with helper methods."""
@@ -64,7 +53,6 @@ class GeminiClientWrapper(GeminiClient):
         self._managed_gem_last_touch_timestamps: dict[str, float] = {}
         self._managed_gem_pending_touch_ids: set[str] = set()
         self._managed_gem_touch_worker_task: asyncio.Task[None] | None = None
-        self._managed_gem_retry_queue: list[_ManagedGemRetry] = []
 
     def _acquire_managed_gem_create_budget(self, per_minute: int) -> int:
         """Return remaining create budget in the current 60-second window."""
@@ -99,71 +87,6 @@ class GeminiClientWrapper(GeminiClient):
             self._managed_gem_last_touch_timestamps.pop(gem_id, None)
             self._managed_gem_pending_touch_ids.discard(gem_id)
 
-    def _enqueue_retry(self, op: str, gem_id: str, attempt: int = 1) -> None:
-        if attempt > _MAX_MANAGED_GEM_RETRY_ATTEMPTS:
-            return
-        delay_sec = min(300.0, float(2**attempt))
-        self._managed_gem_retry_queue.append(
-            _ManagedGemRetry(
-                op=op,
-                gem_id=gem_id,
-                attempt=attempt,
-                next_retry_at=time.time() + delay_sec,
-            )
-        )
-
-    async def _process_managed_retry_queue(self) -> None:
-        """Process due retry operations (delete/touch) with backoff."""
-        if not self._managed_gem_retry_queue or not self.running() or self.is_guest():
-            return
-
-        now = time.time()
-        due = [op for op in self._managed_gem_retry_queue if op.next_retry_at <= now]
-        self._managed_gem_retry_queue = [
-            op for op in self._managed_gem_retry_queue if op.next_retry_at > now
-        ]
-        if not due:
-            return
-
-        prefix = g_config.gemini.gems.policies.prefix
-        async with self._gem_lock:
-            if not self.running() or self.is_guest():
-                return
-            gems = list(await self.fetch_gems(include_hidden=True))
-            by_id = {gem.id: gem for gem in gems}
-            for retry in due:
-                try:
-                    target = by_id.get(retry.gem_id)
-                    if retry.op == "delete":
-                        if (
-                            target is not None
-                            and not target.predefined
-                            and target.name.startswith(prefix)
-                        ):
-                            await self.delete_gem(target)
-                            self._prune_deleted_system_gem_ids([target.id])
-                    elif retry.op == "touch":
-                        if (
-                            target is None
-                            or target.predefined
-                            or not target.name.startswith(prefix)
-                            or target.prompt is None
-                        ):
-                            continue
-
-                        updated_description = touch_managed_description(
-                            target.description, now_ts=time.time()
-                        )
-                        await self.update_gem(
-                            gem=target,
-                            name=target.name,
-                            description=updated_description,
-                            prompt=target.prompt,
-                        )
-                        self._managed_gem_last_touch_timestamps[target.id] = time.time()
-                except Exception:
-                    self._enqueue_retry(retry.op, retry.gem_id, retry.attempt + 1)
-
     def _schedule_managed_policy_touch(self, gem_id: str) -> None:
         """Queue gem usage touch updates and ensure a background worker exists."""
         gem_cfg = g_config.gemini.gems
@@ -185,7 +108,6 @@ class GeminiClientWrapper(GeminiClient):
             while self._managed_gem_pending_touch_ids and self.running() and not self.is_guest():
                 await asyncio.sleep(0.5)
                 await self._flush_managed_policy_touches()
-                await self._process_managed_retry_queue()
         except asyncio.CancelledError:
             pass
         finally:
@@ -244,14 +166,9 @@ class GeminiClientWrapper(GeminiClient):
                         prompt=target.prompt,
                     )
                     self._managed_gem_last_touch_timestamps[gem_id] = now_ts
-                except Exception:
-                    self._enqueue_retry("touch", gem_id)
-
-    def _apply_policy_sync_result(self, sync_result: PolicySyncResult) -> None:
-        """Forget gems the sync deleted and queue a retry for each deletion that failed."""
-        self._prune_deleted_system_gem_ids(sync_result.deleted_ids)
-        for failed_id in sync_result.failed_delete_ids:
-            self._enqueue_retry("delete", failed_id)
+                except Exception as exc:
+                    # Not recorded as touched, so the next request that uses the gem tries again.
+                    logger.warning(f"Failed to record the last use of gem {target.name!r}: {exc}")
 
     async def init(self, *args: Any, **kwargs: Any) -> None:
         """
@@ -340,14 +257,14 @@ class GeminiClientWrapper(GeminiClient):
                     cleanup_require_managed_marker=gem_cfg.cleanup.require_managed_marker,
                     managed_max_total=gem_cfg.managed_gems_max_total,
                 )
-                self._apply_policy_sync_result(sync_result)
+                self._prune_deleted_system_gem_ids(sync_result.deleted_ids)
 
                 if policy_mode == GeminiGemPolicyMode.CREATE_ON_DEMAND:
                     self._consume_managed_gem_create_budget(sync_result.created_count)
 
                 logger.info(
                     "Managed gem sync stats client='{}': created={}, updated={}, deleted={}, "
-                    "dry_run_deletes={}, retries_queued={}, managed_total={}",
+                    "dry_run_deletes={}, failed_deletes={}, managed_total={}",
                     self.id,
                     sync_result.created_count,
                     sync_result.updated_count,
@@ -359,8 +276,6 @@ class GeminiClientWrapper(GeminiClient):
 
                 # Refresh once more so callers observe the configured hidden visibility.
                 await self.fetch_gems(include_hidden=include_hidden)
-
-        await self._process_managed_retry_queue()
 
     async def system_prompt_gem_id_or_create(self, system_prompt: str) -> str | None:
         """Return or create a managed gem id for a raw system prompt text."""

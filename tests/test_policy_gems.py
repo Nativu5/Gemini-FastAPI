@@ -22,7 +22,12 @@ from app.services.policy_gems import (
     sync_policy_gems,
     touch_managed_description,
 )
-from app.utils.config import GeminiConfig, GeminiGemPolicyMode, GeminiGemsConfig
+from app.utils.config import (
+    GeminiConfig,
+    GeminiGemCleanupConfig,
+    GeminiGemPolicyMode,
+    GeminiGemsConfig,
+)
 
 
 class _FakeGemClient:
@@ -242,6 +247,54 @@ def test_wrapper_system_prompt_gem_dedup_rate_limit_and_cleanup_prune(monkeypatc
         await wrapper.close()
 
     asyncio.run(_run())
+
+
+def test_a_failed_last_use_update_is_tried_again_on_the_next_use(monkeypatch):
+    wrapper = GeminiClientWrapper(client_id="auth-1")
+    wrapper._running = True
+    wrapper.account_status = AccountStatus.AVAILABLE
+
+    store = {
+        "g1": Gem(
+            id="g1",
+            name="fastapi_policy_sys_abc",
+            prompt="p",
+            description=touch_managed_description("Managed", now_ts=1),
+            predefined=False,
+        )
+    }
+    attempts: list[str] = []
+
+    async def _fetch_gems(include_hidden: bool = False, **kwargs: Any) -> GemJar:
+        return GemJar(store)
+
+    async def _update_gem(gem: Gem | str, name: str, prompt: str, description: str = "") -> Gem:
+        attempts.append(description)
+        if len(attempts) == 1:
+            raise RuntimeError("Google said no")
+        store["g1"] = Gem(
+            id="g1", name=name, prompt=prompt, description=description, predefined=False
+        )
+        return store["g1"]
+
+    monkeypatch.setattr(wrapper, "fetch_gems", _fetch_gems)
+    monkeypatch.setattr(wrapper, "update_gem", _update_gem)
+    gems_cfg = GeminiGemsConfig(
+        enabled=True,
+        policy=GeminiGemPolicyMode.CREATE_ON_DEMAND,
+        cleanup=GeminiGemCleanupConfig(enabled=True),
+    )
+    monkeypatch.setattr(client_module.g_config.gemini, "gems", gems_cfg)
+
+    async def _use_the_gem_twice() -> None:
+        for _ in range(2):
+            wrapper._managed_gem_pending_touch_ids.add("g1")
+            await wrapper._flush_managed_policy_touches()
+
+    asyncio.run(_use_the_gem_twice())
+
+    assert len(attempts) == 2
+    assert (extract_managed_last_used_at(store["g1"].description) or 0) > 1
 
 
 def test_extract_leading_system_prompt_handles_edge_cases():

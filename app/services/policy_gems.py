@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from gemini_webapi import GeminiClient
 from gemini_webapi.types import Gem
+from loguru import logger
 
 from app.utils import g_config
 
@@ -224,7 +225,9 @@ async def sync_policy_gems(
                     deleted_ids.append(gem.id)
                     if max_deletes_left is not None:
                         max_deletes_left -= 1
-                except Exception:
+                except Exception as exc:
+                    # Still stale, so the next start tries again.
+                    logger.warning(f"Failed to delete unused managed gem {gem.name!r}: {exc}")
                     failed_delete_ids.append(gem.id)
 
         if deleted_count > 0:
