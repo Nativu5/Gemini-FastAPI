@@ -512,9 +512,10 @@ class LMDBConversationStore(metaclass=Singleton):
 
                     try:
                         storage_data = orjson.loads(value_bytes)
-                        timestamp = datetime.fromisoformat(
-                            storage_data.get("updated_at") or storage_data["created_at"]
-                        )
+                        ts_raw = storage_data.get("updated_at") or storage_data.get("created_at")
+                        if not ts_raw:
+                            continue  # nothing to age it by
+                        timestamp = datetime.fromisoformat(ts_raw)
 
                         is_auto_delete = storage_data.get("chat_mode") == ChatMode.AUTO_DELETE
                         cutoff = auto_delete_cutoff if is_auto_delete else normal_cutoff
