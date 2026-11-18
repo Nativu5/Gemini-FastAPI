@@ -16,8 +16,6 @@ from pydantic import (
 
 @dataclass
 class StructuredOutputRequirement:
-    """Represents a structured response request from the client."""
-
     schema_name: str
     schema: dict[str, Any]
     instruction: str

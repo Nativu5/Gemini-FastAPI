@@ -111,9 +111,6 @@ type ProcessedMediaResult = tuple[
 ]
 
 
-# --- Helper Functions ---
-
-
 async def _image_to_base64(
     image: Image, temp_dir: Path
 ) -> tuple[str, int | None, int | None, str, str]:
@@ -221,7 +218,7 @@ def _create_responses_standard_payload(
     message_id: str | None = None,
     reason_id: str | None = None,
 ) -> ResponseCreateResponse:
-    """Unified factory for building ResponseCreateResponse objects."""
+    """The completed response object: the JSON body, or a stream's `response.completed` event."""
     message_id = message_id or f"msg_{uuid.uuid4().hex[:24]}"
     reason_id = reason_id or f"rs_{uuid.uuid4().hex[:24]}"
     now_ts = int(datetime.now(tz=UTC).timestamp())
@@ -767,7 +764,6 @@ def _resolve_model_name(pool: GeminiClientPool, name: str) -> str:
 
 
 def _build_available_models(pool: GeminiClientPool) -> list[ModelData]:
-    """Build the available model list from the models the clients discovered."""
     now = int(datetime.now(tz=UTC).timestamp())
     models_data = []
     seen_model_ids = set()
@@ -914,7 +910,6 @@ async def _find_reusable_session(
 
 
 def _use_temporary_chat_mode() -> bool:
-    """Whether requests should be sent through Google's temporary chat mode."""
     return g_config.gemini.chat_mode == ChatMode.TEMPORARY
 
 
@@ -1049,7 +1044,6 @@ async def _send_with_internal_fallback(
         if stored_conversation is None:
             raise
 
-        # Drop the dead metadata so the next request does not rediscover and re-fail on it.
         try:
             if db.evict(stored_conversation):
                 logger.info("Evicted stale conversation metadata after Google rejected it.")
@@ -1178,7 +1172,8 @@ class StreamingOutputFilter:
         return self.stack[-1]
 
     def _is_outputting(self) -> bool:
-        """Determines if the current state allows yielding text to the stream."""
+        """True in plain text and inside a non-tool ChatML block; False inside a protocol block
+        or an echoed hint, and in the whitespace right after one."""
         if self.state == "POST_BLOCK":
             return False
         return self.state == "NORMAL" or (self.state == "IN_BLOCK" and self.current_role != "tool")
@@ -1412,9 +1407,6 @@ def _image_generation_call(data: ProcessedImageData) -> ImageGenerationCall:
     )
 
 
-# --- Response Builders & Streaming ---
-
-
 def _unsent_tail(final: str | None, sent: str) -> str:
     """What the final chunk carries beyond the deltas added up so far.
 
@@ -1452,11 +1444,7 @@ def _create_real_streaming_response(
     structured_requirement: StructuredOutputRequirement | None = None,
     tool_choice: Any = None,
 ) -> StreamingResponse:
-    """
-    Create a real-time streaming response.
-    Reconciles manual delta accumulation with the model's final authoritative state.
-    Emits typed image and media results as incremental markdown deltas.
-    """
+    """The SSE stream of a Chat Completions reply; the conversation is stored once it completes."""
 
     async def generate_stream():
         full_text = ""
@@ -1533,8 +1521,6 @@ def _create_real_streaming_response(
                     str(exc), "invalid_model_output", "response_format", "schema_validation_failed"
                 )
                 return
-            # No `has_images` escape hatch here: Chat Completions has no image-generation tool, so an
-            # image Gemini volunteers on its own cannot stand in for a function call that was forced.
             if choice_error := _tool_choice_failure(tool_choice, detected_tool_calls):
                 yield _sse_error(
                     choice_error, "invalid_model_output", "tool_choice", "required_tool_missing"
@@ -1619,11 +1605,7 @@ def _create_responses_real_streaming_response(
     structured_requirement: StructuredOutputRequirement | None = None,
     has_image_tool: bool = False,
 ) -> StreamingResponse:
-    """
-    Create a real-time streaming response for the Responses API.
-    Ensures final accumulated text and thoughts are synchronized and follow the formal event stream spec.
-    Emits typed image and media results as incremental response output text events.
-    """
+    """The event stream of a Responses reply; the conversation is stored once it completes."""
     base_event = {
         "id": response_id,
         "object": "response",
@@ -2053,9 +2035,6 @@ def _create_responses_real_streaming_response(
     return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
 
-# --- Main Router Endpoints ---
-
-
 @router.get("/v1/models", response_model=ModelListResponse)
 async def list_models():
     pool = GeminiClientPool()
@@ -2138,8 +2117,6 @@ async def create_chat_completion(
     except StructuredOutputValidationError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
-    # No `has_images` escape hatch here: Chat Completions has no image-generation tool, so an
-    # image Gemini volunteers on its own cannot stand in for a function call that was forced.
     if choice_error := _tool_choice_failure(request.tool_choice, tool_calls):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=choice_error)
 

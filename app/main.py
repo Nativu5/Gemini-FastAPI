@@ -110,6 +110,9 @@ async def lifespan(app: FastAPI):
         logger.exception("Failed to prune stale LMDB indexes; continuing with startup.")
 
     cleanup_task = asyncio.create_task(_run_retention_cleanup())
+    await asyncio.sleep(0)  # let it take its first step, so that a failure there stops the startup
+    if cleanup_task.done():
+        cleanup_task.result()
 
     if (gem_policy := g_config.gemini.gems.policy) != GeminiGemPolicyMode.OFF:
         logger.warning(

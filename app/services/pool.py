@@ -111,7 +111,6 @@ class GeminiClientPool(metaclass=Singleton):
             return False
 
     async def close(self) -> None:
-        """Close all clients in the pool."""
         logger.info(f"Closing {len(self.clients)} Gemini clients...")
         await asyncio.gather(
             *(client.close() for client in self.clients if client.running()),
@@ -120,7 +119,6 @@ class GeminiClientPool(metaclass=Singleton):
         logger.info("All Gemini clients closed.")
 
     def status(self) -> dict[str, bool]:
-        """Return healthy status for each client."""
         return {client.id: client.is_healthy() for client in self.clients}
 
     async def delete_unused_gems(self) -> None:
@@ -133,7 +131,8 @@ class GeminiClientPool(metaclass=Singleton):
                 logger.warning(f"Managed gem cleanup failed for client {client.id}: {e}")
 
     async def delete_chat(self, client_id: str, cid: str) -> bool:
-        """Delete a remote chat from Google for a given client."""
+        """Delete a chat from its client's Google account. False means try again later; True
+        that it is settled: deleted, or its client is no longer configured."""
         client = self._id_map.get(client_id)
         if not client:
             logger.warning(

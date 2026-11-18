@@ -1,9 +1,5 @@
 # ruff: noqa: N815  # camelCase field names are the Gemini REST wire format
-"""Pydantic models for the Google Gemini REST API v1beta.
-
-Defines request and response models for the ``generateContent``,
-``streamGenerateContent``, ``models.list``, and ``models.get`` endpoints.
-"""
+"""Pydantic models for the Google Gemini REST API v1beta."""
 
 from __future__ import annotations
 

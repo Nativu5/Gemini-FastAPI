@@ -58,8 +58,6 @@ from app.models.gemini_models import (
     GeminiSystemInstruction,
     GeminiUsageMetadata,
 )
-
-# The request pipeline is the one the OpenAI routes use; this module adds the Gemini wire format.
 from app.server.chat import (
     ProcessedImageData,
     ProcessedMediaData,
@@ -216,7 +214,6 @@ def _gemini_tools_to_internal(
     list[FunctionTool] | None,
     Literal["none", "auto", "required"] | ToolChoiceFunction | None,
 ]:
-    """Convert Gemini tools + toolConfig into internal FunctionTool list and tool_choice."""
     if not tools:
         return None, None
 
