@@ -25,7 +25,6 @@ from typing import Any, Literal, NamedTuple, cast
 
 import orjson
 from fastapi import APIRouter, Depends, FastAPI, Request
-from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from gemini_webapi import ModelOutput
@@ -78,6 +77,7 @@ from app.server.chat import (
 from app.server.middleware import (
     get_media_store_dir,
     get_temp_dir,
+    openai_error,
     verify_gemini_api_key,
 )
 from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
@@ -95,31 +95,39 @@ from app.utils.helper import (
 router = APIRouter()
 
 
-def add_gemini_exception_handlers(app: FastAPI) -> None:
-    """Register Google-style HTTP and validation errors for /v1beta routes."""
+_GRPC_STATUS = {
+    400: "INVALID_ARGUMENT",
+    401: "UNAUTHENTICATED",
+    403: "PERMISSION_DENIED",
+    404: "NOT_FOUND",
+    429: "RESOURCE_EXHAUSTED",
+    503: "UNAVAILABLE",
+}
+
+
+def add_exception_handlers(app: FastAPI) -> None:
+    """Answer every error in the envelope of the API the request was made to."""
+
+    def error(request: Request, status_code: int, message: str) -> JSONResponse:
+        if request.url.path.startswith("/v1beta/"):
+            grpc_status = _GRPC_STATUS.get(status_code, "INTERNAL")
+            return _error_response(status_code, message, grpc_status)
+        return openai_error(status_code, message)
 
     @app.exception_handler(StarletteHTTPException)
-    async def gemini_http_exception_handler(request: Request, exc: StarletteHTTPException):
-        if not request.url.path.startswith("/v1beta/"):
-            return await http_exception_handler(request, exc)
-
-        grpc_status = {
-            400: "INVALID_ARGUMENT",
-            401: "UNAUTHENTICATED",
-            403: "PERMISSION_DENIED",
-            404: "NOT_FOUND",
-            429: "RESOURCE_EXHAUSTED",
-            503: "UNAVAILABLE",
-        }.get(exc.status_code, "INTERNAL")
-        return _error_response(exc.status_code, str(exc.detail), grpc_status)
+    async def http_error(request: Request, exc: StarletteHTTPException):
+        response = error(request, exc.status_code, str(exc.detail))
+        response.headers.update(exc.headers or {})  # e.g. `Allow` on a 405
+        return response
 
     @app.exception_handler(RequestValidationError)
-    async def gemini_validation_exception_handler(request: Request, exc: RequestValidationError):
-        """Convert Gemini-route 422 validation errors into Google API error format."""
-        if request.url.path.startswith("/v1beta/"):
-            detail = str(exc.errors()) if exc.errors() else str(exc)
-            return _error_response(400, f"Invalid request: {detail}", "INVALID_ARGUMENT")
-        return await request_validation_exception_handler(request, exc)
+    async def invalid_request(request: Request, exc: RequestValidationError):
+        """A malformed request is a 400 in both APIs, not FastAPI's 422."""
+        return error(request, 400, f"Invalid request: {exc.errors() or exc}")
+
+    @app.exception_handler(Exception)
+    async def unhandled(request: Request, exc: Exception):
+        return error(request, 500, str(exc))
 
 
 def _inline_data_item(inline: GeminiInlineData) -> AppContentItem:
