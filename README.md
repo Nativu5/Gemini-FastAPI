@@ -132,6 +132,8 @@ Gemini Web offers fewer controls than the APIs this server imitates. A valid req
 
 - **Ignored options.** `temperature`, `top_p`, output-token limits, `parallel_tool_calls`, Gemini `generationConfig` fields and safety settings are accepted and have no effect.
 - **Rejected input.** Malformed requests, and content the server cannot resolve at all, such as a Files API `file_id` or a `cachedContent` handle.
+- **Errors use the envelope of the API that was called**: `{"error": {"message", "type", "param", "code"}}` on the OpenAI endpoints, `{"error": {"code", "message", "status"}}` on `/v1beta`. A malformed request is a `400` on both.
+- **Generated videos and audio are returned as links** in the reply text on every endpoint. Images are also returned as `image_generation_call` items by `/v1/responses` and as `inlineData` parts by `/v1beta`.
 - **Structured output is requested in the prompt** and checked by the server afterwards, because Gemini Web has no constrained decoding.
   - With `strict: true`, a reply that does not match the schema is an error: `502`, or an error event when streaming.
   - With `strict: false` (the default on both OpenAI surfaces) or JSON mode, the reply is returned as it is.
@@ -233,7 +235,7 @@ Input longer than 90% of `gemini.max_chars_per_request` (81% in `temporary` mode
 
 ### Removed settings
 
-`gemini.models`, `gemini.model_strategy`, `gemini.oversized_context_strategy` and `storage.images_path` no longer exist and are ignored if present. Generated media is stored under `storage.media_path`.
+`gemini.models`, `gemini.model_strategy`, `gemini.oversized_context_strategy`, `storage.images_path` and, under `gemini.gems`, `enabled`, `fetch_on_init`, `include_hidden_on_fetch`, `policies.default_policy` and `cleanup.require_managed_marker` no longer exist and are ignored if present. Generated media is stored under `storage.media_path`.
 
 ## Maintenance
 
