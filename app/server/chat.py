@@ -2598,18 +2598,8 @@ async def create_response(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     extra_instr = [structured_requirement.instruction] if structured_requirement else []
 
-    standard_tools, image_tools = [], []
-    if request.tools:
-        for t in request.tools:
-            if isinstance(t, FunctionTool):
-                standard_tools.append(t)
-            elif isinstance(t, ImageGeneration):
-                image_tools.append(t)
-            elif isinstance(t, dict):
-                if t.get("type") == "function":
-                    standard_tools.append(FunctionTool.model_validate(t))
-                elif t.get("type") == "image_generation":
-                    image_tools.append(ImageGeneration.model_validate(t))
+    standard_tools = [t for t in request.tools or [] if isinstance(t, FunctionTool)]
+    image_tools = [t for t in request.tools or [] if isinstance(t, ImageGeneration)]
 
     if ignored_image_options := {
         name for image_tool in image_tools for name in image_tool.model_fields_set if name != "type"
