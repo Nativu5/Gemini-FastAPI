@@ -1306,6 +1306,98 @@ async def _send_with_internal_fallback(
         return output, fallback_session, fallback_client
 
 
+async def _send_request(
+    *,
+    pool: GeminiClientPool,
+    db: LMDBConversationStore,
+    resolved_model: str,
+    history: list[AppMessage],
+    prepared: list[AppMessage],
+    tools: Sequence[Any] | None,
+    tool_choice: Literal["none", "auto", "required"]
+    | ChatCompletionNamedToolChoice
+    | ToolChoiceFunction
+    | ToolChoiceTypes
+    | None,
+    instructions: list[str] | None,
+    repeat_instructions: bool,
+    tmp_dir: Path,
+    stream: bool,
+) -> tuple[AsyncGenerator[ModelOutput] | ModelOutput, ChatSession, GeminiClientWrapper]:
+    """Continue the stored chat that `history` extends, or open a new one, and send the rest.
+
+    `prepared` is `history` with the tool and output instructions added. It is what reuse is
+    matched on and what is stored, system prompt included, so changing or removing a system
+    prompt never continues a chat opened under another one.
+
+    Raises `HTTPException`: 400 when there is nothing new to send, 503 when no client could take
+    the request, 502 when Gemini fails.
+    """
+    system_prompt, without_system = _extract_leading_system_prompt(history)
+    system_only = bool(system_prompt) and not without_system
+    temporary = _use_temporary_chat_mode()
+    needs_upload = _requires_upload(prepared, temporary)
+    session, client, remain, stored_conv = await _find_reusable_session(
+        db, pool, resolved_model, prepared, temporary=temporary, require_account=needs_upload
+    )
+
+    if session and client:
+        if not remain:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
+        if gem_id := await _resolve_system_prompt_gem(
+            client, system_prompt, system_only=system_only
+        ):
+            session.gem = gem_id
+        to_send = _prepare_messages_for_model(
+            remain, tools, tool_choice, instructions if repeat_instructions else None, False
+        )
+        m_input, files = await GeminiClientWrapper.process_conversation(to_send, tmp_dir)
+        logger.debug(
+            f"Reused session {reprlib.repr(session.metadata)} - sending {len(to_send)} prepared messages."
+        )
+    else:
+        try:
+            client = await pool.acquire(require_account=needs_upload)
+            gem_id = await _resolve_system_prompt_gem(
+                client, system_prompt, system_only=system_only
+            )
+            # A system prompt carried by a gem is left out of the message itself.
+            to_send = (
+                _prepare_messages_for_model(without_system, tools, tool_choice, instructions)
+                if gem_id
+                else prepared
+            )
+            session = client.start_chat(model=client.usable_model(resolved_model), gem=gem_id)
+            m_input, files = await GeminiClientWrapper.process_conversation(to_send, tmp_dir)
+        except Exception as e:
+            logger.error(f"Error in preparing conversation: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
+            ) from e
+
+    try:
+        logger.debug(
+            f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
+        )
+        return await _send_with_internal_fallback(
+            pool=pool,
+            db=db,
+            resolved_model=resolved_model,
+            session=session,
+            client=client,
+            current_input=m_input,
+            files=files,
+            full_prepared_messages=prepared,
+            stored_conversation=stored_conv,
+            tmp_dir=tmp_dir,
+            stream=stream,
+            temporary=temporary,
+        )
+    except Exception as e:
+        logger.error(f"Gemini API error: {e}")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+
+
 class StreamingOutputFilter:
     """
     Filter to suppress technical protocol markers, tool calls, and system hints from the stream.
@@ -2611,11 +2703,6 @@ async def create_chat_completion(
     extra_instr = [structured_requirement.instruction] if structured_requirement else None
 
     app_messages = convert_to_app_messages(request.messages)
-    system_prompt_text, non_system_messages = _extract_leading_system_prompt(app_messages)
-    system_only_request = bool(system_prompt_text) and not non_system_messages
-
-    # Canonical full history (including leading system prompt) is used for LMDB reuse/persistence
-    # and internal fallback replay so changing or removing a system prompt never reuses a stale gem.
     msgs = _prepare_messages_for_model(
         app_messages,
         request.tools,
@@ -2623,91 +2710,21 @@ async def create_chat_completion(
         extra_instr,
     )
 
-    use_temporary = _use_temporary_chat_mode()
-    needs_upload = _requires_upload(msgs, use_temporary)
-    session, client, remain, stored_conv = await _find_reusable_session(
-        db, pool, resolved_model, msgs, temporary=use_temporary, require_account=needs_upload
-    )
-
-    if session:
-        if not remain:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
-
-        assert client is not None
-        if managed_system_gem_id := await _resolve_system_prompt_gem(
-            client, system_prompt_text, system_only=system_only_request
-        ):
-            session.gem = managed_system_gem_id
-
-        input_msgs = _prepare_messages_for_model(
-            remain,
-            request.tools,
-            request.tool_choice,
-            extra_instr,
-            False,
-        )
-        m_input, files = await GeminiClientWrapper.process_conversation(input_msgs, tmp_dir)
-
-        logger.debug(
-            f"Reused session {reprlib.repr(session.metadata)} - sending {len(input_msgs)} prepared messages."
-        )
-    else:
-        try:
-            client = await pool.acquire(require_account=needs_upload)
-            managed_system_gem_id = await _resolve_system_prompt_gem(
-                client, system_prompt_text, system_only=system_only_request
-            )
-            send_msgs = (
-                _prepare_messages_for_model(
-                    non_system_messages,
-                    request.tools,
-                    request.tool_choice,
-                    extra_instr,
-                )
-                if managed_system_gem_id
-                else msgs
-            )
-            session = client.start_chat(
-                model=client.usable_model(resolved_model),
-                gem=managed_system_gem_id,
-            )
-            m_input, files = await GeminiClientWrapper.process_conversation(send_msgs, tmp_dir)
-        except Exception as e:
-            logger.error(f"Error in preparing conversation: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
-            ) from e
-
     completion_id = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(datetime.now(tz=UTC).timestamp())
-
-    if session is None or client is None:
-        logger.error("No Gemini session or client available after preparing conversation.")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="No available Gemini client."
-        )
-
-    try:
-        logger.debug(
-            f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
-        )
-        resp_or_stream, session, client = await _send_with_internal_fallback(
-            pool=pool,
-            db=db,
-            resolved_model=resolved_model,
-            session=session,
-            client=client,
-            current_input=m_input,
-            files=files,
-            full_prepared_messages=msgs,
-            stored_conversation=stored_conv,
-            tmp_dir=tmp_dir,
-            stream=bool(request.stream),
-            temporary=use_temporary,
-        )
-    except Exception as e:
-        logger.error(f"Gemini API error: {e}")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    resp_or_stream, session, client = await _send_request(
+        pool=pool,
+        db=db,
+        resolved_model=resolved_model,
+        history=app_messages,
+        prepared=msgs,
+        tools=request.tools,
+        tool_choice=request.tool_choice,
+        instructions=extra_instr,
+        repeat_instructions=True,
+        tmp_dir=tmp_dir,
+        stream=bool(request.stream),
+    )
 
     if request.stream:
         if isinstance(resp_or_stream, ModelOutput):
@@ -2892,9 +2909,6 @@ async def create_response(
         request.tool_choice if isinstance(request.tool_choice, (str, ToolChoiceFunction)) else None
     )
 
-    system_prompt_text, conv_without_system = _extract_leading_system_prompt(conv_messages)
-    system_only_conversation = bool(system_prompt_text) and not conv_without_system
-
     messages = _prepare_messages_for_model(
         conv_messages,
         standard_tools or None,
@@ -2907,87 +2921,22 @@ async def create_response(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    use_temporary = _use_temporary_chat_mode()
-    needs_upload = _requires_upload(messages, use_temporary)
-    session, client, remain, stored_conv = await _find_reusable_session(
-        db, pool, resolved_model, messages, temporary=use_temporary, require_account=needs_upload
-    )
-    if session:
-        msgs = _prepare_messages_for_model(
-            remain,
-            standard_tools or None,
-            model_tool_choice,
-            None,
-            False,
-        )
-        if not msgs:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
-        assert client is not None
-        if managed_system_gem_id := await _resolve_system_prompt_gem(
-            client, system_prompt_text, system_only=system_only_conversation
-        ):
-            session.gem = managed_system_gem_id
-        m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
-        logger.debug(
-            f"Reused session {reprlib.repr(session.metadata)} - sending {len(msgs)} prepared messages."
-        )
-    else:
-        try:
-            client = await pool.acquire(require_account=needs_upload)
-            managed_system_gem_id = await _resolve_system_prompt_gem(
-                client, system_prompt_text, system_only=system_only_conversation
-            )
-            send_messages = (
-                _prepare_messages_for_model(
-                    conv_without_system,
-                    standard_tools or None,
-                    model_tool_choice,
-                    extra_instr or None,
-                )
-                if managed_system_gem_id
-                else messages
-            )
-            session = client.start_chat(
-                model=client.usable_model(resolved_model),
-                gem=managed_system_gem_id,
-            )
-            m_input, files = await GeminiClientWrapper.process_conversation(send_messages, tmp_dir)
-        except Exception as e:
-            logger.error(f"Error in preparing conversation: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
-            ) from e
-
     response_id = f"resp_{uuid.uuid4().hex}"
     created_time = int(datetime.now(tz=UTC).timestamp())
-
-    if session is None or client is None:
-        logger.error("No Gemini session or client available after preparing conversation.")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="No available Gemini client."
-        )
-
-    try:
-        logger.debug(
-            f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
-        )
-        resp_or_stream, session, client = await _send_with_internal_fallback(
-            pool=pool,
-            db=db,
-            resolved_model=resolved_model,
-            session=session,
-            client=client,
-            current_input=m_input,
-            files=files,
-            full_prepared_messages=messages,
-            stored_conversation=stored_conv,
-            tmp_dir=tmp_dir,
-            stream=bool(request.stream),
-            temporary=use_temporary,
-        )
-    except Exception as e:
-        logger.error(f"Gemini API error: {e}")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    resp_or_stream, session, client = await _send_request(
+        pool=pool,
+        db=db,
+        resolved_model=resolved_model,
+        history=conv_messages,
+        prepared=messages,
+        tools=standard_tools or None,
+        tool_choice=model_tool_choice,
+        instructions=extra_instr or None,
+        # Unlike Chat Completions, a continued chat is not sent the instructions again.
+        repeat_instructions=False,
+        tmp_dir=tmp_dir,
+        stream=bool(request.stream),
+    )
 
     if request.stream:
         if isinstance(resp_or_stream, ModelOutput):
