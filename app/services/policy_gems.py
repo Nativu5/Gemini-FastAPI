@@ -60,36 +60,23 @@ def extract_managed_last_used_at(description: str | None) -> int | None:
     return None
 
 
-def has_managed_marker(description: str | None) -> bool:
-    """Return whether a description contains Gemini-FastAPI managed metadata."""
-    _base, meta = _split_description_meta(description)
-    return meta.get("managed_by") == "gemini_fastapi"
-
-
 async def delete_unused_gems(
-    client: GeminiClient,
-    prefix: str,
-    unused_days: int,
-    *,
-    dry_run: bool = False,
-    max_deletes: int | None = None,
-    require_marker: bool = True,
+    client: GeminiClient, prefix: str, unused_days: int, *, dry_run: bool, max_deletes: int
 ) -> list[str]:
-    """Delete managed gems last used more than `unused_days` ago and return their ids."""
+    """Delete managed gems last used more than `unused_days` ago and return their ids.
+
+    Only a gem that carries this server's last-use record is ever deleted: one a person made
+    under the same name prefix has none, and is left alone.
+    """
     cutoff_ts = int(time.time() - unused_days * 24 * 60 * 60)
     deleted: list[str] = []
-    would_delete = unmarked = 0
+    would_delete = 0
 
     for gem in await client.fetch_gems(include_hidden=True):
         if gem.predefined or not gem.name.startswith(prefix):
             continue
-        if require_marker and not has_managed_marker(gem.description):
-            unmarked += 1
-            continue
         last_used_at = extract_managed_last_used_at(gem.description)
-        if last_used_at is None or last_used_at >= cutoff_ts:
-            continue
-        if max_deletes is not None and len(deleted) >= max_deletes:
+        if last_used_at is None or last_used_at >= cutoff_ts or len(deleted) >= max_deletes:
             continue
         if dry_run:
             would_delete += 1
@@ -101,8 +88,5 @@ async def delete_unused_gems(
             # Still stale, so the next cleanup tries again.
             logger.warning(f"Failed to delete unused managed gem {gem.name!r}: {exc}")
 
-    logger.info(
-        f"Managed gem cleanup: deleted={len(deleted)}, dry_run={would_delete}, "
-        f"left alone without our marker={unmarked}"
-    )
+    logger.info(f"Managed gem cleanup: deleted={len(deleted)}, dry_run={would_delete}")
     return deleted

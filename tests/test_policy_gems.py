@@ -23,9 +23,7 @@ from app.services import policy_gems as policy_gems_module
 from app.services.client import GeminiClientWrapper
 from app.services.lmdb import LMDBConversationStore
 from app.services.policy_gems import (
-    delete_unused_gems,
     extract_managed_last_used_at,
-    has_managed_marker,
     touch_managed_description,
 )
 from app.services.pool import GeminiClientPool
@@ -34,52 +32,6 @@ from app.utils.config import (
     GeminiGemPolicyMode,
     GeminiGemsConfig,
 )
-
-
-class _FakeGemClient:
-    """In-memory stand-in for the gem RPCs the cleanup uses."""
-
-    def __init__(self, gems: list[Gem]):
-        self._store = {gem.id: gem for gem in gems}
-
-    async def fetch_gems(self, include_hidden: bool = False, **kwargs: Any) -> GemJar:
-        return GemJar(self._store)
-
-    async def delete_gem(self, gem: Gem | str, **kwargs: Any) -> None:
-        self._store.pop(gem.id if isinstance(gem, Gem) else gem, None)
-
-
-def test_cleanup_deletes_only_stale_gems_that_carry_our_marker():
-    old_ts = int(time.time() - 10 * 24 * 60 * 60)
-    stale_marked = Gem(
-        id="gem_stale",
-        name="fastapi_policy_sys_old",
-        description=touch_managed_description("Managed", now_ts=old_ts),
-        prompt="old",
-        predefined=False,
-    )
-    unmarked = Gem(
-        id="gem_unmarked",
-        name="fastapi_policy_manual",
-        description="User-created gem sharing prefix",
-        prompt="keep me",
-        predefined=False,
-    )
-    fresh_marked = Gem(
-        id="gem_fresh",
-        name="fastapi_policy_sys_new",
-        description=touch_managed_description("Managed", now_ts=time.time()),
-        prompt="new",
-        predefined=False,
-    )
-    fake = _FakeGemClient([stale_marked, unmarked, fresh_marked])
-
-    deleted = asyncio.run(
-        delete_unused_gems(cast(Any, fake), prefix="fastapi_policy_", unused_days=7)
-    )
-
-    assert deleted == ["gem_stale"]
-    assert set(fake._store) == {"gem_unmarked", "gem_fresh"}
 
 
 def test_wrapper_guest_session_skips_gem_operations(monkeypatch):
@@ -173,7 +125,7 @@ def test_one_gem_serves_every_request_with_a_prompt_and_creation_is_rate_limited
         assert await lookup("System prompt A") == "g1"
         assert await lookup("System prompt A") == "g1"
         assert account.requests == ["fetch", "create"]  # the second lookup asked Google nothing
-        assert has_managed_marker(account.gems["g1"].description)
+        assert extract_managed_last_used_at(account.gems["g1"].description) == int(account.now)
 
         assert await lookup("System prompt B") is None  # one creation a minute, already used
         account.now += 61
@@ -220,6 +172,43 @@ def test_a_rejected_last_use_update_neither_fails_the_request_nor_repeats_at_onc
         assert extract_managed_last_used_at(account.gems["g1"].description) == int(account.now)
 
     asyncio.run(_run())
+
+
+def _gem(gem_id: str, name: str, description: str) -> Gem:
+    return Gem(id=gem_id, name=name, description=description, prompt="p", predefined=False)
+
+
+def test_cleanup_deletes_only_gems_this_server_recorded_as_unused(account, monkeypatch):
+    days = 24 * 60 * 60
+    used_at = {
+        "stale": account.now - 10 * days,
+        "stale_too": account.now - 9 * days,
+        "fresh": account.now - days,
+    }
+    account.gems = {
+        gem_id: _gem(
+            gem_id,
+            f"fastapi_policy_sys_{gem_id}",
+            touch_managed_description("Managed", now_ts=when),
+        )
+        for gem_id, when in used_at.items()
+    }
+    # Made by a person under the same prefix, or outside it: never this server's to delete.
+    account.gems["manual"] = _gem("manual", "fastapi_policy_manual", "Mine, keep it")
+    account.gems["other"] = _gem("other", "my_gem", touch_managed_description("x", now_ts=1))
+
+    _use_gems(monkeypatch, cleanup=GeminiGemCleanupConfig(enabled=True, dry_run=True))
+    asyncio.run(account.client.delete_unused_gems())
+    assert len(account.gems) == 5  # a dry run only reports
+
+    _use_gems(monkeypatch, cleanup=GeminiGemCleanupConfig(enabled=True, max_deletes_per_run=1))
+    asyncio.run(account.client.delete_unused_gems())
+    assert sorted(account.gems) == ["fresh", "manual", "other", "stale_too"]  # one per run
+
+    # With room to delete more, the two that are not this server's are still left alone.
+    _use_gems(monkeypatch, cleanup=GeminiGemCleanupConfig(enabled=True))
+    asyncio.run(account.client.delete_unused_gems())
+    assert sorted(account.gems) == ["fresh", "manual", "other"]
 
 
 def test_a_gem_that_cleanup_deleted_is_not_handed_out_again(account, monkeypatch):
@@ -286,7 +275,7 @@ def test_gem_cleanup_reaches_every_account_even_after_one_fails(monkeypatch):
         cleaned.append(client_id)
 
     pool = GeminiClientPool.__new__(GeminiClientPool)  # skips the singleton and the real config
-    pool._clients = [
+    pool.clients = [
         cast(
             Any,
             SimpleNamespace(
@@ -297,7 +286,6 @@ def test_gem_cleanup_reaches_every_account_even_after_one_fails(monkeypatch):
         )
         for client_id in ("first", "broken", "last")
     ]
-    pool._restart_locks = {}
 
     asyncio.run(pool.delete_unused_gems())
     assert cleaned == ["first", "last"]

@@ -14,30 +14,22 @@ class GeminiClientPool(metaclass=Singleton):
     """Pool of GeminiClient instances identified by unique ids."""
 
     def __init__(self) -> None:
-        self._clients: list[GeminiClientWrapper] = []
-        self._id_map: dict[str, GeminiClientWrapper] = {}
-        self._round_robin: deque[GeminiClientWrapper] = deque()
-        self._restart_locks: dict[str, asyncio.Lock] = {}
-
-        if len(g_config.gemini.clients) == 0:
+        if not g_config.gemini.clients:
             raise ValueError("No Gemini clients configured")
 
-        for c in g_config.gemini.clients:
-            client = GeminiClientWrapper(
-                client_id=c.id,
-                **c.model_dump(exclude={"id"}),
-            )
-            self._clients.append(client)
-            self._id_map[c.id] = client
-            self._round_robin.append(client)
-            self._restart_locks[c.id] = asyncio.Lock()
+        self.clients = [
+            GeminiClientWrapper(client_id=c.id, **c.model_dump(exclude={"id"}))
+            for c in g_config.gemini.clients
+        ]
+        self._id_map = {client.id: client for client in self.clients}
+        self._round_robin = deque(self.clients)
+        # A restart clears what the client knows of its open chat window, so it must not run
+        # again for a second request that found the client stopped at the same moment.
+        self._restart_locks = {client.id: asyncio.Lock() for client in self.clients}
 
-    async def _init_one(self, client: GeminiClientWrapper) -> bool:
-        """Initialize a single client; returns True on success."""
-        return await self._init_attempt(client)
-
-    async def _init_attempt(self, client: GeminiClientWrapper) -> bool:
-        """Run library init; returns True on success."""
+    @staticmethod
+    async def _start(client: GeminiClientWrapper) -> bool:
+        """Initialize a client; False if that failed, which `client.init` has logged."""
         try:
             await client.init()
             return True
@@ -46,17 +38,16 @@ class GeminiClientPool(metaclass=Singleton):
 
     async def init(self) -> None:
         """Initialize all clients in the pool with staggered start times."""
-        clients_to_init = [c for c in self._clients if not c.running()]
+        clients_to_init = [c for c in self.clients if not c.running()]
         for i, client in enumerate(clients_to_init):
-            await self._init_one(client)
+            await self._start(client)
 
             if i < len(clients_to_init) - 1:
                 delay = random.uniform(5, 30)
                 logger.info(f"Staggering next initialization by {delay:.2f}s")
                 await asyncio.sleep(delay)
 
-        success_count = sum(bool(client.running()) for client in self._clients)
-        if success_count == 0:
+        if not any(client.running() for client in self.clients):
             raise RuntimeError("Failed to initialize any Gemini clients")
 
     async def acquire(
@@ -67,9 +58,6 @@ class GeminiClientPool(metaclass=Singleton):
         `require_account` excludes guest sessions, for requests they cannot serve at all - file
         uploads. Otherwise a guest is used only once no authenticated client is left.
         """
-        if not self._round_robin:
-            raise RuntimeError("No Gemini clients configured")
-
         if client_id:
             client = self._id_map.get(client_id)
             if not client:
@@ -95,7 +83,7 @@ class GeminiClientPool(metaclass=Singleton):
                 ):
                     return client
 
-            if account_only and not require_account and any(c.is_guest() for c in self._clients):
+            if account_only and not require_account and any(c.is_guest() for c in self.clients):
                 logger.warning(
                     "No authenticated Gemini client is available; falling back to a guest "
                     "session until cookies are refreshed."
@@ -113,43 +101,30 @@ class GeminiClientPool(metaclass=Singleton):
         if client.running():
             return True
 
-        lock = self._restart_locks.get(client.id)
-        if lock is None:
-            return False
-
-        async with lock:
+        async with self._restart_locks[client.id]:
             if client.running():
                 return True
-
-            if await self._init_attempt(client):
+            if await self._start(client):
                 logger.info(f"Restarted Gemini client {client.id} after it stopped.")
                 return True
             return False
 
-    @property
-    def clients(self) -> list[GeminiClientWrapper]:
-        """Return managed clients."""
-        return self._clients
-
     async def close(self) -> None:
         """Close all clients in the pool."""
-        if not self._clients:
-            return
-
-        logger.info(f"Closing {len(self._clients)} Gemini clients...")
+        logger.info(f"Closing {len(self.clients)} Gemini clients...")
         await asyncio.gather(
-            *(client.close() for client in self._clients if client.running()),
+            *(client.close() for client in self.clients if client.running()),
             return_exceptions=True,
         )
         logger.info("All Gemini clients closed.")
 
     def status(self) -> dict[str, bool]:
         """Return healthy status for each client."""
-        return {client.id: client.is_healthy() for client in self._clients}
+        return {client.id: client.is_healthy() for client in self.clients}
 
     async def delete_unused_gems(self) -> None:
         """Run the managed-gem cleanup on every account; one failing does not stop the rest."""
-        for client in self._clients:
+        for client in self.clients:
             try:
                 if await self._ensure_client_ready(client):
                     await client.delete_unused_gems()
@@ -171,13 +146,11 @@ class GeminiClientPool(metaclass=Singleton):
             )
             return False
         try:
-            if not client.running():
-                ready = await self._ensure_client_ready(client)
-                if not ready:
-                    logger.warning(
-                        f"Cannot delete chat {cid}: client {client_id} is stopped and could not be restarted"
-                    )
-                    return False
+            if not await self._ensure_client_ready(client):
+                logger.warning(
+                    f"Cannot delete chat {cid}: client {client_id} is stopped and could not be restarted"
+                )
+                return False
             await client.delete_chat(cid)
             if client.latest_chat_cid == cid:
                 client.latest_chat_cid = None
