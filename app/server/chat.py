@@ -99,7 +99,7 @@ MAX_CHARS_PER_REQUEST = int(g_config.gemini.max_chars_per_request * 0.9)
 # the guardrail further on top of the standard 10% safety margin.
 TEMPORARY_MAX_CHARS_PER_REQUEST = int(MAX_CHARS_PER_REQUEST * 0.9)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(verify_api_key)])
 _AVAILABLE_MODELS_CACHE: list[ModelData] | None = None
 
 
@@ -1529,7 +1529,7 @@ def _create_real_streaming_response(
                 yield make_chunk({"delta": {"content": remaining_text}, "finish_reason": None})
 
             try:
-                _, visible_output, storage_output, detected_tool_calls = process_llm_output(
+                _, visible_output, detected_tool_calls = process_llm_output(
                     normalize_llm_text(full_thoughts or ""),
                     normalize_llm_text(full_text or ""),
                     structured_requirement,
@@ -1549,6 +1549,7 @@ def _create_real_streaming_response(
             if structured_requirement and visible_output:
                 yield make_chunk({"delta": {"content": visible_output}, "finish_reason": None})
 
+            storage_output = visible_output  # plus the links to generated files, sent next
             async for result in downloads.as_completed():
                 if result is None:
                     yield ": ping\n\n"
@@ -1878,7 +1879,7 @@ def _create_responses_real_streaming_response(
                 yield event
 
             try:
-                _, assistant_text, storage_output, detected_tool_calls = process_llm_output(
+                _, assistant_text, detected_tool_calls = process_llm_output(
                     normalize_llm_text(full_thoughts or ""),
                     normalize_llm_text(full_text or ""),
                     structured_requirement,
@@ -1928,7 +1929,6 @@ def _create_responses_real_streaming_response(
                         yield event
                     yield text_delta(f"\n\n{link}")
                     assistant_text += f"\n\n{link}"
-                    storage_output += f"\n\n{link}"
 
             final_response_contents: list[ResponseOutputContent] = []
             if choice_error := _tool_choice_failure(
@@ -2013,7 +2013,7 @@ def _create_responses_real_streaming_response(
                 )
 
             p_tok, c_tok, t_tok, r_tok = calculate_usage(
-                messages, storage_output, detected_tool_calls, full_thoughts
+                messages, assistant_text, detected_tool_calls, full_thoughts
             )
             usage = ResponseUsage(
                 input_tokens=p_tok,
@@ -2041,7 +2041,7 @@ def _create_responses_real_streaming_response(
                 client_wrapper,
                 session.metadata,
                 messages,
-                storage_output,
+                assistant_text,
                 detected_tool_calls,
             )
 
@@ -2063,7 +2063,7 @@ def _create_responses_real_streaming_response(
 
 
 @router.get("/v1/models", response_model=ModelListResponse)
-async def list_models(api_key: str = Depends(verify_api_key)):
+async def list_models():
     pool = GeminiClientPool()
     models = available_models(pool)
     return ModelListResponse(data=models)
@@ -2073,7 +2073,6 @@ async def list_models(api_key: str = Depends(verify_api_key)):
 async def create_chat_completion(
     request: ChatCompletionRequest,
     raw_request: Request,
-    api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
 ):
     base_url = str(raw_request.base_url)
@@ -2137,7 +2136,7 @@ async def create_chat_completion(
         )
 
     try:
-        thoughts, visible_output, storage_output, tool_calls = process_llm_output(
+        thoughts, visible_output, tool_calls = process_llm_output(
             normalize_llm_text(resp_or_stream.thoughts or ""),
             normalize_llm_text(resp_or_stream.text or ""),
             structured_requirement,
@@ -2155,9 +2154,8 @@ async def create_chat_completion(
     for result in await downloads.all():
         if md := _chat_markdown(result, downloads, base_url):
             visible_output += f"\n\n{md}"
-            storage_output += f"\n\n{md}"
 
-    p_tok, c_tok, t_tok, r_tok = calculate_usage(app_messages, storage_output, tool_calls, thoughts)
+    p_tok, c_tok, t_tok, r_tok = calculate_usage(app_messages, visible_output, tool_calls, thoughts)
     payload = ChatCompletionResponse(
         id=completion_id,
         created=created_time,
@@ -2196,7 +2194,7 @@ async def create_chat_completion(
         client,
         session.metadata,
         msgs,
-        storage_output,
+        visible_output,
         tool_calls,
     )
     return payload
@@ -2206,7 +2204,6 @@ async def create_chat_completion(
 async def create_response(
     request: ResponseCreateRequest,
     raw_request: Request,
-    api_key: str = Depends(verify_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
 ):
     base_url = str(raw_request.base_url)
@@ -2298,7 +2295,7 @@ async def create_response(
         )
 
     try:
-        thoughts, assistant_text, storage_output, tool_calls = process_llm_output(
+        thoughts, assistant_text, tool_calls = process_llm_output(
             normalize_llm_text(resp_or_stream.thoughts or ""),
             normalize_llm_text(resp_or_stream.text or ""),
             structured_requirement,
@@ -2332,7 +2329,7 @@ async def create_response(
         for text in (assistant_text, image_markdown, media_markdown)
         if text
     ] or [ResponseOutputText(type="output_text", text="")]
-    storage_output += image_markdown + media_markdown
+    storage_output = assistant_text + image_markdown + media_markdown
 
     p_tok, c_tok, t_tok, r_tok = calculate_usage(messages, storage_output, tool_calls, thoughts)
     usage = ResponseUsage(

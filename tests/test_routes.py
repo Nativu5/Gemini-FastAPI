@@ -10,6 +10,7 @@ from gemini_webapi.exceptions import ModelInvalidError
 from gemini_webapi.types import GeneratedVideo, WebImage
 
 from app.utils import g_config
+from app.utils.config import GeminiGemPolicyMode
 
 WEATHER_TOOL = {
     "type": "function",
@@ -118,6 +119,51 @@ def test_responses_replays_a_generated_image_as_its_link_not_its_bytes(api, stre
     assert replayed.continues is None
     assert "/media/img_" in replayed.text
     assert image["result"] not in replayed.text
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses"])
+def test_a_system_prompt_travels_as_a_gem_and_a_chat_is_only_continued_under_its_own(
+    api, monkeypatch, path
+):
+    monkeypatch.setattr(g_config.gemini.gems, "policy", GeminiGemPolicyMode.CREATE_ON_DEMAND)
+
+    def ask(system: str | None, *history: str) -> None:
+        turns = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": t}
+            for i, t in enumerate(history)
+        ]
+        if "chat" in path:
+            messages = [{"role": "system", "content": system}] if system else []
+            body = {"messages": [*messages, *turns]}
+        else:
+            body = {"input": turns, **({"instructions": system} if system else {})}
+        assert api.post(path, json={"model": MODEL, **body}).status_code == 200
+
+    ask("Be a pirate", "First question")
+    ask("Be a pirate", "First question", "ok", "Second question")
+    ask("Be a lawyer", "First question", "ok", "Second question")
+    ask(None, "First question", "ok", "Second question")
+    first, same_prompt, other_prompt, no_prompt = api.upstream.sent
+
+    # The prompt is carried by the gem, and so is left out of the message.
+    assert (first.gem, "Be a pirate" in first.text) == ("gem_1", False)
+    # The same prompt continues the chat, under the same gem, with only the new turn.
+    assert (same_prompt.gem, same_prompt.continues) == ("gem_1", "c_1")
+    assert "First question" not in same_prompt.text
+    # Another prompt, or none, is another conversation: it starts over with the whole history.
+    assert (other_prompt.gem, other_prompt.continues) == ("gem_2", None)
+    assert (no_prompt.gem, no_prompt.continues) == (None, None)
+    assert "First question" in other_prompt.text
+    assert "First question" in no_prompt.text
+
+
+def test_the_native_route_sends_its_system_instruction_inline_even_with_gems_on(api, monkeypatch):
+    monkeypatch.setattr(g_config.gemini.gems, "policy", GeminiGemPolicyMode.CREATE_ON_DEMAND)
+
+    _native(api, False, contents=USER_TURN, systemInstruction={"parts": [{"text": "Be a pirate"}]})
+
+    assert api.upstream.sent[0].gem is None
+    assert "Be a pirate" in api.upstream.sent[0].text
 
 
 def test_chat_completions_continues_the_chat_when_the_client_echoes_the_reasoning(api):
@@ -598,3 +644,19 @@ def test_a_file_that_every_chunk_of_a_stream_lists_is_downloaded_once(api, path)
 
     assert api.post(path, json=body).status_code == 200
     assert api.upstream.downloaded == ["http://img/a"]
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses"])
+def test_a_developer_message_is_a_system_message(api, path):
+    """OpenAI renamed the role; Gemini is given the instructions the same way under either."""
+    for role in ("system", "developer"):
+        turns = [
+            {"role": role, "content": "Be brief"},
+            {"role": "user", "content": "First question"},
+        ]
+        key = "messages" if "chat" in path else "input"
+        assert api.post(path, json={"model": MODEL, key: turns}).status_code == 200
+
+    as_system, as_developer = api.upstream.sent
+    assert "Be brief" in as_system.text
+    assert as_developer.text == as_system.text

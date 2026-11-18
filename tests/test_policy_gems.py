@@ -1,6 +1,7 @@
 """Tests for managed gems: configuration, cleanup, and system-prompt routing."""
 
 import asyncio
+import contextlib
 import time
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
@@ -8,20 +9,17 @@ from typing import Any, cast
 import gemini_webapi.client as gemini_client_module
 import gemini_webapi.utils.decorators as gemini_decorators
 import pytest
-from fastapi import Request
-from gemini_webapi import GeminiClient, ModelOutput
+from gemini_webapi import GeminiClient
 from gemini_webapi.constants import AccountStatus
 from gemini_webapi.exceptions import APIError
 from gemini_webapi.types import Gem, GemJar
-from gemini_webapi.types.candidate import Candidate
 
 from app import main as main_module
-from app.models import AppContentItem, AppMessage, ChatCompletionMessage, ChatCompletionRequest
+from app.models import AppContentItem, AppMessage
 from app.server import chat
 from app.services import client as client_module
 from app.services import policy_gems as policy_gems_module
 from app.services.client import GeminiClientWrapper
-from app.services.lmdb import LMDBConversationStore
 from app.services.policy_gems import (
     extract_managed_last_used_at,
     touch_managed_description,
@@ -323,12 +321,12 @@ def test_gem_cleanup_alone_keeps_the_periodic_task_alive_and_runs_on_its_own_clo
     monkeypatch.setattr(main_module, "_get_cleanup_interval", lambda: 0.001)
 
     async def _run() -> None:
-        stop = asyncio.Event()
-        task = asyncio.create_task(main_module._run_retention_cleanup(stop))
+        task = asyncio.create_task(main_module._run_retention_cleanup())
         while passes < 3 and not task.done():
             await asyncio.sleep(0.001)
-        stop.set()
-        await task
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     asyncio.run(_run())
     assert passes >= 3  # nothing else is switched on, so the task would have exited at once
@@ -366,130 +364,3 @@ def test_a_system_message_with_an_attachment_is_not_moved_into_a_gem():
 
     assert extracted is None
     assert rest == messages
-
-
-def test_chat_completion_persists_canonical_history_and_isolates_changed_system_prompt(
-    tmp_path, monkeypatch
-):
-    store = LMDBConversationStore.open_isolated(db_path=str(tmp_path / "lmdb"))
-    try:
-        gems_cfg = GeminiGemsConfig(
-            policy=GeminiGemPolicyMode.CREATE_ON_DEMAND,
-        )
-        monkeypatch.setattr(chat.g_config.gemini, "gems", gems_cfg)
-        monkeypatch.setattr(chat.g_config.gemini, "chat_mode", chat.ChatMode.NORMAL)
-
-        sent_calls: list[dict[str, Any]] = []
-
-        class _FakeSession:
-            def __init__(self, gem: str | None = None, metadata: list[str | None] | None = None):
-                self.gem = gem
-                self.metadata = metadata or ["cid-1", "rid-1", "rcid-1"]
-                self.geminiclient = fake_client
-
-            async def send_message(self, prompt: str, **kwargs: Any) -> ModelOutput:
-                sent_calls.append(
-                    {"prompt": prompt, "gem": self.gem, "metadata": list(self.metadata)}
-                )
-                output = ModelOutput(
-                    metadata=["cid-1", "rid-2", "rcid-2"],
-                    candidates=[Candidate(rcid="rcid-2", text="ok")],
-                )
-                self.metadata = list(output.metadata)
-                return output
-
-        class _FakeClient:
-            def __init__(self):
-                self.id = "client-id-1"
-                self.latest_chat_cid = None
-                self.gems_by_prompt: dict[str, str] = {}
-
-            def is_guest(self) -> bool:
-                return False
-
-            def usable_model(self, model: Any) -> Any:
-                return model
-
-            def chat_scope(self, temporary: bool) -> str | None:
-                return None
-
-            async def system_prompt_gem_id_or_create(self, prompt: str) -> str:
-                return self.gems_by_prompt.setdefault(prompt, f"gem_{len(self.gems_by_prompt) + 1}")
-
-            def start_chat(self, **kwargs: Any) -> _FakeSession:
-                return _FakeSession(gem=kwargs.get("gem"), metadata=kwargs.get("metadata"))
-
-        fake_client = _FakeClient()
-
-        class _FakePool:
-            async def acquire(
-                self, client_id: str | None = None, require_account: bool = False
-            ) -> _FakeClient:
-                return fake_client
-
-        monkeypatch.setattr(chat, "GeminiClientPool", _FakePool)
-        monkeypatch.setattr(chat, "LMDBConversationStore", lambda: store)
-        monkeypatch.setattr(chat, "_resolve_model_name", lambda pool, name: "gemini-3-flash")
-
-        raw_request = cast(Request, SimpleNamespace(base_url="http://localhost:8000/", headers={}))
-
-        # Turn 1: system prompt A is sent via gem_1, stripped from the prompt payload.
-        req1 = ChatCompletionRequest(
-            model="gemini-3-flash",
-            messages=[
-                ChatCompletionMessage(role="system", content="Be a pirate"),
-                ChatCompletionMessage(role="user", content="Hello"),
-            ],
-        )
-        asyncio.run(chat.create_chat_completion(req1, raw_request, api_key="", tmp_dir=tmp_path))
-        assert len(sent_calls) == 1
-        assert sent_calls[0]["gem"] == "gem_1"
-        assert "Be a pirate" not in sent_calls[0]["prompt"]
-
-        # Turn 2 with same system prompt A reuses the LMDB session and sends only the new user turn.
-        req2 = ChatCompletionRequest(
-            model="gemini-3-flash",
-            messages=[
-                ChatCompletionMessage(role="system", content="Be a pirate"),
-                ChatCompletionMessage(role="user", content="Hello"),
-                ChatCompletionMessage(role="assistant", content="ok"),
-                ChatCompletionMessage(role="user", content="Next question"),
-            ],
-        )
-        asyncio.run(chat.create_chat_completion(req2, raw_request, api_key="", tmp_dir=tmp_path))
-        assert len(sent_calls) == 2
-        assert sent_calls[1]["gem"] == "gem_1"
-        assert sent_calls[1]["metadata"] == ["cid-1", "rid-2", "rcid-2"]
-        assert "Hello" not in sent_calls[1]["prompt"]
-
-        # Turn 2 with changed system prompt B must NOT reuse Turn 1's gem_1 session.
-        req3 = ChatCompletionRequest(
-            model="gemini-3-flash",
-            messages=[
-                ChatCompletionMessage(role="system", content="Be a formal lawyer"),
-                ChatCompletionMessage(role="user", content="Hello"),
-                ChatCompletionMessage(role="assistant", content="ok"),
-                ChatCompletionMessage(role="user", content="Next question"),
-            ],
-        )
-        asyncio.run(chat.create_chat_completion(req3, raw_request, api_key="", tmp_dir=tmp_path))
-        assert len(sent_calls) == 3
-        assert sent_calls[2]["gem"] == "gem_2"
-        assert "Hello" in sent_calls[2]["prompt"]
-        assert "Be a formal lawyer" not in sent_calls[2]["prompt"]
-
-        # Turn 2 with system prompt removed must also start a fresh session without gem.
-        req4 = ChatCompletionRequest(
-            model="gemini-3-flash",
-            messages=[
-                ChatCompletionMessage(role="user", content="Hello"),
-                ChatCompletionMessage(role="assistant", content="ok"),
-                ChatCompletionMessage(role="user", content="No system now"),
-            ],
-        )
-        asyncio.run(chat.create_chat_completion(req4, raw_request, api_key="", tmp_dir=tmp_path))
-        assert len(sent_calls) == 4
-        assert sent_calls[3]["gem"] is None
-        assert "Hello" in sent_calls[3]["prompt"]
-    finally:
-        store.close()

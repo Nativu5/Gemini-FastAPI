@@ -69,9 +69,6 @@ class ChatCompletionAssistantContentItem(BaseModel):
     annotations: list[dict[str, Any]] = Field(default_factory=list)
 
 
-ChatCompletionContentItem = ChatCompletionRequestContentItem | ChatCompletionAssistantContentItem
-
-
 class ChatCompletionMessageToolCall(BaseModel):
     """A single tool call emitted by the assistant."""
 
@@ -81,7 +78,11 @@ class ChatCompletionMessageToolCall(BaseModel):
 
 
 class ChatCompletionMessage(BaseModel):
-    """A single message in a Chat Completions conversation."""
+    """A message in a Chat Completions request.
+
+    What a client sends back of an earlier reply beyond these fields - `refusal`, `annotations`,
+    `reasoning_content`, `audio` - is accepted and not used.
+    """
 
     role: Literal["developer", "system", "user", "assistant", "tool", "function"]
     content: (
@@ -90,17 +91,6 @@ class ChatCompletionMessage(BaseModel):
     name: str | None = Field(default=None)
     tool_calls: list[ChatCompletionMessageToolCall] | None = Field(default=None)
     tool_call_id: str | None = Field(default=None)
-    refusal: str | None = Field(default=None)
-    reasoning_content: str | None = Field(default=None)
-    audio: dict[str, Any] | None = Field(default=None)
-    annotations: list[dict[str, Any]] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def normalize_role(self) -> ChatCompletionMessage:
-        """Normalize ``developer`` role to ``system`` for Gemini compatibility."""
-        if self.role == "developer":
-            self.role = "system"
-        return self
 
 
 class ChatCompletionFunctionTool(BaseModel):
@@ -510,8 +500,3 @@ class HealthCheckResponse(BaseModel):
     storage: Mapping[str, Any] | None = Field(default=None)
     clients: Mapping[str, bool] | None = Field(default=None)
     error: str | None = Field(default=None)
-
-
-ChatCompletionMessage.model_rebuild()
-ChatCompletionMessageToolCall.model_rebuild()
-ChatCompletionRequest.model_rebuild()

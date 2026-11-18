@@ -6,21 +6,8 @@ from typing import Literal
 from loguru import logger
 
 
-def setup_logging(
-    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "DEBUG",
-    diagnose: bool = True,
-    backtrace: bool = True,
-    colorize: bool = True,
-) -> None:
-    """
-    Setup loguru logging configuration to unify all project logging output
-
-    Args:
-        level: Log level
-        diagnose: Whether to enable diagnostic information
-        backtrace: Whether to enable backtrace information
-        colorize: Whether to enable colors
-    """
+def setup_logging(level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]) -> None:
+    """Send all logging, the standard library's included, to one loguru sink on stderr."""
     # Reset all logger handlers
     logger.remove()
 
@@ -28,9 +15,9 @@ def setup_logging(
     logger.add(
         sys.stderr,
         level=level,
-        colorize=colorize,
-        backtrace=backtrace,
-        diagnose=diagnose,
+        colorize=True,
+        backtrace=True,
+        diagnose=True,
         enqueue=True,
     )
 

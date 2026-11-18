@@ -5,8 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
@@ -75,12 +74,7 @@ class RequestBodyLimitMiddleware:
             if not overflowed:
                 await send(message)
 
-        try:
-            await self.app(scope, limited_receive, limited_send)
-        except HTTPException:
-            if not overflowed:
-                raise
-
+        await self.app(scope, limited_receive, limited_send)
         if overflowed:
             await self._send_too_large(scope, receive, send)
 
@@ -132,21 +126,12 @@ def verify_media_token(filename: str, token: str | None) -> bool:
     return True  # No auth required
 
 
-def cleanup_expired_media(retention_days: int = 14, ttl_seconds: int | None = None) -> int:
-    """Delete media files in MEDIA_STORE_DIR older than retention window."""
-    if ttl_seconds is not None:
-        seconds = max(0, int(ttl_seconds))
-    elif retention_days > 0:
-        seconds = retention_days * 24 * 60 * 60
-    else:
+def cleanup_expired_media(ttl_seconds: int) -> int:
+    """Delete media files last written more than `ttl_seconds` ago; 0 keeps them for good."""
+    if ttl_seconds <= 0:
         return 0
 
-    if seconds <= 0:
-        return 0
-
-    now = time.time()
-    cutoff = now - seconds
-
+    cutoff = time.time() - ttl_seconds
     count = 0
     for file_path in MEDIA_STORE_DIR.iterdir():
         if not file_path.is_file():
@@ -191,64 +176,35 @@ def get_temp_dir():
         temp_dir.cleanup()
 
 
-def verify_gemini_api_key(request: Request):
-    """Gemini-style auth: x-goog-api-key header, key= query param, or Bearer fallback."""
-    if not g_config.server.api_key:
-        return ""
+def _check_api_key(api_key: str | None) -> None:
+    """Let a request through if it carries the configured key, or if none is configured."""
+    expected = g_config.server.api_key
+    if not expected:
+        return
+    if api_key is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+    if not hmac.compare_digest(api_key.encode(), expected.encode()):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Wrong API key")
 
-    # 1) x-goog-api-key header
-    if api_key := request.headers.get("x-goog-api-key"):
-        if api_key != g_config.server.api_key:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Wrong API key")
-        return api_key
 
-    # 2) key= query parameter
-    if api_key := request.query_params.get("key"):
-        if api_key != g_config.server.api_key:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Wrong API key")
-        return api_key
-
-    # 3) fall back to Authorization: Bearer
-    auth_header = request.headers.get("authorization", "")
-    if auth_header.lower().startswith("bearer "):
-        api_key = auth_header[7:]
-        if api_key != g_config.server.api_key:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Wrong API key")
-        return api_key
-
-    raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+def _bearer_token(request: Request) -> str | None:
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    return token if scheme.lower() == "bearer" else None
 
 
 def verify_api_key(
-    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=False)),
-):
-    if not g_config.server.api_key:
-        return ""
-
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing token")
-
-    api_key = credentials.credentials
-    if api_key != g_config.server.api_key:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Wrong API key")
-
-    return api_key
+    # Read through HTTPBearer so that /docs shows the scheme and offers to send the key.
+    credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False)),
+) -> None:
+    """OpenAI-style auth: `Authorization: Bearer <key>`."""
+    _check_api_key(credentials.credentials if credentials else None)
 
 
-def add_request_size_limit_middleware(app: FastAPI) -> None:
-    app.add_middleware(
-        RequestBodyLimitMiddleware,
-        max_body_bytes=g_config.server.max_request_body_bytes,
+def verify_gemini_api_key(request: Request) -> None:
+    """Gemini-style auth: the `x-goog-api-key` header, else the `key` query parameter, else a
+    bearer token. The first one present decides, so a wrong key is not rescued by a right one."""
+    _check_api_key(
+        request.headers.get("x-goog-api-key")
+        or request.query_params.get("key")
+        or _bearer_token(request)
     )
-
-
-def add_cors_middleware(app: FastAPI):
-    if g_config.cors.enabled:
-        cors = g_config.cors
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=cors.allow_origins,
-            allow_credentials=cors.allow_credentials,
-            allow_methods=cors.allow_methods,
-            allow_headers=cors.allow_headers,
-        )

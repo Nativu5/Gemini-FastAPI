@@ -30,7 +30,7 @@ def _resolve_media_file(media_store: Path, filename: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-@router.get("/media/{filename}", tags=["Media"])
+@router.get("/media/{filename}")
 async def get_media(filename: str, token: str | None = Query(default=None)):
     if not verify_media_token(filename, token):
         raise HTTPException(status_code=403, detail="Invalid token")

@@ -404,7 +404,7 @@ def test_cleanup_expired_media_with_ttl_seconds(tmp_path, monkeypatch):
     past = time.time() - 7200
     os.utime(old_file, (past, past))
 
-    removed = middleware.cleanup_expired_media(ttl_seconds=3600)
+    removed = middleware.cleanup_expired_media(3600)
     assert removed == 1
     assert not old_file.exists()
     assert new_file.exists()

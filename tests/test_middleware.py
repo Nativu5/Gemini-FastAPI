@@ -101,14 +101,14 @@ def test_a_refusal_still_carries_cors_headers(monkeypatch):
     monkeypatch.setattr(g_config, "cors", CORSConfig(allow_origins=["https://example.com"]))
     client = TestClient(create_app())  # no `with`: the lifespan would log in to Google
 
-    refused = client.post(
-        "/v1/chat/completions",
-        content=b"x" * (LIMIT + 1),
-        headers={"Origin": "https://example.com"},
-    )
+    for body in (b"x" * (LIMIT + 1), _chunks(LIMIT * 5)):  # declared, then counted
+        refused = client.post(
+            "/v1/chat/completions", content=body, headers={"Origin": "https://example.com"}
+        )
 
-    assert refused.status_code == 413
-    assert refused.headers["access-control-allow-origin"] == "https://example.com"
+        assert refused.status_code == 413
+        assert refused.json()["error"]["type"] == "invalid_request_error"
+        assert refused.headers["access-control-allow-origin"] == "https://example.com"
 
 
 def test_an_unparsable_content_length_falls_back_to_counting():

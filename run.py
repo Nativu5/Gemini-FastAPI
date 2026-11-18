@@ -10,35 +10,22 @@ from app.utils import g_config, setup_logging
 app = create_app()
 
 if __name__ == "__main__":
-    # Setup loguru logging
     setup_logging(level=g_config.logging.level)
 
-    # Check HTTPS configuration
-    if g_config.server.https.enabled:
-        key_path = g_config.server.https.key_file
-        cert_path = g_config.server.https.cert_file
-
-        # Check if the certificate files exist
-        if not os.path.exists(key_path) or not os.path.exists(cert_path):
-            logger.critical(
-                f"HTTPS enabled but SSL certificate files not found: {key_path}, {cert_path}"
-            )
-            sys.exit(1)
-
-        logger.info(f"Starting server at https://{g_config.server.host}:{g_config.server.port} ...")
-        uvicorn.run(
-            app,
-            host=g_config.server.host,
-            port=g_config.server.port,
-            log_config=None,
-            ssl_keyfile=key_path,
-            ssl_certfile=cert_path,
+    server, https = g_config.server, g_config.server.https
+    if https.enabled and not (os.path.exists(https.key_file) and os.path.exists(https.cert_file)):
+        logger.critical(
+            f"HTTPS enabled but SSL certificate files not found: {https.key_file}, {https.cert_file}"
         )
-    else:
-        logger.info(f"Starting server at http://{g_config.server.host}:{g_config.server.port} ...")
-        uvicorn.run(
-            app,
-            host=g_config.server.host,
-            port=g_config.server.port,
-            log_config=None,
-        )
+        sys.exit(1)
+
+    scheme = "https" if https.enabled else "http"
+    logger.info(f"Starting server at {scheme}://{server.host}:{server.port} ...")
+    uvicorn.run(
+        app,
+        host=server.host,
+        port=server.port,
+        log_config=None,
+        ssl_keyfile=https.key_file if https.enabled else None,
+        ssl_certfile=https.cert_file if https.enabled else None,
+    )
