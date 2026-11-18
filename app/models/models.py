@@ -420,9 +420,7 @@ class ResponseCreateRequest(BaseModel):
     tool_choice: (
         Literal["none", "auto", "required"] | ToolChoiceFunction | ToolChoiceTypes | None
     ) = Field(default=None)
-    tools: list[FunctionTool | ChatCompletionFunctionTool | ImageGeneration] | None = Field(
-        default=None
-    )
+    tools: list[FunctionTool | ImageGeneration] | None = Field(default=None)
     store: bool | None = Field(default=None)
     prompt_cache_key: str | None = Field(default=None)
     text: ResponseTextConfig | None = Field(default=None)
