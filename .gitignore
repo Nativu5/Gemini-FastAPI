@@ -1,4 +1,5 @@
 .python-version
+.DS_Store
 .vscode
 .cursor
 .idea

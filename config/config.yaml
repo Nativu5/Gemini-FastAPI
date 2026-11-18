@@ -1,16 +1,21 @@
 # Gemini FastAPI Configuration File
 
 server:
-  host: "0.0.0.0"          # Server bind address
-  port: 8000               # Server port
-  api_key: null            # API key for authentication (null for no auth)
+  host: "0.0.0.0" # Server bind address
+  port: 8000 # Server port
+  api_key: null # API key for authentication (null for no auth)
+  # Local transport safety ceiling only; Gemini Web remains authoritative for its actual input limit.
+  max_request_body_bytes: 268435456 # 256 MiB; set to 0 to disable the wrapper-side safeguard
+  # Regex budget for validating one response against a client-supplied JSON Schema.
+  # Exhausting it leaves the reply unverified rather than failing it.
+  schema_validation_budget_seconds: 1.0
   https:
-    enabled: false                     # Enable HTTPS
-    key_file: "certs/privkey.pem"      # SSL private key file path
-    cert_file: "certs/fullchain.pem"   # SSL certificate file path
+    enabled: false # Enable HTTPS
+    key_file: "certs/privkey.pem" # SSL private key file path
+    cert_file: "certs/fullchain.pem" # SSL certificate file path
 
 cors:
-  enabled: true            # Enable CORS
+  enabled: true # Enable CORS
   allow_origins: ["*"]
   allow_credentials: true
   allow_methods: ["*"]
@@ -18,26 +23,34 @@ cors:
 
 gemini:
   clients:
-    - id: "example-id-1"   # Arbitrary client ID
-      secure_1psid: "YOUR_SECURE_1PSID_HERE"
-      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
-      proxy: null          # Optional proxy URL (null/empty means direct connection)
-  timeout: 600             # Init timeout in seconds (Not less than 30s)
-  watchdog_timeout: 300    # Watchdog timeout in seconds (Not less than 30s)
-  auto_refresh: true       # Auto-refresh session cookies
-  refresh_interval: 600    # Refresh interval in seconds (Not less than 60s)
-  verbose: false           # Enable verbose logging for Gemini requests
-  max_chars_per_request: 1000000     # Maximum characters Gemini Web accepts per request. Non-pro users might have a lower limit
-  oversized_context_strategy: "compaction" # "compaction" summarizes older turns when oversized; "file" sends oversized context as attached file
-  chat_mode: "normal"     # "normal" reuses Google chat metadata; "temporary" sends with Google's temporary mode (not saved to account) and uses a 90% effective input limit
-  model_strategy: "append" # Strategy: 'append' (default + custom) or 'overwrite' (custom only)
-  models: []
+    - id: "client-id-1" # Arbitrary client ID
+      secure_1psid: "YOUR_SECURE_1PSID_HERE" # Gemini Secure 1PSID
+      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE" # Gemini Secure 1PSIDTS
+      proxy: null # Optional proxy URL (null/empty means direct connection)
+      impersonate: null # Optional browser impersonation target (null uses library default)
+  timeout: 450 # Init timeout in seconds (Not less than 30s)
+  watchdog_timeout: 120 # Watchdog timeout in seconds (Not less than 30s)
+  auto_refresh: true # Auto-refresh session cookies
+  refresh_interval: 600 # Refresh interval in seconds (Not less than 60s)
+  auto_close: false # Automatically close Gemini session after inactivity
+  close_delay: 900 # Inactivity delay in seconds before auto-closing (Not less than 30s)
+  verbose: true # Enable verbose logging for Gemini requests
+  extended_thinking: false # Enable Gemini extended thinking mode for message generation
+  max_chars_per_request: 1000000 # Maximum characters Gemini Web accepts per request. Non-pro users might have a lower limit
+  allow_private_url_fetch: false # Allow server-side fetching of private/loopback image URLs (SSRF risk; default blocks them)
+  url_fetch_timeout: 15 # Timeout in seconds for server-side URL image fetches
+  # "normal" uses standard Google chats; "temporary" uses Google's temporary mode (not saved to the account) with a tighter input limit.
+  # WARNING: Google may close a temporary window at any time mid-conversation. The reply can then come back without the earlier
+  # context instead of erroring, so the loss may be silent. Prefer "normal" for long or context-sensitive conversations.
+  chat_mode: "normal"
+  # Guest client health policy: "strict" fails if any client is unhealthy; "adaptive" fails only if all are unhealthy; "permissive" only logs a warning.
+  guest_mode: "adaptive"
 
 storage:
-  path: "data/lmdb"        # Database storage path
-  images_path: "data/images" # Image storage path
-  max_size: 268435456      # Maximum database size (256 MB)
-  retention_days: 14       # Number of days to retain conversations before cleanup
+  path: "data/lmdb" # Database storage path
+  media_path: "data/media" # Media storage path
+  max_size: 268435456 # Maximum database size (256 MB)
+  retention_days: 14 # Number of days to retain conversations before cleanup
 
 logging:
-  level: "INFO"            # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "DEBUG" # Log level: DEBUG, INFO, WARNING, ERROR
