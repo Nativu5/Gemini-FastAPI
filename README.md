@@ -404,6 +404,24 @@ different model.
 > pinning requests to a stale model. Both keys are simply ignored if left in a config file or
 > environment.
 
+### Policy Gems
+
+Managed gem support (`gemini.gems`) is **disabled by default** (`enabled: false`, `policy: "off"`).
+When enabled on an authenticated client, the server can synchronize built-in policy gems and map
+leading system prompts to deduplicated server-managed gems so repeated system instructions do not
+have to be re-sent in full on every new conversation:
+
+- `off`: No startup gem sync or request-time gem attachment.
+- `fetch_only`: Reads existing prefixed gems (`fastapi_policy_...`) without creating, updating, or deleting gems in the Google account.
+- `create_on_demand`: Creates/updates missing managed gems up to `create_rate_limit_per_minute` and `managed_gems_max_total`, and optionally cleans up unused managed gems when `cleanup.enabled: true`.
+
+> [!WARNING]
+> Enabling `create_on_demand` or `cleanup.enabled: true` creates, updates, or deletes custom gems
+> in the associated Google account. Guest sessions (`is_guest()`) cannot use gems and automatically
+> skip gem sync and fall back to inline system prompts.
+
+See the `gemini.gems` block in [`config/config.yaml`](config/config.yaml) for all options.
+
 ## Acknowledgments
 
 - [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API) - The underlying Gemini web API client

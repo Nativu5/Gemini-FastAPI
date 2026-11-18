@@ -65,7 +65,7 @@ from app.server.middleware import (
 )
 from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from app.utils import g_config
-from app.utils.config import ChatMode
+from app.utils.config import ChatMode, GeminiGemPolicyMode
 from app.utils.helper import (
     SCHEMA_ADHERENCE_PROMPT,
     STREAM_FLUSH_TAIL_RE,
@@ -88,6 +88,7 @@ from app.utils.helper import (
     serialize_tool_choice_for_response,
     serialize_tools_for_response,
     strip_system_hints,
+    text_from_message,
     validate_json_schema,
 )
 
@@ -638,6 +639,58 @@ def _prepare_messages_for_model(
         append_tool_hint_to_last_user_message(prepared)
 
     return prepared
+
+
+def _extract_leading_system_prompt(
+    messages: list[AppMessage],
+) -> tuple[str | None, list[AppMessage]]:
+    """Extract and remove leading text-only system messages, returning joined system text."""
+    if not messages:
+        return None, messages
+
+    idx = 0
+    system_parts: list[str] = []
+    while idx < len(messages) and messages[idx].role == "system":
+        msg = messages[idx]
+        if isinstance(msg.content, list) and any(item.type != "text" for item in msg.content):
+            break
+        text = text_from_message(msg).strip()
+        if text:
+            system_parts.append(text)
+        idx += 1
+
+    if not system_parts:
+        return None, messages
+
+    return "\n\n".join(system_parts), messages[idx:]
+
+
+def _system_prompt_gem_enabled() -> bool:
+    """Return whether leading system prompts may be offloaded to managed gems."""
+    gem_cfg = g_config.gemini.gems
+    return gem_cfg.enabled and gem_cfg.policy in (
+        GeminiGemPolicyMode.FETCH_ONLY,
+        GeminiGemPolicyMode.CREATE_ON_DEMAND,
+    )
+
+
+async def _resolve_system_prompt_gem(
+    client: GeminiClientWrapper,
+    system_prompt_text: str | None,
+    *,
+    system_only: bool,
+) -> str | None:
+    """Resolve or create a managed gem for the leading system prompt, falling back on error."""
+    if not system_prompt_text or system_only or not _system_prompt_gem_enabled():
+        return None
+    try:
+        return await client.system_prompt_gem_id_or_create(system_prompt_text)
+    except Exception as exc:
+        logger.warning(
+            f"Failed to resolve managed system-prompt gem on client {client.id}; "
+            f"falling back to inline system prompt: {exc}"
+        )
+        return None
 
 
 def _convert_responses_to_app_messages(
@@ -2590,7 +2643,11 @@ async def create_chat_completion(
     extra_instr = [structured_requirement.instruction] if structured_requirement else None
 
     app_messages = convert_to_app_messages(request.messages)
+    system_prompt_text, non_system_messages = _extract_leading_system_prompt(app_messages)
+    system_only_request = bool(system_prompt_text) and not non_system_messages
 
+    # Canonical full history (including leading system prompt) is used for LMDB reuse/persistence
+    # and internal fallback replay so changing or removing a system prompt never reuses a stale gem.
     msgs = _prepare_messages_for_model(
         app_messages,
         request.tools,
@@ -2608,6 +2665,12 @@ async def create_chat_completion(
         if not remain:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
 
+        assert client is not None
+        if managed_system_gem_id := await _resolve_system_prompt_gem(
+            client, system_prompt_text, system_only=system_only_request
+        ):
+            session.gem = managed_system_gem_id
+
         input_msgs = _prepare_messages_for_model(
             remain,
             request.tools,
@@ -2623,8 +2686,24 @@ async def create_chat_completion(
     else:
         try:
             client = await pool.acquire(require_account=needs_upload)
-            session = client.start_chat(model=client.usable_model(resolved_model))
-            m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
+            managed_system_gem_id = await _resolve_system_prompt_gem(
+                client, system_prompt_text, system_only=system_only_request
+            )
+            send_msgs = (
+                _prepare_messages_for_model(
+                    non_system_messages,
+                    request.tools,
+                    request.tool_choice,
+                    extra_instr,
+                )
+                if managed_system_gem_id
+                else msgs
+            )
+            session = client.start_chat(
+                model=client.usable_model(resolved_model),
+                gem=managed_system_gem_id,
+            )
+            m_input, files = await GeminiClientWrapper.process_conversation(send_msgs, tmp_dir)
         except Exception as e:
             logger.error(f"Error in preparing conversation: {e}")
             raise HTTPException(
@@ -2885,6 +2964,9 @@ async def create_response(
         request.tool_choice if isinstance(request.tool_choice, (str, ToolChoiceFunction)) else None
     )
 
+    system_prompt_text, conv_without_system = _extract_leading_system_prompt(conv_messages)
+    system_only_conversation = bool(system_prompt_text) and not conv_without_system
+
     messages = _prepare_messages_for_model(
         conv_messages,
         standard_tools or None,
@@ -2912,6 +2994,11 @@ async def create_response(
         )
         if not msgs:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
+        assert client is not None
+        if managed_system_gem_id := await _resolve_system_prompt_gem(
+            client, system_prompt_text, system_only=system_only_conversation
+        ):
+            session.gem = managed_system_gem_id
         m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
         logger.debug(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(msgs)} prepared messages."
@@ -2919,8 +3006,24 @@ async def create_response(
     else:
         try:
             client = await pool.acquire(require_account=needs_upload)
-            session = client.start_chat(model=client.usable_model(resolved_model))
-            m_input, files = await GeminiClientWrapper.process_conversation(messages, tmp_dir)
+            managed_system_gem_id = await _resolve_system_prompt_gem(
+                client, system_prompt_text, system_only=system_only_conversation
+            )
+            send_messages = (
+                _prepare_messages_for_model(
+                    conv_without_system,
+                    standard_tools or None,
+                    model_tool_choice,
+                    extra_instr or None,
+                )
+                if managed_system_gem_id
+                else messages
+            )
+            session = client.start_chat(
+                model=client.usable_model(resolved_model),
+                gem=managed_system_gem_id,
+            )
+            m_input, files = await GeminiClientWrapper.process_conversation(send_messages, tmp_dir)
         except Exception as e:
             logger.error(f"Error in preparing conversation: {e}")
             raise HTTPException(

@@ -374,6 +374,22 @@ export CONFIG_GEMINI__GUEST_MODE="adaptive"
 > 硬编码的请求头反而有把请求固定在过时模型上的风险。若配置文件或环境变量中仍保留这两个键，
 > 将被直接忽略。
 
+### 策略 Gem
+
+托管 Gem 功能（`gemini.gems`）**默认关闭**（`enabled: false`、`policy: "off"`）。
+在已认证的客户端上启用后，服务端可以同步内置策略 Gem，并将前置系统提示词映射为去重的
+服务端托管 Gem，从而避免每次新建对话都重复发送完整系统指令：
+
+- `off`：不在启动时同步 Gem，也不在请求时附加 Gem。
+- `fetch_only`：仅读取已有的带前缀托管 Gem（`fastapi_policy_...`），不会在 Google 账号中创建、更新或删除 Gem。
+- `create_on_demand`：在 `create_rate_limit_per_minute` 与 `managed_gems_max_total` 限制内按需创建或更新托管 Gem；启用 `cleanup.enabled: true` 时可自动清理长期未使用的托管 Gem。
+
+> [!WARNING]
+> 启用 `create_on_demand` 或 `cleanup.enabled: true` 会在关联的 Google 账号中创建、更新或删除自定义 Gem。
+> 访客会话（`is_guest()`）不支持 Gem，会自动跳过 Gem 同步并回退为内联系统提示词。
+
+完整配置项请参阅 [`config/config.yaml`](config/config.yaml) 中的 `gemini.gems` 部分。
+
 ## 鸣谢
 
 - [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API) - 底层 Gemini Web API 客户端
