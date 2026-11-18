@@ -1859,9 +1859,9 @@ def _create_responses_real_streaming_response(
     async def generate_stream():
         seq = 0
 
-        def make_event(etype: str, data: dict) -> str:
+        def make_event(etype: str, fields: dict) -> str:
             nonlocal seq
-            data["sequence_number"] = seq
+            data = {**base_event, "type": etype, **fields, "sequence_number": seq}
             seq += 1
             return f"event: {etype}\ndata: {orjson.dumps(data).decode()}\n\n"
 
@@ -1882,8 +1882,6 @@ def _create_responses_real_streaming_response(
             yield make_event(
                 "response.created",
                 {
-                    **base_event,
-                    "type": "response.created",
                     "response": {
                         "id": response_id,
                         "object": "response",
@@ -1902,8 +1900,6 @@ def _create_responses_real_streaming_response(
             yield make_event(
                 "response.in_progress",
                 {
-                    **base_event,
-                    "type": "response.in_progress",
                     "response": {
                         "id": response_id,
                         "object": "response",
@@ -1929,6 +1925,139 @@ def _create_responses_real_streaming_response(
             message_index = 0
             suppressor = StreamingOutputFilter()
 
+            def open_thought() -> list[str]:
+                """Events that start the reasoning item, unless one is open."""
+                nonlocal thought_open, thought_index, next_output_index
+                if thought_open:
+                    return []
+                thought_open = True
+                thought_index = next_output_index
+                next_output_index += 1
+                return [
+                    make_event(
+                        "response.output_item.added",
+                        {
+                            "output_index": thought_index,
+                            "item": dump_model(
+                                ResponseReasoningItem(
+                                    id=thought_item_id,
+                                    type="reasoning",
+                                    status="in_progress",
+                                    summary=[],
+                                )
+                            ),
+                        },
+                    ),
+                    make_event(
+                        "response.reasoning_summary_part.added",
+                        {
+                            "item_id": thought_item_id,
+                            "output_index": thought_index,
+                            "summary_index": 0,
+                            "part": dump_model(SummaryTextContent(text="")),
+                        },
+                    ),
+                ]
+
+            def thought_delta(delta: str) -> str:
+                return make_event(
+                    "response.reasoning_summary_text.delta",
+                    {
+                        "item_id": thought_item_id,
+                        "output_index": thought_index,
+                        "summary_index": 0,
+                        "delta": delta,
+                    },
+                )
+
+            def close_thought() -> list[str]:
+                """Events that finish the reasoning item, if one is open."""
+                nonlocal thought_open
+                if not thought_open:
+                    return []
+                thought_open = False
+                return [
+                    make_event(
+                        "response.reasoning_summary_text.done",
+                        {
+                            "item_id": thought_item_id,
+                            "output_index": thought_index,
+                            "summary_index": 0,
+                            "text": full_thoughts,
+                        },
+                    ),
+                    make_event(
+                        "response.reasoning_summary_part.done",
+                        {
+                            "item_id": thought_item_id,
+                            "output_index": thought_index,
+                            "summary_index": 0,
+                            "part": dump_model(SummaryTextContent(text=full_thoughts)),
+                        },
+                    ),
+                    make_event(
+                        "response.output_item.done",
+                        {
+                            "output_index": thought_index,
+                            "item": dump_model(
+                                ResponseReasoningItem(
+                                    id=thought_item_id,
+                                    type="reasoning",
+                                    status="completed",
+                                    summary=[SummaryTextContent(text=full_thoughts)],
+                                )
+                            ),
+                        },
+                    ),
+                ]
+
+            def open_message() -> list[str]:
+                """Events that start the assistant message, unless it is open."""
+                nonlocal message_open, message_index, next_output_index
+                if message_open:
+                    return []
+                message_open = True
+                message_index = next_output_index
+                next_output_index += 1
+                return [
+                    make_event(
+                        "response.output_item.added",
+                        {
+                            "output_index": message_index,
+                            "item": dump_model(
+                                ResponseOutputMessage(
+                                    id=message_item_id,
+                                    type="message",
+                                    status="in_progress",
+                                    role="assistant",
+                                    content=[],
+                                )
+                            ),
+                        },
+                    ),
+                    make_event(
+                        "response.content_part.added",
+                        {
+                            "item_id": message_item_id,
+                            "output_index": message_index,
+                            "content_index": 0,
+                            "part": dump_model(ResponseOutputText(type="output_text", text="")),
+                        },
+                    ),
+                ]
+
+            def text_delta(delta: str) -> str:
+                return make_event(
+                    "response.output_text.delta",
+                    {
+                        "item_id": message_item_id,
+                        "output_index": message_index,
+                        "content_index": 0,
+                        "delta": delta,
+                        "logprobs": [],
+                    },
+                )
+
             try:
                 if hasattr(resp_or_stream, "__aiter__"):
                     generator = cast(AsyncGenerator[ModelOutput], resp_or_stream)
@@ -1943,145 +2072,23 @@ def _create_responses_real_streaming_response(
                     last_output = chunk
 
                     if chunk.thoughts_delta:
-                        if not thought_open:
-                            thought_index = next_output_index
-                            next_output_index += 1
-                            yield make_event(
-                                "response.output_item.added",
-                                {
-                                    **base_event,
-                                    "type": "response.output_item.added",
-                                    "output_index": thought_index,
-                                    "item": dump_model(
-                                        ResponseReasoningItem(
-                                            id=thought_item_id,
-                                            type="reasoning",
-                                            status="in_progress",
-                                            summary=[],
-                                        )
-                                    ),
-                                },
-                            )
-
-                            yield make_event(
-                                "response.reasoning_summary_part.added",
-                                {
-                                    **base_event,
-                                    "type": "response.reasoning_summary_part.added",
-                                    "item_id": thought_item_id,
-                                    "output_index": thought_index,
-                                    "summary_index": 0,
-                                    "part": dump_model(SummaryTextContent(text="")),
-                                },
-                            )
-                            thought_open = True
+                        for event in open_thought():
+                            yield event
 
                         full_thoughts += chunk.thoughts_delta
-                        yield make_event(
-                            "response.reasoning_summary_text.delta",
-                            {
-                                **base_event,
-                                "type": "response.reasoning_summary_text.delta",
-                                "item_id": thought_item_id,
-                                "output_index": thought_index,
-                                "summary_index": 0,
-                                "delta": chunk.thoughts_delta,
-                            },
-                        )
+                        yield thought_delta(chunk.thoughts_delta)
 
                     if chunk.text_delta:
                         full_text += chunk.text_delta
-                        if thought_open:
-                            yield make_event(
-                                "response.reasoning_summary_text.done",
-                                {
-                                    **base_event,
-                                    "type": "response.reasoning_summary_text.done",
-                                    "item_id": thought_item_id,
-                                    "output_index": thought_index,
-                                    "summary_index": 0,
-                                    "text": full_thoughts,
-                                },
-                            )
-                            yield make_event(
-                                "response.reasoning_summary_part.done",
-                                {
-                                    **base_event,
-                                    "type": "response.reasoning_summary_part.done",
-                                    "item_id": thought_item_id,
-                                    "output_index": thought_index,
-                                    "summary_index": 0,
-                                    "part": dump_model(SummaryTextContent(text=full_thoughts)),
-                                },
-                            )
-                            yield make_event(
-                                "response.output_item.done",
-                                {
-                                    **base_event,
-                                    "type": "response.output_item.done",
-                                    "output_index": thought_index,
-                                    "item": dump_model(
-                                        ResponseReasoningItem(
-                                            id=thought_item_id,
-                                            type="reasoning",
-                                            status="completed",
-                                            summary=[SummaryTextContent(text=full_thoughts)],
-                                        )
-                                    ),
-                                },
-                            )
-                            thought_open = False
+                        for event in close_thought():
+                            yield event
 
                         if not structured_requirement:
-                            if not message_open:
-                                message_index = next_output_index
-                                next_output_index += 1
-                                yield make_event(
-                                    "response.output_item.added",
-                                    {
-                                        **base_event,
-                                        "type": "response.output_item.added",
-                                        "output_index": message_index,
-                                        "item": dump_model(
-                                            ResponseOutputMessage(
-                                                id=message_item_id,
-                                                type="message",
-                                                status="in_progress",
-                                                role="assistant",
-                                                content=[],
-                                            )
-                                        ),
-                                    },
-                                )
-
-                                yield make_event(
-                                    "response.content_part.added",
-                                    {
-                                        **base_event,
-                                        "type": "response.content_part.added",
-                                        "item_id": message_item_id,
-                                        "output_index": message_index,
-                                        "content_index": 0,
-                                        "part": dump_model(
-                                            ResponseOutputText(type="output_text", text="")
-                                        ),
-                                    },
-                                )
-                                message_open = True
+                            for event in open_message():
+                                yield event
 
                             if visible := suppressor.process(chunk.text_delta):
-                                yield make_event(
-                                    "response.output_text.delta",
-                                    {
-                                        **base_event,
-                                        "type": "response.output_text.delta",
-                                        "item_id": message_item_id,
-                                        "output_index": message_index,
-                                        "content_index": 0,
-                                        "delta": visible,
-                                        "logprobs": [],
-                                    },
-                                )
+                                yield text_delta(visible)
 
                     for img in chunk.images or []:
                         if img.url and img.url not in seen_image_urls:
@@ -2101,8 +2108,6 @@ def _create_responses_real_streaming_response(
                 yield make_event(
                     "error",
                     {
-                        **base_event,
-                        "type": "error",
                         "error": {"message": f"Streaming error occurred: {e}"},
                     },
                 )
@@ -2116,49 +2121,10 @@ def _create_responses_real_streaming_response(
                     if lt_len > ct_len and l_thoughts.startswith(full_thoughts):
                         drift_t = l_thoughts[ct_len:]
                         full_thoughts = l_thoughts
-                        if not thought_open:
-                            thought_index = next_output_index
-                            next_output_index += 1
-                            yield make_event(
-                                "response.output_item.added",
-                                {
-                                    **base_event,
-                                    "type": "response.output_item.added",
-                                    "output_index": thought_index,
-                                    "item": dump_model(
-                                        ResponseReasoningItem(
-                                            id=thought_item_id,
-                                            type="reasoning",
-                                            status="in_progress",
-                                            summary=[],
-                                        )
-                                    ),
-                                },
-                            )
-                            yield make_event(
-                                "response.reasoning_summary_part.added",
-                                {
-                                    **base_event,
-                                    "type": "response.reasoning_summary_part.added",
-                                    "item_id": thought_item_id,
-                                    "output_index": thought_index,
-                                    "summary_index": 0,
-                                    "part": dump_model(SummaryTextContent(text="")),
-                                },
-                            )
-                            thought_open = True
+                        for event in open_thought():
+                            yield event
 
-                        yield make_event(
-                            "response.reasoning_summary_text.delta",
-                            {
-                                **base_event,
-                                "type": "response.reasoning_summary_text.delta",
-                                "item_id": thought_item_id,
-                                "output_index": thought_index,
-                                "summary_index": 0,
-                                "delta": drift_t,
-                            },
-                        )
+                        yield thought_delta(drift_t)
 
                 if last.text:
                     l_text = last.text
@@ -2167,108 +2133,17 @@ def _create_responses_real_streaming_response(
                         drift = l_text[c_len:]
                         full_text = l_text
                         if not structured_requirement and (visible := suppressor.process(drift)):
-                            if not message_open:
-                                message_index = next_output_index
-                                next_output_index += 1
-                                yield make_event(
-                                    "response.output_item.added",
-                                    {
-                                        **base_event,
-                                        "type": "response.output_item.added",
-                                        "output_index": message_index,
-                                        "item": dump_model(
-                                            ResponseOutputMessage(
-                                                id=message_item_id,
-                                                type="message",
-                                                status="in_progress",
-                                                role="assistant",
-                                                content=[],
-                                            )
-                                        ),
-                                    },
-                                )
-                                yield make_event(
-                                    "response.content_part.added",
-                                    {
-                                        **base_event,
-                                        "type": "response.content_part.added",
-                                        "item_id": message_item_id,
-                                        "output_index": message_index,
-                                        "content_index": 0,
-                                        "part": dump_model(
-                                            ResponseOutputText(type="output_text", text="")
-                                        ),
-                                    },
-                                )
-                                message_open = True
+                            for event in open_message():
+                                yield event
 
-                            yield make_event(
-                                "response.output_text.delta",
-                                {
-                                    **base_event,
-                                    "type": "response.output_text.delta",
-                                    "item_id": message_item_id,
-                                    "output_index": message_index,
-                                    "content_index": 0,
-                                    "delta": visible,
-                                    "logprobs": [],
-                                },
-                            )
+                            yield text_delta(visible)
 
             remaining = "" if structured_requirement else suppressor.flush()
             if remaining and message_open:
-                yield make_event(
-                    "response.output_text.delta",
-                    {
-                        **base_event,
-                        "type": "response.output_text.delta",
-                        "item_id": message_item_id,
-                        "output_index": message_index,
-                        "content_index": 0,
-                        "delta": remaining,
-                        "logprobs": [],
-                    },
-                )
+                yield text_delta(remaining)
 
-            if thought_open:
-                yield make_event(
-                    "response.reasoning_summary_text.done",
-                    {
-                        **base_event,
-                        "type": "response.reasoning_summary_text.done",
-                        "item_id": thought_item_id,
-                        "output_index": thought_index,
-                        "summary_index": 0,
-                        "text": full_thoughts,
-                    },
-                )
-                yield make_event(
-                    "response.reasoning_summary_part.done",
-                    {
-                        **base_event,
-                        "type": "response.reasoning_summary_part.done",
-                        "item_id": thought_item_id,
-                        "output_index": thought_index,
-                        "summary_index": 0,
-                        "part": dump_model(SummaryTextContent(text=full_thoughts)),
-                    },
-                )
-                yield make_event(
-                    "response.output_item.done",
-                    {
-                        **base_event,
-                        "type": "response.output_item.done",
-                        "output_index": thought_index,
-                        "item": dump_model(
-                            ResponseReasoningItem(
-                                id=thought_item_id,
-                                type="reasoning",
-                                status="completed",
-                                summary=[SummaryTextContent(text=full_thoughts)],
-                            )
-                        ),
-                    },
-                )
+            for event in close_thought():
+                yield event
 
             try:
                 _, assistant_text, storage_output, detected_tool_calls = process_llm_output(
@@ -2281,8 +2156,6 @@ def _create_responses_real_streaming_response(
                 yield make_event(
                     "error",
                     {
-                        **base_event,
-                        "type": "error",
                         "error": {
                             "message": str(exc),
                             "type": "invalid_model_output",
@@ -2294,49 +2167,9 @@ def _create_responses_real_streaming_response(
                 return
 
             if structured_requirement and assistant_text and not message_open:
-                message_index = next_output_index
-                next_output_index += 1
-                yield make_event(
-                    "response.output_item.added",
-                    {
-                        **base_event,
-                        "type": "response.output_item.added",
-                        "output_index": message_index,
-                        "item": dump_model(
-                            ResponseOutputMessage(
-                                id=message_item_id,
-                                type="message",
-                                status="in_progress",
-                                role="assistant",
-                                content=[],
-                            )
-                        ),
-                    },
-                )
-                yield make_event(
-                    "response.content_part.added",
-                    {
-                        **base_event,
-                        "type": "response.content_part.added",
-                        "item_id": message_item_id,
-                        "output_index": message_index,
-                        "content_index": 0,
-                        "part": dump_model(ResponseOutputText(type="output_text", text="")),
-                    },
-                )
-                message_open = True
-                yield make_event(
-                    "response.output_text.delta",
-                    {
-                        **base_event,
-                        "type": "response.output_text.delta",
-                        "item_id": message_item_id,
-                        "output_index": message_index,
-                        "content_index": 0,
-                        "delta": assistant_text,
-                        "logprobs": [],
-                    },
-                )
+                for event in open_message():
+                    yield event
+                yield text_delta(assistant_text)
 
             image_items = []
             seen_hashes = {}
@@ -2390,8 +2223,6 @@ def _create_responses_real_streaming_response(
                             yield make_event(
                                 "response.output_item.added",
                                 {
-                                    **base_event,
-                                    "type": "response.output_item.added",
                                     "output_index": img_index,
                                     "item": dump_model(img_item),
                                 },
@@ -2399,60 +2230,15 @@ def _create_responses_real_streaming_response(
                             yield make_event(
                                 "response.output_item.done",
                                 {
-                                    **base_event,
-                                    "type": "response.output_item.done",
                                     "output_index": img_index,
                                     "item": dump_model(img_item),
                                 },
                             )
 
-                            if not message_open:
-                                message_index = next_output_index
-                                next_output_index += 1
-                                yield make_event(
-                                    "response.output_item.added",
-                                    {
-                                        **base_event,
-                                        "type": "response.output_item.added",
-                                        "output_index": message_index,
-                                        "item": dump_model(
-                                            ResponseOutputMessage(
-                                                id=message_item_id,
-                                                type="message",
-                                                status="in_progress",
-                                                role="assistant",
-                                                content=[],
-                                            )
-                                        ),
-                                    },
-                                )
-                                yield make_event(
-                                    "response.content_part.added",
-                                    {
-                                        **base_event,
-                                        "type": "response.content_part.added",
-                                        "item_id": message_item_id,
-                                        "output_index": message_index,
-                                        "content_index": 0,
-                                        "part": dump_model(
-                                            ResponseOutputText(type="output_text", text="")
-                                        ),
-                                    },
-                                )
-                                message_open = True
+                            for event in open_message():
+                                yield event
 
-                            yield make_event(
-                                "response.output_text.delta",
-                                {
-                                    **base_event,
-                                    "type": "response.output_text.delta",
-                                    "item_id": message_item_id,
-                                    "output_index": message_index,
-                                    "content_index": 0,
-                                    "delta": md_to_add,
-                                    "logprobs": [],
-                                },
-                            )
+                            yield text_delta(md_to_add)
                             assistant_text += md_to_add
                             storage_output += md_to_add
                             image_items.append(img_item)
@@ -2466,53 +2252,10 @@ def _create_responses_real_streaming_response(
                             ):
                                 md_to_add = f"\n\n{media_md}"
 
-                                if not message_open:
-                                    message_index = next_output_index
-                                    next_output_index += 1
-                                    yield make_event(
-                                        "response.output_item.added",
-                                        {
-                                            **base_event,
-                                            "type": "response.output_item.added",
-                                            "output_index": message_index,
-                                            "item": dump_model(
-                                                ResponseOutputMessage(
-                                                    id=message_item_id,
-                                                    type="message",
-                                                    status="in_progress",
-                                                    role="assistant",
-                                                    content=[],
-                                                )
-                                            ),
-                                        },
-                                    )
-                                    yield make_event(
-                                        "response.content_part.added",
-                                        {
-                                            **base_event,
-                                            "type": "response.content_part.added",
-                                            "item_id": message_item_id,
-                                            "output_index": message_index,
-                                            "content_index": 0,
-                                            "part": dump_model(
-                                                ResponseOutputText(type="output_text", text="")
-                                            ),
-                                        },
-                                    )
-                                    message_open = True
+                                for event in open_message():
+                                    yield event
 
-                                yield make_event(
-                                    "response.output_text.delta",
-                                    {
-                                        **base_event,
-                                        "type": "response.output_text.delta",
-                                        "item_id": message_item_id,
-                                        "output_index": message_index,
-                                        "content_index": 0,
-                                        "delta": md_to_add,
-                                        "logprobs": [],
-                                    },
-                                )
+                                yield text_delta(md_to_add)
                                 assistant_text += md_to_add
                                 storage_output += md_to_add
 
@@ -2526,8 +2269,6 @@ def _create_responses_real_streaming_response(
                 yield make_event(
                     "error",
                     {
-                        **base_event,
-                        "type": "error",
                         "error": {
                             "message": choice_error,
                             "type": "invalid_model_output",
@@ -2548,8 +2289,6 @@ def _create_responses_real_streaming_response(
                 yield make_event(
                     "response.output_text.done",
                     {
-                        **base_event,
-                        "type": "response.output_text.done",
                         "item_id": message_item_id,
                         "output_index": message_index,
                         "content_index": 0,
@@ -2558,8 +2297,6 @@ def _create_responses_real_streaming_response(
                 yield make_event(
                     "response.content_part.done",
                     {
-                        **base_event,
-                        "type": "response.content_part.done",
                         "item_id": message_item_id,
                         "output_index": message_index,
                         "content_index": 0,
@@ -2572,8 +2309,6 @@ def _create_responses_real_streaming_response(
                 yield make_event(
                     "response.output_item.done",
                     {
-                        **base_event,
-                        "type": "response.output_item.done",
                         "output_index": message_index,
                         "item": dump_model(
                             ResponseOutputMessage(
@@ -2600,8 +2335,6 @@ def _create_responses_real_streaming_response(
                 yield make_event(
                     "response.output_item.added",
                     {
-                        **base_event,
-                        "type": "response.output_item.added",
                         "output_index": tc_index,
                         "item": dump_model(tc_item),
                     },
@@ -2609,8 +2342,6 @@ def _create_responses_real_streaming_response(
                 yield make_event(
                     "response.output_item.done",
                     {
-                        **base_event,
-                        "type": "response.output_item.done",
                         "output_index": tc_index,
                         "item": dump_model(tc_item),
                     },
@@ -2652,8 +2383,6 @@ def _create_responses_real_streaming_response(
             yield make_event(
                 "response.completed",
                 {
-                    **base_event,
-                    "type": "response.completed",
                     "response": dump_model(payload),
                 },
             )
