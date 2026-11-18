@@ -17,24 +17,25 @@ are accepted and logged instead - see `_log_ignored_gemini_options`.
 
 from __future__ import annotations
 
-import io
-import reprlib
+import mimetypes
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
 
 import orjson
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from gemini_webapi import ModelOutput
 from gemini_webapi.client import ChatSession
 from loguru import logger
+from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.models import (
     AppContentItem,
     AppMessage,
+    AppMessageRole,
     AppToolCall,
     AppToolCallFunction,
     FunctionTool,
@@ -54,25 +55,23 @@ from app.models.gemini_models import (
     GeminiModelInfo,
     GeminiModelListResponse,
     GeminiPart,
+    GeminiSystemInstruction,
     GeminiUsageMetadata,
 )
 
-# Shared request/response pipeline helpers; this module owns only the Gemini wire format.
+# The request pipeline is the one the OpenAI routes use; this module adds the Gemini wire format.
 from app.server.chat import (
     StreamingOutputFilter,
     _build_structured_requirement,
-    _find_reusable_session,
     _get_available_models,
     _image_to_base64,
     _media_markdown,
     _persist_conversation,
     _prepare_messages_for_model,
     _process_media_item,
-    _requires_upload,
     _resolve_model_name,
-    _send_with_internal_fallback,
+    _send_request,
     _tool_choice_failure,
-    _use_temporary_chat_mode,
 )
 from app.server.middleware import (
     get_media_store_dir,
@@ -110,8 +109,7 @@ def add_exception_handlers(app: FastAPI) -> None:
 
     def error(request: Request, status_code: int, message: str) -> JSONResponse:
         if request.url.path.startswith("/v1beta/"):
-            grpc_status = _GRPC_STATUS.get(status_code, "INTERNAL")
-            return _error_response(status_code, message, grpc_status)
+            return _error_response(status_code, message)
         return openai_error(status_code, message)
 
     @app.exception_handler(StarletteHTTPException)
@@ -141,60 +139,37 @@ def _inline_data_item(inline: GeminiInlineData) -> AppContentItem:
 
 def _gemini_contents_to_messages(
     contents: list[GeminiContent],
-    system_instruction: Any | None = None,
+    system_instruction: GeminiSystemInstruction | None = None,
 ) -> list[AppMessage]:
-    """Convert Gemini contents + systemInstruction into internal AppMessage list.
+    """Convert Gemini contents and systemInstruction into internal messages.
 
-    Handles:
-    - role="model" + functionCall → assistant message + tool_calls
-    - role="user"/"function" + functionResponse → tool messages
-    - multiple functionResponse parts → multiple tool messages
-    - multi-modal parts keep original order (text/image interleaved)
+    - a `model` turn with functionCall parts becomes an assistant message with tool calls
+    - every functionResponse part becomes a tool message, whatever role carried it
+    - text and inline data keep the order they were sent in
     """
     messages: list[AppMessage] = []
+    if system_instruction and (texts := [p.text for p in system_instruction.parts if p.text]):
+        messages.append(AppMessage(role="system", content="\n".join(texts)))
 
-    if system_instruction:
-        sys_parts = (
-            system_instruction.parts
-            if hasattr(system_instruction, "parts")
-            else (system_instruction.get("parts") or [])
-        )
-        if sys_texts := [p.text for p in sys_parts if p.text]:
-            messages.append(AppMessage(role="system", content="\n".join(sys_texts)))
-
+    roles: dict[str | None, AppMessageRole] = {"model": "assistant", "function": "tool"}
     for content in contents:
-        role = content.role or "user"
-        parts = content.parts or []
-
-        internal_role = cast(Literal["system", "user", "assistant", "tool"], role)
-        if role == "model":
-            internal_role = "assistant"
-        elif role == "function":
-            internal_role = "tool"
-
-        text_fragments: list[str] = []
-        content_items: list[AppContentItem] = []
+        role = roles.get(content.role, "user")
+        texts = []
+        items: list[AppContentItem] = []  # text and files, in order
+        has_file = False
         tool_calls: list[AppToolCall] = []
-        function_responses: list[tuple[str | None, str]] = []  # (name, content_json)
+        tool_results: list[AppMessage] = []
 
-        for part in parts:
+        for part in content.parts:
             if part.thought:
                 # A thought this server returned, replayed by the client: not part of the answer.
                 continue
             if part.text is not None:
-                text_fragments.append(part.text)
-
+                texts.append(part.text)
+                items.append(AppContentItem(type="text", text=part.text))
             if part.inlineData:
-                content_items.append(_inline_data_item(part.inlineData))
-
-            if part.fileData:
-                # Unreachable via the routes, which reject fileData up front; kept so a direct
-                # caller of this converter degrades instead of silently mis-building a prompt.
-                logger.warning(
-                    "[Gemini API] Skipping fileData part "
-                    f"(unsupported): {reprlib.repr(part.fileData.fileUri)}"
-                )
-
+                items.append(_inline_data_item(part.inlineData))
+                has_file = True
             if part.functionCall:
                 tool_calls.append(
                     AppToolCall(
@@ -202,53 +177,33 @@ def _gemini_contents_to_messages(
                         # invented here must not vary between requests, or the same history
                         # would stop matching the chat stored for it.
                         id=f"call_{len(tool_calls)}",
-                        type="function",
                         function=AppToolCallFunction(
                             name=part.functionCall.name,
-                            arguments=(
-                                orjson.dumps(part.functionCall.args).decode("utf-8")
-                                if part.functionCall.args
-                                else "{}"
-                            ),
+                            arguments=orjson.dumps(part.functionCall.args or {}).decode(),
                         ),
                     )
                 )
-
             if part.functionResponse:
-                resp_content = orjson.dumps(part.functionResponse.response).decode("utf-8")
-                function_responses.append((part.functionResponse.name, resp_content))
+                tool_results.append(
+                    AppMessage(
+                        role="tool",
+                        content=orjson.dumps(part.functionResponse.response).decode(),
+                        name=part.functionResponse.name,
+                    )
+                )
 
-        if function_responses:
-            # functionResponse → tool messages regardless of original role
-            for fn_name, fn_content in function_responses:
-                messages.append(AppMessage(role="tool", content=fn_content, name=fn_name))
-            if text_fragments and internal_role != "tool":
-                messages.append(AppMessage(role=internal_role, content="\n".join(text_fragments)))
+        text = "\n".join(texts)
+        if tool_results:
+            messages += tool_results
+            if texts and role != "tool":
+                messages.append(AppMessage(role=role, content=text))
         elif tool_calls:
-            msg_content = "\n".join(text_fragments) if text_fragments else None
             messages.append(
-                AppMessage(role="assistant", content=msg_content, tool_calls=tool_calls)
+                AppMessage(role="assistant", content=text if texts else None, tool_calls=tool_calls)
             )
-        elif content_items or text_fragments:
-            if content_items:
-                # keep original interleaved text/image order
-                ordered_items: list[AppContentItem] = []
-                text_idx, media_idx = 0, 0
-                for part in parts:
-                    if part.text is not None and text_idx < len(text_fragments):
-                        ordered_items.append(
-                            AppContentItem(type="text", text=text_fragments[text_idx])
-                        )
-                        text_idx += 1
-                    elif (part.inlineData or part.fileData) and media_idx < len(content_items):
-                        ordered_items.append(content_items[media_idx])
-                        media_idx += 1
-                messages.append(AppMessage(role=internal_role, content=ordered_items))
-            else:
-                messages.append(AppMessage(role=internal_role, content="\n".join(text_fragments)))
         else:
-            # empty parts: still create a message to keep conversation structure
-            messages.append(AppMessage(role=internal_role, content=""))
+            # Parts with nothing in them still make a message, to keep the turn structure.
+            messages.append(AppMessage(role=role, content=items if has_file else text))
 
     return messages
 
@@ -278,7 +233,7 @@ def _gemini_tools_to_internal(
     tool_choice: Literal["none", "auto", "required"] | ToolChoiceFunction | None = None
     if tool_config and tool_config.functionCallingConfig:
         call_config = tool_config.functionCallingConfig
-        mode = call_config.mode.upper()
+        mode = call_config.mode
 
         # Google: "This should only be set when the Mode is ANY or VALIDATED." Acting on it
         # under AUTO or NONE would hide tools the upstream would still have offered.
@@ -305,74 +260,56 @@ def _gemini_tools_to_internal(
     return internal_tools or None, tool_choice
 
 
-def _to_gemini_response(
-    visible_text: str | None,
-    tool_calls: list[Any],
-    thoughts: str | None,
-    usage_tuple: tuple[int, int, int, int],
-    model_name: str,
-    image_parts: list[GeminiPart] | None = None,
-) -> GeminiGenerateContentResponse:
-    """Convert the internal processing result into a Gemini API response."""
-    parts: list[GeminiPart] = []
+def _function_call_parts(tool_calls: list[AppToolCall]) -> list[GeminiPart]:
+    return [
+        GeminiPart(
+            functionCall=GeminiFunctionCall(
+                name=call.function.name, args=orjson.loads(call.function.arguments)
+            )
+        )
+        for call in tool_calls
+    ]
 
-    if thoughts:
-        parts.append(GeminiPart(text=thoughts, thought=True))
 
-    if visible_text:
-        parts.append(GeminiPart(text=visible_text))
-
-    if image_parts:
-        parts.extend(image_parts)
-
-    for tc in tool_calls:
-        fn = tc.function if hasattr(tc, "function") else tc.get("function", {})
-        fn_name = fn.name if hasattr(fn, "name") else fn.get("name", "")
-        fn_args_raw = fn.arguments if hasattr(fn, "arguments") else fn.get("arguments", "{}")
-        try:
-            fn_args = orjson.loads(fn_args_raw) if isinstance(fn_args_raw, str) else fn_args_raw
-        except orjson.JSONDecodeError:
-            fn_args = {}
-        parts.append(GeminiPart(functionCall=GeminiFunctionCall(name=fn_name, args=fn_args)))
-
-    finish_reason = "STOP"
-    p_tok, c_tok, t_tok, r_tok = usage_tuple
-
-    candidate = GeminiCandidate(
-        content=GeminiContent(role="model", parts=parts),
-        finishReason=finish_reason,
-        index=0,
-    )
-
-    usage_meta = GeminiUsageMetadata(
-        promptTokenCount=p_tok,
-        candidatesTokenCount=c_tok - r_tok,
-        totalTokenCount=t_tok,
-        thoughtsTokenCount=r_tok if r_tok > 0 else None,
-    )
-
-    return GeminiGenerateContentResponse(
-        candidates=[candidate],
-        usageMetadata=usage_meta,
-        modelVersion=model_name,
+def _usage_metadata(usage: tuple[int, int, int, int]) -> GeminiUsageMetadata:
+    prompt, completion, total, reasoning = usage
+    return GeminiUsageMetadata(
+        promptTokenCount=prompt,
+        candidatesTokenCount=completion - reasoning,
+        totalTokenCount=total,
+        thoughtsTokenCount=reasoning or None,
     )
 
 
-def _to_gemini_error(status_code: int, message: str, grpc_status: str) -> GeminiErrorResponse:
-    """Build a Google API standard error response."""
-    return GeminiErrorResponse(
-        error=GeminiErrorDetail(
-            code=status_code,
-            message=message,
-            status=grpc_status,
+def _sse(model: BaseModel) -> str:
+    """One SSE frame; fields that are unset are left out, as Google does."""
+    return f"data: {orjson.dumps(dump_model(model)).decode()}\n\n"
+
+
+def _part_frame(part: GeminiPart) -> str:
+    """An SSE frame that carries one part of the reply."""
+    return _sse(
+        GeminiGenerateContentResponse(
+            candidates=[GeminiCandidate(content=GeminiContent(role="model", parts=[part]), index=0)]
         )
     )
 
 
-def _error_response(status_code: int, message: str, grpc_status: str) -> JSONResponse:
+def _gemini_error(status_code: int, message: str) -> GeminiErrorResponse:
+    """An error in Google's envelope."""
+    return GeminiErrorResponse(
+        error=GeminiErrorDetail(
+            code=status_code,
+            message=message,
+            status=_GRPC_STATUS.get(status_code, "INTERNAL"),
+        )
+    )
+
+
+def _error_response(status_code: int, message: str) -> JSONResponse:
     """An HTTP error in Google's envelope."""
-    err = _to_gemini_error(status_code, message, grpc_status)
-    return JSONResponse(status_code=status_code, content=err.model_dump(mode="json"))
+    content = _gemini_error(status_code, message).model_dump(mode="json")
+    return JSONResponse(status_code=status_code, content=content)
 
 
 def _log_ignored_gemini_options(
@@ -400,7 +337,7 @@ def _log_ignored_gemini_options(
         )
 
     if request.toolConfig and (call_config := request.toolConfig.functionCallingConfig):
-        mode = call_config.mode.upper()
+        mode = call_config.mode
         if mode == "VALIDATED":
             ignored.add("toolConfig.functionCallingConfig.mode")
         if call_config.allowedFunctionNames and mode not in {"ANY", "VALIDATED"}:
@@ -434,7 +371,7 @@ def _validate_gemini_request(request: GeminiGenerateContentRequest) -> str | Non
     if request.toolConfig and request.toolConfig.functionCallingConfig:
         call_config = request.toolConfig.functionCallingConfig
         # Only meaningful in the modes that act on it; elsewhere it is ignored, not invalid.
-        if call_config.mode.upper() in {"ANY", "VALIDATED"}:
+        if call_config.mode in {"ANY", "VALIDATED"}:
             declared_names = {
                 declaration.name
                 for tool in request.tools or []
@@ -510,17 +447,11 @@ def _gemini_structured_requirement(
     return schema, requirement
 
 
-def _strip_model_prefix(model: str) -> str:
-    """Strip a leading 'models/' prefix if present."""
-    return model[len("models/") :] if model.startswith("models/") else model
-
-
-def _model_data_to_gemini_info(model_data: Any) -> GeminiModelInfo:
-    """Convert internal ModelData into GeminiModelInfo."""
+def _model_info(model_id: str) -> GeminiModelInfo:
     return GeminiModelInfo(
-        name=f"models/{model_data.id}",
-        displayName=model_data.id,
-        description=f"Gemini model: {model_data.id}",
+        name=f"models/{model_id}",
+        displayName=model_id,
+        description=f"Gemini model: {model_id}",
         supportedGenerationMethods=["generateContent", "streamGenerateContent"],
     )
 
@@ -534,31 +465,19 @@ async def gemini_list_models(api_key: str = Depends(verify_gemini_api_key)):
     if not models:
         logger.warning("[Gemini API] Model list is empty")
 
-    gemini_models = [_model_data_to_gemini_info(m) for m in models]
-    return GeminiModelListResponse(models=gemini_models)
+    return GeminiModelListResponse(models=[_model_info(m.id) for m in models])
 
 
 @router.get("/v1beta/models/{model:path}")
 async def gemini_get_model(model: str, api_key: str = Depends(verify_gemini_api_key)):
     """Get one model's info (Gemini API format)."""
-    model_name = _strip_model_prefix(model)
+    model_name = model.removeprefix("models/")
     try:
         _resolve_model_name(GeminiClientPool(), model_name)
     except ValueError as exc:
-        return _error_response(404, str(exc), "NOT_FOUND")
-
-    all_models = await _get_available_models(GeminiClientPool())
-    for m in all_models:
-        if m.id == model_name:
-            return _model_data_to_gemini_info(m)
-
-    # Model exists but not listed (e.g. resolved directly from gemini-webapi constants)
-    return GeminiModelInfo(
-        name=f"models/{model_name}",
-        displayName=model_name,
-        description=f"Gemini model: {model_name}",
-        supportedGenerationMethods=["generateContent", "streamGenerateContent"],
-    )
+        return _error_response(404, str(exc))
+    # Reported under the name it was asked for, which may be an alias the list does not show.
+    return _model_info(model_name)
 
 
 class _SentRequest(NamedTuple):
@@ -578,112 +497,52 @@ class _SentRequest(NamedTuple):
 
 async def _send_gemini_request(
     model: str, request: GeminiGenerateContentRequest, tmp_dir: Path, *, stream: bool
-) -> _SentRequest | JSONResponse:
-    """Validate a generation request and send it upstream, or return the error to answer with."""
-    model_name = _strip_model_prefix(model)
+) -> _SentRequest:
+    """Validate a generation request and send it upstream.
 
+    Raises `HTTPException`, which the app answers in Google's envelope.
+    """
+    model_name = model.removeprefix("models/")
+    pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
-        model_obj = _resolve_model_name(GeminiClientPool(), model_name)
+        resolved_model = _resolve_model_name(pool, model_name)
     except ValueError as exc:
-        return _error_response(400, str(exc), "INVALID_ARGUMENT")
-
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if validation_error := _validate_gemini_request(request):
-        return _error_response(400, validation_error, "INVALID_ARGUMENT")
+        raise HTTPException(status_code=400, detail=validation_error)
     response_schema, structured_requirement = _gemini_structured_requirement(request)
     _log_ignored_gemini_options(request, response_schema)
 
     messages = _gemini_contents_to_messages(request.contents, request.systemInstruction)
-    internal_tools, tool_choice = _gemini_tools_to_internal(request.tools, request.toolConfig)
+    tools, tool_choice = _gemini_tools_to_internal(request.tools, request.toolConfig)
+    instructions = [structured_requirement.instruction] if structured_requirement else None
+    prepared = _prepare_messages_for_model(messages, tools, tool_choice, instructions)
 
-    extra_instr = [structured_requirement.instruction] if structured_requirement else None
-    msgs = _prepare_messages_for_model(messages, internal_tools, tool_choice, extra_instr)
-
-    pool, db = GeminiClientPool(), LMDBConversationStore()
-    use_temporary = _use_temporary_chat_mode()
-    needs_upload = _requires_upload(msgs, use_temporary)
-    session, client, remain, stored_conv = await _find_reusable_session(
-        db,
-        pool,
-        model_obj,
-        msgs,
-        temporary=use_temporary,
-        require_account=needs_upload,
+    output, session, client = await _send_request(
+        pool=pool,
+        db=db,
+        resolved_model=resolved_model,
+        history=[],  # gems are found from the history; this surface never uses them
+        prepared=prepared,
+        tools=tools,
+        tool_choice=tool_choice,
+        instructions=instructions,
+        repeat_instructions=True,
+        tmp_dir=tmp_dir,
+        stream=stream,
     )
-
-    if session:
-        if not remain:
-            return _error_response(400, "No new messages to send.", "INVALID_ARGUMENT")
-
-        input_msgs = _prepare_messages_for_model(
-            remain, internal_tools, tool_choice, extra_instr, False
-        )
-        m_input, files = await GeminiClientWrapper.process_conversation(input_msgs, tmp_dir)
-        logger.debug(
-            f"[Gemini API] Reusing session {reprlib.repr(session.metadata)}"
-            f" - sending {len(input_msgs)} message(s)."
-        )
-    else:
-        try:
-            client = await pool.acquire(require_account=needs_upload)
-            session = client.start_chat(model=client.usable_model(model_obj))
-            m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
-        except Exception as e:
-            logger.exception("[Gemini API] Failed to prepare session")
-            return _error_response(503, str(e), "UNAVAILABLE")
-
-    try:
-        assert session is not None
-        assert client is not None
-        logger.debug(
-            f"[Gemini API] Client: {client.id}, input len: {len(m_input)}, files: {len(files)}"
-        )
-        output, session, client = await _send_with_internal_fallback(
-            pool=pool,
-            db=db,
-            resolved_model=model_obj,
-            session=session,
-            client=client,
-            current_input=m_input,
-            files=cast("list[Path | str | io.BytesIO]", files),
-            full_prepared_messages=msgs,
-            stored_conversation=stored_conv,
-            tmp_dir=tmp_dir,
-            stream=stream,
-            temporary=use_temporary,
-        )
-    except Exception as e:
-        logger.exception("[Gemini API] Gemini call failed")
-        return _error_response(502, str(e), "INTERNAL")
-
     return _SentRequest(
         output,
         session,
         client,
         db,
         model_name,
-        model_obj,
+        resolved_model,
         messages,
-        msgs,
+        prepared,
         tool_choice,
         structured_requirement,
     )
-
-
-_IMAGE_MIME_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
-
-
-def _part_frame(part: GeminiPart) -> str:
-    """An SSE frame that carries one part of the reply."""
-    chunk = GeminiGenerateContentResponse(
-        candidates=[GeminiCandidate(content=GeminiContent(role="model", parts=[part]), index=0)]
-    )
-    return f"data: {orjson.dumps(dump_model(chunk)).decode()}\n\n"
 
 
 async def _media_links(items: list[Any], base_url: str) -> str:
@@ -713,8 +572,7 @@ async def _inline_image(image: Any, seen_hashes: set[str]) -> GeminiInlineData |
         (image_store / fname).unlink(missing_ok=True)
         return None
     seen_hashes.add(file_hash)
-    mime_type = _IMAGE_MIME_TYPES.get(Path(fname).suffix.lower(), "image/png")
-    return GeminiInlineData(mimeType=mime_type, data=b64_str)
+    return GeminiInlineData(mimeType=mimetypes.guess_type(fname)[0] or "image/png", data=b64_str)
 
 
 def _stored_reply(text: str, images: list[GeminiInlineData]) -> str | list[AppContentItem]:
@@ -736,30 +594,22 @@ async def gemini_generate_content(
 ):
     """Non-streaming content generation (Gemini API format)."""
     sent = await _send_gemini_request(model, request, tmp_dir, stream=False)
-    if isinstance(sent, JSONResponse):
-        return sent
     resp = sent.output
-
-    try:
-        assert isinstance(resp, ModelOutput)
-        thoughts = normalize_llm_text(resp.thoughts or "")
-        raw_clean = normalize_llm_text(resp.text or "")
-    except Exception:
-        logger.exception("[Gemini API] Output parsing failed")
-        return _error_response(502, "Malformed response.", "INTERNAL")
+    assert isinstance(resp, ModelOutput)
 
     try:
         thoughts, visible_output, storage_output, tool_calls = process_llm_output(
-            thoughts, raw_clean, sent.structured_requirement
+            normalize_llm_text(resp.thoughts or ""),
+            normalize_llm_text(resp.text or ""),
+            sent.structured_requirement,
         )
     except StructuredOutputValidationError as exc:
-        return _error_response(502, str(exc), "INTERNAL")
+        return _error_response(502, str(exc))
     if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
-        return _error_response(502, choice_error, "INTERNAL")
+        return _error_response(502, choice_error)
 
     images: list[GeminiInlineData] = []
     seen_hashes: set[str] = set()
-    base_url = str(raw_request.base_url).rstrip("/")
     for image in resp.images or []:
         try:
             if inline := await _inline_image(image, seen_hashes):
@@ -769,11 +619,11 @@ async def gemini_generate_content(
 
     # Videos and audio are linked from the text, as on the OpenAI routes; the native format has
     # no part for them, and inlining a video would make the response enormous.
+    base_url = str(raw_request.base_url).rstrip("/")
     media_markdown = await _media_links((resp.videos or []) + (resp.media or []), base_url)
     visible_output += media_markdown
 
-    usage_tuple = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
-
+    usage = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
     _persist_conversation(
         sent.db,
         sent.resolved_model,
@@ -784,15 +634,20 @@ async def gemini_generate_content(
         tool_calls,
     )
 
-    # Unset fields are left out, as Google does and as the streaming route already did.
+    parts = [GeminiPart(text=thoughts, thought=True)] if thoughts else []
+    if visible_output:
+        parts.append(GeminiPart(text=visible_output))
+    parts += [GeminiPart(inlineData=image) for image in images]
+    parts += _function_call_parts(tool_calls)
     return dump_model(
-        _to_gemini_response(
-            visible_output,
-            tool_calls,
-            thoughts,
-            usage_tuple,
-            sent.model_name,
-            [GeminiPart(inlineData=image) for image in images],
+        GeminiGenerateContentResponse(
+            candidates=[
+                GeminiCandidate(
+                    content=GeminiContent(role="model", parts=parts), finishReason="STOP", index=0
+                )
+            ],
+            usageMetadata=_usage_metadata(usage),
+            modelVersion=sent.model_name,
         )
     )
 
@@ -807,243 +662,8 @@ async def gemini_stream_generate_content(
 ):
     """Streaming content generation (Gemini API format, SSE)."""
     sent = await _send_gemini_request(model, request, tmp_dir, stream=True)
-    if isinstance(sent, JSONResponse):
-        return sent
-
-    return _create_gemini_streaming_response(
-        generator=sent.output,
-        model_name=sent.model_name,
-        messages=sent.prepared,
-        original_messages=sent.messages,
-        db=sent.db,
-        resolved_model=sent.resolved_model,
-        client_wrapper=sent.client,
-        session=sent.session,
-        tool_choice=sent.tool_choice,
-        structured_requirement=sent.structured_requirement,
-        base_url=str(raw_request.base_url).rstrip("/"),
-    )
-
-
-def _create_gemini_streaming_response(
-    generator,
-    model_name: str,
-    messages: list[AppMessage],
-    original_messages: list[AppMessage],
-    db: LMDBConversationStore,
-    resolved_model: str,
-    client_wrapper: GeminiClientWrapper,
-    session,
-    tool_choice: Literal["none", "auto", "required"] | ToolChoiceFunction | None,
-    structured_requirement=None,
-    base_url: str = "",
-) -> StreamingResponse:
-    """Create a Gemini-format SSE streaming response."""
-
-    async def generate_stream():
-        full_thoughts, full_text = "", ""
-        last_chunk: ModelOutput | None = None
-        all_images: list[Any] = []  # images from all chunks (url-deduped)
-        seen_image_urls: set[str] = set()
-        all_media: list[Any] = []
-        suppressor = StreamingOutputFilter()
-
-        try:
-            async for chunk in generator:
-                last_chunk = chunk
-
-                if chunk.images:
-                    for img in chunk.images:
-                        if img.url not in seen_image_urls:
-                            all_images.append(img)
-                            seen_image_urls.add(img.url)
-                all_media += (chunk.videos or []) + (chunk.media or [])
-
-                if t_delta := chunk.thoughts_delta:
-                    full_thoughts += t_delta
-                    think_resp = GeminiGenerateContentResponse(
-                        candidates=[
-                            GeminiCandidate(
-                                content=GeminiContent(
-                                    role="model",
-                                    parts=[GeminiPart(text=t_delta, thought=True)],
-                                ),
-                                index=0,
-                            )
-                        ],
-                    )
-                    yield f"data: {orjson.dumps(think_resp.model_dump(mode='json', exclude_none=True)).decode('utf-8')}\n\n"
-
-                if text_delta := chunk.text_delta:
-                    full_text += text_delta
-                    if not structured_requirement and (
-                        visible_delta := suppressor.process(text_delta)
-                    ):
-                        chunk_resp = GeminiGenerateContentResponse(
-                            candidates=[
-                                GeminiCandidate(
-                                    content=GeminiContent(
-                                        role="model",
-                                        parts=[GeminiPart(text=visible_delta)],
-                                    ),
-                                    index=0,
-                                )
-                            ],
-                        )
-                        yield f"data: {orjson.dumps(chunk_resp.model_dump(mode='json', exclude_none=True)).decode('utf-8')}\n\n"
-
-        except Exception as e:
-            logger.exception(f"[Gemini API] Streaming error: {e}")
-            err_resp = _to_gemini_error(500, "Streaming error occurred.", "INTERNAL")
-            yield f"data: {orjson.dumps(err_resp.model_dump(mode='json')).decode('utf-8')}\n\n"
-            return
-
-        # The final chunk can carry more than its deltas added up to. The rest is sent on, so
-        # that what gets validated and stored is what the client received.
-        if last_chunk is not None:
-            final_thoughts, final_text = last_chunk.thoughts or "", last_chunk.text or ""
-            if len(final_thoughts) > len(full_thoughts) and final_thoughts.startswith(
-                full_thoughts
-            ):
-                yield _part_frame(
-                    GeminiPart(text=final_thoughts[len(full_thoughts) :], thought=True)
-                )
-                full_thoughts = final_thoughts
-            if len(final_text) > len(full_text) and final_text.startswith(full_text):
-                tail, full_text = final_text[len(full_text) :], final_text
-                if not structured_requirement and (visible_tail := suppressor.process(tail)):
-                    yield _part_frame(GeminiPart(text=visible_tail))
-
-        if not structured_requirement and (remaining_text := suppressor.flush()):
-            chunk_resp = GeminiGenerateContentResponse(
-                candidates=[
-                    GeminiCandidate(
-                        content=GeminiContent(
-                            role="model",
-                            parts=[GeminiPart(text=remaining_text)],
-                        ),
-                        index=0,
-                    )
-                ],
-            )
-            yield f"data: {orjson.dumps(chunk_resp.model_dump(mode='json', exclude_none=True)).decode('utf-8')}\n\n"
-
-        # --- post-processing: protective layer so the SSE tail survives errors ---
-        # The two expected failures are reported with their own message and status, matching the
-        # non-streaming route; only genuinely unexpected errors fall through to the catch-all,
-        # which cannot say anything more useful than that something broke.
-        try:
-            _thoughts, visible_output, storage_output, tool_calls = process_llm_output(
-                normalize_llm_text(full_thoughts),
-                normalize_llm_text(full_text),
-                structured_requirement,
-            )
-        except StructuredOutputValidationError as exc:
-            logger.warning(f"[Gemini API] Structured output rejected mid-stream: {exc}")
-            err_resp = _to_gemini_error(502, str(exc), "INTERNAL")
-            yield f"data: {orjson.dumps(err_resp.model_dump(mode='json')).decode('utf-8')}\n\n"
-            return
-
-        if choice_error := _tool_choice_failure(tool_choice, tool_calls):
-            logger.warning(f"[Gemini API] Forced tool choice unmet mid-stream: {choice_error}")
-            err_resp = _to_gemini_error(502, choice_error, "INTERNAL")
-            yield f"data: {orjson.dumps(err_resp.model_dump(mode='json')).decode('utf-8')}\n\n"
-            return
-
-        try:
-            if structured_requirement and visible_output:
-                structured_chunk = GeminiGenerateContentResponse(
-                    candidates=[
-                        GeminiCandidate(
-                            content=GeminiContent(
-                                role="model",
-                                parts=[GeminiPart(text=visible_output)],
-                            ),
-                            index=0,
-                        )
-                    ],
-                )
-                yield f"data: {orjson.dumps(structured_chunk.model_dump(mode='json', exclude_none=True)).decode('utf-8')}\n\n"
-
-            if media_markdown := await _media_links(all_media, base_url):
-                yield _part_frame(GeminiPart(text=media_markdown))
-                visible_output += media_markdown
-                storage_output += media_markdown
-
-            images: list[GeminiInlineData] = []
-            seen_hashes: set[str] = set()
-            for image in all_images:
-                try:
-                    if inline := await _inline_image(image, seen_hashes):
-                        yield _part_frame(GeminiPart(inlineData=inline))
-                        images.append(inline)
-                except Exception as exc:
-                    logger.warning(f"[Gemini API] Failed to process streaming image: {exc}")
-            # Final chunk (finishReason + usageMetadata)
-            usage_tuple = calculate_usage(original_messages, visible_output, tool_calls, _thoughts)
-            p_tok, c_tok, t_tok, r_tok = usage_tuple
-
-            final_parts: list[GeminiPart] = []
-            if tool_calls:
-                for tc in tool_calls:
-                    tc_any: Any = tc
-                    fn = (
-                        tc_any.function
-                        if hasattr(tc_any, "function")
-                        else tc_any.get("function", {})
-                    )
-                    fn_name = fn.name if hasattr(fn, "name") else fn.get("name", "")
-                    fn_args_raw = (
-                        fn.arguments if hasattr(fn, "arguments") else fn.get("arguments", "{}")
-                    )
-                    try:
-                        fn_args = (
-                            orjson.loads(fn_args_raw)
-                            if isinstance(fn_args_raw, str)
-                            else fn_args_raw
-                        )
-                    except orjson.JSONDecodeError:
-                        fn_args = {}
-                    final_parts.append(
-                        GeminiPart(functionCall=GeminiFunctionCall(name=fn_name, args=fn_args))
-                    )
-
-            final_resp = GeminiGenerateContentResponse(
-                candidates=[
-                    GeminiCandidate(
-                        content=GeminiContent(role="model", parts=final_parts)
-                        if final_parts
-                        else None,
-                        finishReason="STOP",
-                        index=0,
-                    )
-                ],
-                usageMetadata=GeminiUsageMetadata(
-                    promptTokenCount=p_tok,
-                    candidatesTokenCount=c_tok - r_tok,
-                    totalTokenCount=t_tok,
-                    thoughtsTokenCount=r_tok if r_tok > 0 else None,
-                ),
-                modelVersion=model_name,
-            )
-            yield f"data: {orjson.dumps(final_resp.model_dump(mode='json', exclude_none=True)).decode('utf-8')}\n\n"
-
-            _persist_conversation(
-                db,
-                resolved_model,
-                client_wrapper,
-                session.metadata,
-                messages,
-                _stored_reply(storage_output, images),
-                tool_calls,
-            )
-        except Exception as exc:
-            logger.exception(f"[Gemini API] Post-processing error: {exc}")
-            err_resp = _to_gemini_error(500, "Post-processing error.", "INTERNAL")
-            yield f"data: {orjson.dumps(err_resp.model_dump(mode='json')).decode('utf-8')}\n\n"
-
     return StreamingResponse(
-        generate_stream(),
+        _stream_reply(sent, str(raw_request.base_url).rstrip("/")),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1051,3 +671,119 @@ def _create_gemini_streaming_response(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str]:
+    """The SSE frames of a streamed reply; the conversation is stored once it is complete."""
+    generator = sent.output
+    assert not isinstance(generator, ModelOutput)
+    full_thoughts, full_text = "", ""
+    last_chunk: ModelOutput | None = None
+    all_images: list[Any] = []
+    seen_image_urls: set[str] = set()
+    all_media: list[Any] = []
+    suppressor = StreamingOutputFilter()
+    # Structured output is withheld until it has been validated.
+    forward_text = not sent.structured_requirement
+
+    try:
+        async for chunk in generator:
+            last_chunk = chunk
+            for image in chunk.images or []:
+                if image.url not in seen_image_urls:
+                    all_images.append(image)
+                    seen_image_urls.add(image.url)
+            all_media += (chunk.videos or []) + (chunk.media or [])
+
+            if chunk.thoughts_delta:
+                full_thoughts += chunk.thoughts_delta
+                yield _part_frame(GeminiPart(text=chunk.thoughts_delta, thought=True))
+            if chunk.text_delta:
+                full_text += chunk.text_delta
+                if forward_text and (visible := suppressor.process(chunk.text_delta)):
+                    yield _part_frame(GeminiPart(text=visible))
+    except Exception as e:
+        logger.exception(f"[Gemini API] Streaming error: {e}")
+        yield _sse(_gemini_error(500, "Streaming error occurred."))
+        return
+
+    # The final chunk can carry more than its deltas added up to. The rest is sent on, so that
+    # what gets validated and stored is what the client received.
+    if last_chunk is not None:
+        final_thoughts, final_text = last_chunk.thoughts or "", last_chunk.text or ""
+        if len(final_thoughts) > len(full_thoughts) and final_thoughts.startswith(full_thoughts):
+            yield _part_frame(GeminiPart(text=final_thoughts[len(full_thoughts) :], thought=True))
+            full_thoughts = final_thoughts
+        if len(final_text) > len(full_text) and final_text.startswith(full_text):
+            tail, full_text = final_text[len(full_text) :], final_text
+            if forward_text and (visible := suppressor.process(tail)):
+                yield _part_frame(GeminiPart(text=visible))
+    if forward_text and (held_back := suppressor.flush()):
+        yield _part_frame(GeminiPart(text=held_back))
+
+    # The two expected failures are reported with their own message and status, matching the
+    # non-streaming route; only unexpected errors fall through to the catch-all below, which
+    # cannot say anything more useful than that something broke.
+    try:
+        thoughts, visible_output, storage_output, tool_calls = process_llm_output(
+            normalize_llm_text(full_thoughts),
+            normalize_llm_text(full_text),
+            sent.structured_requirement,
+        )
+    except StructuredOutputValidationError as exc:
+        logger.warning(f"[Gemini API] Structured output rejected mid-stream: {exc}")
+        yield _sse(_gemini_error(502, str(exc)))
+        return
+    if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
+        logger.warning(f"[Gemini API] Forced tool choice unmet mid-stream: {choice_error}")
+        yield _sse(_gemini_error(502, choice_error))
+        return
+
+    try:
+        if not forward_text and visible_output:
+            yield _part_frame(GeminiPart(text=visible_output))
+
+        if media_markdown := await _media_links(all_media, base_url):
+            yield _part_frame(GeminiPart(text=media_markdown))
+            visible_output += media_markdown
+            storage_output += media_markdown
+
+        images: list[GeminiInlineData] = []
+        seen_hashes: set[str] = set()
+        for image in all_images:
+            try:
+                if inline := await _inline_image(image, seen_hashes):
+                    yield _part_frame(GeminiPart(inlineData=inline))
+                    images.append(inline)
+            except Exception as exc:
+                logger.warning(f"[Gemini API] Failed to process streaming image: {exc}")
+
+        usage = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
+        call_parts = _function_call_parts(tool_calls)
+        yield _sse(
+            GeminiGenerateContentResponse(
+                candidates=[
+                    GeminiCandidate(
+                        content=GeminiContent(role="model", parts=call_parts)
+                        if call_parts
+                        else None,
+                        finishReason="STOP",
+                        index=0,
+                    )
+                ],
+                usageMetadata=_usage_metadata(usage),
+                modelVersion=sent.model_name,
+            )
+        )
+        _persist_conversation(
+            sent.db,
+            sent.resolved_model,
+            sent.client,
+            sent.session.metadata,
+            sent.prepared,
+            _stored_reply(storage_output, images),
+            tool_calls,
+        )
+    except Exception as exc:
+        logger.exception(f"[Gemini API] Post-processing error: {exc}")
+        yield _sse(_gemini_error(500, "Post-processing error."))
