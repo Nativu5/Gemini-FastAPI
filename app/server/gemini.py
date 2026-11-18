@@ -65,8 +65,10 @@ from app.server.chat import (
     _find_reusable_session,
     _get_available_models,
     _image_to_base64,
+    _media_markdown,
     _persist_conversation,
     _prepare_messages_for_model,
+    _process_media_item,
     _requires_upload,
     _resolve_model_name,
     _send_with_internal_fallback,
@@ -160,6 +162,9 @@ def _gemini_contents_to_messages(
         function_responses: list[tuple[str | None, str]] = []  # (name, content_json)
 
         for part in parts:
+            if part.thought:
+                # A thought this server returned, replayed by the client: not part of the answer.
+                continue
             if part.text is not None:
                 text_fragments.append(part.text)
 
@@ -664,6 +669,33 @@ _IMAGE_MIME_TYPES = {
 }
 
 
+def _part_frame(part: GeminiPart) -> str:
+    """An SSE frame that carries one part of the reply."""
+    chunk = GeminiGenerateContentResponse(
+        candidates=[GeminiCandidate(content=GeminiContent(role="model", parts=[part]), index=0)]
+    )
+    return f"data: {orjson.dumps(dump_model(chunk)).decode()}\n\n"
+
+
+async def _media_links(items: list[Any], base_url: str) -> str:
+    """Markdown links to the generated videos and audio of a reply, each led by a blank line."""
+    markdown = ""
+    seen_urls: set[str] = set()
+    seen_hashes: dict[str, str] = {}
+    for item in items:
+        url = getattr(item, "url", None) or getattr(item, "mp3_url", None)
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        # ponytail: downloaded one after another and, when streaming, without a keep-alive;
+        # share the background downloads of the OpenAI streams if videos get large.
+        if (result := await _process_media_item(item)) and (
+            links := _media_markdown(item, result[2], seen_hashes, f"{base_url}/")
+        ):
+            markdown += f"\n\n{links}"
+    return markdown
+
+
 async def _inline_image(
     image: Any, seen_hashes: set[str], base_url: str
 ) -> tuple[GeminiPart, str] | None:
@@ -715,15 +747,21 @@ async def gemini_generate_content(
 
     # Images: collect Gemini images → inlineData parts + markdown URL for LMDB persistence
     image_parts: list[GeminiPart] = []
+    image_markdown = ""
     seen_hashes: set[str] = set()
     base_url = str(raw_request.base_url).rstrip("/")
     for image in resp.images or []:
         try:
             if inline := await _inline_image(image, seen_hashes, base_url):
                 image_parts.append(inline[0])
-                storage_output += inline[1]
+                image_markdown += inline[1]
         except Exception as exc:
             logger.warning(f"[Gemini API] Failed to process image: {exc}")
+
+    # Videos and audio are linked from the text, as on the OpenAI routes; the native format has
+    # no part for them, and inlining a video would make the response enormous.
+    media_markdown = await _media_links((resp.videos or []) + (resp.media or []), base_url)
+    visible_output += media_markdown
 
     usage_tuple = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
 
@@ -733,7 +771,7 @@ async def gemini_generate_content(
         sent.client,
         sent.session.metadata,
         sent.prepared,
-        storage_output,
+        storage_output + media_markdown + image_markdown,
         tool_calls,
     )
 
@@ -793,6 +831,7 @@ def _create_gemini_streaming_response(
         last_chunk: ModelOutput | None = None
         all_images: list[Any] = []  # images from all chunks (url-deduped)
         seen_image_urls: set[str] = set()
+        all_media: list[Any] = []
         suppressor = StreamingOutputFilter()
 
         try:
@@ -804,6 +843,7 @@ def _create_gemini_streaming_response(
                         if img.url not in seen_image_urls:
                             all_images.append(img)
                             seen_image_urls.add(img.url)
+                all_media += (chunk.videos or []) + (chunk.media or [])
 
                 if t_delta := chunk.thoughts_delta:
                     full_thoughts += t_delta
@@ -844,12 +884,21 @@ def _create_gemini_streaming_response(
             yield f"data: {orjson.dumps(err_resp.model_dump(mode='json')).decode('utf-8')}\n\n"
             return
 
-        # Use the final chunk's full text if available
+        # The final chunk can carry more than its deltas added up to. The rest is sent on, so
+        # that what gets validated and stored is what the client received.
         if last_chunk is not None:
-            if last_chunk.text:
-                full_text = last_chunk.text
-            if last_chunk.thoughts:
-                full_thoughts = last_chunk.thoughts
+            final_thoughts, final_text = last_chunk.thoughts or "", last_chunk.text or ""
+            if len(final_thoughts) > len(full_thoughts) and final_thoughts.startswith(
+                full_thoughts
+            ):
+                yield _part_frame(
+                    GeminiPart(text=final_thoughts[len(full_thoughts) :], thought=True)
+                )
+                full_thoughts = final_thoughts
+            if len(final_text) > len(full_text) and final_text.startswith(full_text):
+                tail, full_text = final_text[len(full_text) :], final_text
+                if not structured_requirement and (visible_tail := suppressor.process(tail)):
+                    yield _part_frame(GeminiPart(text=visible_tail))
 
         if not structured_requirement and (remaining_text := suppressor.flush()):
             chunk_resp = GeminiGenerateContentResponse(
@@ -871,7 +920,9 @@ def _create_gemini_streaming_response(
         # which cannot say anything more useful than that something broke.
         try:
             _thoughts, visible_output, storage_output, tool_calls = process_llm_output(
-                full_thoughts, full_text, structured_requirement
+                normalize_llm_text(full_thoughts),
+                normalize_llm_text(full_text),
+                structured_requirement,
             )
         except StructuredOutputValidationError as exc:
             logger.warning(f"[Gemini API] Structured output rejected mid-stream: {exc}")
@@ -899,6 +950,11 @@ def _create_gemini_streaming_response(
                     ],
                 )
                 yield f"data: {orjson.dumps(structured_chunk.model_dump(mode='json', exclude_none=True)).decode('utf-8')}\n\n"
+
+            if media_markdown := await _media_links(all_media, base_url):
+                yield _part_frame(GeminiPart(text=media_markdown))
+                visible_output += media_markdown
+                storage_output += media_markdown
 
             seen_hashes: set[str] = set()
             for image in all_images:

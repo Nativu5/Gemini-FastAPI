@@ -2,10 +2,11 @@
 Gemini itself replaced by the script in `conftest.api`."""
 
 import json
+import re
 
 import pytest
 from conftest import MODEL, reply
-from gemini_webapi.types import WebImage
+from gemini_webapi.types import GeneratedVideo, WebImage
 
 WEATHER_TOOL = {
     "type": "function",
@@ -159,3 +160,130 @@ def test_gemini_native_continues_the_chat_after_a_function_response(api):
 
     assert [sent.continues for sent in api.upstream.sent] == [None, "c_1", "c_1"]
     assert "clear" not in api.upstream.sent[2].text
+
+
+def _sse(response) -> list[dict]:
+    """The JSON payload of every SSE frame of a response."""
+    assert response.status_code == 200, response.text
+    return [
+        json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")
+    ]
+
+
+def _native(api, stream: bool, **body) -> list[dict]:
+    """Parts of a /v1beta reply, over all chunks when streamed."""
+    method = "streamGenerateContent" if stream else "generateContent"
+    response = api.post(f"/v1beta/models/{MODEL}:{method}", json=body)
+    chunks = _sse(response) if stream else [response.json()]
+    assert "error" not in chunks[-1], chunks[-1]
+    return [
+        part
+        for chunk in chunks
+        for candidate in chunk["candidates"]
+        for part in candidate.get("content", {}).get("parts", [])
+    ]
+
+
+def _text(parts: list[dict]) -> str:
+    return "".join(part["text"] for part in parts if "text" in part and not part.get("thought"))
+
+
+def _reply_text(response, stream: bool) -> str:
+    """The assistant's text in a Chat Completions or Responses reply, streamed or not."""
+    if stream:
+        events = _sse(response)
+        if "choices" in events[0]:
+            return "".join(
+                e["choices"][0]["delta"].get("content") or "" for e in events if e["choices"]
+            )
+        body = next(e for e in events if e["type"] == "response.completed")["response"]
+    else:
+        assert response.status_code == 200, response.text
+        body = response.json()
+    if "choices" in body:
+        return body["choices"][0]["message"]["content"]
+    return "".join(part["text"] for item in body["output"] for part in item.get("content", []))
+
+
+USER_TURN = [{"role": "user", "parts": [{"text": "First question"}]}]
+
+
+def test_responses_stream_delivers_a_reply_that_was_held_back_until_the_end(api):
+    """A lone "S" could be the start of an echoed hint, so the filter holds it until the stream
+    ends. When it arrived only with the final chunk, no message item is open by then, and the
+    text still has to reach the client."""
+    api.upstream.replies.append(reply(text="S"))
+    events = _sse(
+        api.post("/v1/responses", json={"model": MODEL, "input": "Pick a letter", "stream": True})
+    )
+
+    assert [e["delta"] for e in events if e["type"] == "response.output_text.delta"] == ["S"]
+    completed = next(e for e in events if e["type"] == "response.completed")["response"]
+    assert [part["text"] for item in completed["output"] for part in item.get("content", [])] == [
+        "S"
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_gemini_native_normalises_tool_arguments_whether_streamed_or_not(api, stream):
+    """Gemini's text is brought to NFC before tool calls are read from it; here, e + accent."""
+    api.upstream.replies.append(reply(TOOL_CALL.replace("Hanoi", "Cafe\u0301")))
+    tools = [{"functionDeclarations": [{k: v for k, v in WEATHER_TOOL.items() if k != "type"}]}]
+
+    parts = _native(api, stream, contents=USER_TURN, tools=tools)
+
+    assert [part["functionCall"]["args"] for part in parts if "functionCall" in part] == [
+        {"city": "Caf\u00e9"}
+    ]
+
+
+def test_gemini_native_stream_sends_text_that_only_the_final_chunk_carries(api):
+    api.upstream.replies.append(reply("Hel", text="Hello there"))
+
+    assert _text(_native(api, True, contents=USER_TURN)) == "Hello there"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_gemini_native_links_a_generated_video(api, stream):
+    api.upstream.replies.append(
+        reply("Watch.", generated_videos=[GeneratedVideo(url="http://vid/1", title="Clip")])
+    )
+
+    text = _text(_native(api, stream, contents=USER_TURN))
+
+    assert text.startswith("Watch.")
+    assert re.search(r"\[Clip\]\(http://testserver/media/media_[0-9a-f]{32}\.mp4", text)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_gemini_native_does_not_take_a_replayed_thought_for_the_answer(api, stream):
+    api.upstream.replies.append(
+        reply("Answer.", thoughts="Let me think.", thoughts_delta="Let me think.")
+    )
+    parts = _native(api, stream, contents=USER_TURN)
+    assert [part["text"] for part in parts if part.get("thought")] == ["Let me think."]
+    again = {"role": "user", "parts": [{"text": "Second question"}]}
+
+    _native(api, stream, contents=[*USER_TURN, {"role": "model", "parts": parts}, again])
+    assert _continued(api)
+
+    # A history that matches no stored chat is sent in full, without the thought.
+    other = [{"role": "user", "parts": [{"text": "Another opening"}]}]
+    _native(api, stream, contents=[*other, {"role": "model", "parts": parts}, again])
+    assert "Answer." in api.upstream.sent[-1].text
+    assert "Let me think." not in api.upstream.sent[-1].text
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_second_copy_of_a_generated_image_is_linked_once(api, path, stream):
+    """Gemini can list one image under two urls; the reply then shows it once, not twice."""
+    copies = [WebImage(url="http://img/a#1", title="A"), WebImage(url="http://img/a#2", title="A")]
+    api.upstream.replies.append(reply("Here.", web_images=copies))
+    prompt = (
+        {"messages": [{"role": "user", "content": "Draw"}]} if "chat" in path else {"input": "Draw"}
+    )
+
+    response = api.post(path, json={"model": MODEL, "stream": stream, **prompt})
+
+    assert _reply_text(response, stream).count("/media/img_") == 1
