@@ -287,3 +287,18 @@ def test_a_second_copy_of_a_generated_image_is_linked_once(api, path, stream):
     response = api.post(path, json={"model": MODEL, "stream": stream, **prompt})
 
     assert _reply_text(response, stream).count("/media/img_") == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_gemini_native_continues_the_chat_after_a_generated_image(api, stream):
+    api.upstream.replies.append(
+        reply("Here.", web_images=[WebImage(url="http://img/a", title="A")])
+    )
+    parts = _native(api, stream, contents=USER_TURN)
+    assert any("inlineData" in part for part in parts)
+    again = {"role": "user", "parts": [{"text": "Second question"}]}
+
+    _native(api, stream, contents=[*USER_TURN, {"role": "model", "parts": parts}, again])
+
+    assert _continued(api)
+    assert api.upstream.sent[-1].files == []

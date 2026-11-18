@@ -77,7 +77,6 @@ from app.server.chat import (
 )
 from app.server.middleware import (
     get_media_store_dir,
-    get_media_token,
     get_temp_dir,
     verify_gemini_api_key,
 )
@@ -121,6 +120,15 @@ def add_gemini_exception_handlers(app: FastAPI) -> None:
             detail = str(exc.errors()) if exc.errors() else str(exc)
             return _error_response(400, f"Invalid request: {detail}", "INVALID_ARGUMENT")
         return await request_validation_exception_handler(request, exc)
+
+
+def _inline_data_item(inline: GeminiInlineData) -> AppContentItem:
+    """An `inlineData` part as a file attached to a message."""
+    return AppContentItem(
+        type="file",
+        file_data=inline.data,
+        filename=f"inline{guess_extension_for_mime(inline.mimeType)}",
+    )
 
 
 def _gemini_contents_to_messages(
@@ -169,14 +177,7 @@ def _gemini_contents_to_messages(
                 text_fragments.append(part.text)
 
             if part.inlineData:
-                suffix = guess_extension_for_mime(part.inlineData.mimeType)
-                content_items.append(
-                    AppContentItem(
-                        type="file",
-                        file_data=part.inlineData.data,
-                        filename=f"inline{suffix}",
-                    )
-                )
+                content_items.append(_inline_data_item(part.inlineData))
 
             if part.fileData:
                 # Unreachable via the routes, which reject fileData up front; kept so a direct
@@ -696,13 +697,8 @@ async def _media_links(items: list[Any], base_url: str) -> str:
     return markdown
 
 
-async def _inline_image(
-    image: Any, seen_hashes: set[str], base_url: str
-) -> tuple[GeminiPart, str] | None:
-    """One generated image as an `inlineData` part, with the markdown link stored for it.
-
-    Returns None for a copy of an image this response already carries.
-    """
+async def _inline_image(image: Any, seen_hashes: set[str]) -> GeminiInlineData | None:
+    """One generated image as inline data, or None for a copy of one this reply already has."""
     image_store = get_media_store_dir()
     b64_str, _w, _h, fname, file_hash = await _image_to_base64(image, image_store)
     if file_hash in seen_hashes:
@@ -710,8 +706,16 @@ async def _inline_image(
         return None
     seen_hashes.add(file_hash)
     mime_type = _IMAGE_MIME_TYPES.get(Path(fname).suffix.lower(), "image/png")
-    part = GeminiPart(inlineData=GeminiInlineData(mimeType=mime_type, data=b64_str))
-    return part, f"\n\n![{fname}]({base_url}/media/{fname}?token={get_media_token(fname)})"
+    return GeminiInlineData(mimeType=mime_type, data=b64_str)
+
+
+def _stored_reply(text: str, images: list[GeminiInlineData]) -> str | list[AppContentItem]:
+    """A reply as it is stored: what `_gemini_contents_to_messages` makes of it when a client
+    sends it back, images included, so that the history still matches this chat."""
+    if not images:
+        return text
+    text_items = [AppContentItem(type="text", text=text)] if text else []
+    return [*text_items, *(_inline_data_item(image) for image in images)]
 
 
 @router.post("/v1beta/models/{model:path}:generateContent")
@@ -745,16 +749,13 @@ async def gemini_generate_content(
     if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
         return _error_response(502, choice_error, "INTERNAL")
 
-    # Images: collect Gemini images → inlineData parts + markdown URL for LMDB persistence
-    image_parts: list[GeminiPart] = []
-    image_markdown = ""
+    images: list[GeminiInlineData] = []
     seen_hashes: set[str] = set()
     base_url = str(raw_request.base_url).rstrip("/")
     for image in resp.images or []:
         try:
-            if inline := await _inline_image(image, seen_hashes, base_url):
-                image_parts.append(inline[0])
-                image_markdown += inline[1]
+            if inline := await _inline_image(image, seen_hashes):
+                images.append(inline)
         except Exception as exc:
             logger.warning(f"[Gemini API] Failed to process image: {exc}")
 
@@ -771,14 +772,19 @@ async def gemini_generate_content(
         sent.client,
         sent.session.metadata,
         sent.prepared,
-        storage_output + media_markdown + image_markdown,
+        _stored_reply(storage_output + media_markdown, images),
         tool_calls,
     )
 
     # Unset fields are left out, as Google does and as the streaming route already did.
     return dump_model(
         _to_gemini_response(
-            visible_output, tool_calls, thoughts, usage_tuple, sent.model_name, image_parts
+            visible_output,
+            tool_calls,
+            thoughts,
+            usage_tuple,
+            sent.model_name,
+            [GeminiPart(inlineData=image) for image in images],
         )
     )
 
@@ -956,20 +962,13 @@ def _create_gemini_streaming_response(
                 visible_output += media_markdown
                 storage_output += media_markdown
 
+            images: list[GeminiInlineData] = []
             seen_hashes: set[str] = set()
             for image in all_images:
                 try:
-                    if inline := await _inline_image(image, seen_hashes, base_url):
-                        img_chunk = GeminiGenerateContentResponse(
-                            candidates=[
-                                GeminiCandidate(
-                                    content=GeminiContent(role="model", parts=[inline[0]]),
-                                    index=0,
-                                )
-                            ],
-                        )
-                        yield f"data: {orjson.dumps(img_chunk.model_dump(mode='json', exclude_none=True)).decode('utf-8')}\n\n"
-                        storage_output += inline[1]
+                    if inline := await _inline_image(image, seen_hashes):
+                        yield _part_frame(GeminiPart(inlineData=inline))
+                        images.append(inline)
                 except Exception as exc:
                     logger.warning(f"[Gemini API] Failed to process streaming image: {exc}")
             # Final chunk (finishReason + usageMetadata)
@@ -1027,7 +1026,7 @@ def _create_gemini_streaming_response(
                 client_wrapper,
                 session.metadata,
                 messages,
-                storage_output,
+                _stored_reply(storage_output, images),
                 tool_calls,
             )
         except Exception as exc:
