@@ -53,10 +53,11 @@ class GeminiClientPool(metaclass=Singleton):
     async def acquire(
         self, client_id: str | None = None, require_account: bool = False
     ) -> GeminiClientWrapper:
-        """Return a healthy client by id or using round-robin.
+        """Return a running client: the one with `client_id`, or the next in turn.
 
-        `require_account` excludes guest sessions, for requests they cannot serve at all - file
-        uploads. Otherwise a guest is used only once no authenticated client is left.
+        `require_account` keeps guest sessions out of the rotation, for requests they cannot
+        serve at all - file uploads. Otherwise a guest is used only once no authenticated client
+        is left. A client asked for by id is returned whatever it is; the caller checks.
         """
         if client_id:
             client = self._id_map.get(client_id)
