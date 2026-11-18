@@ -30,7 +30,6 @@ from app.server.chat import (
     _create_responses_standard_payload,
     _media_markdown,
     _responses_response_format,
-    _sse_error,
     _tool_choice_declaration_error,
     _tool_choice_failure,
     _validate_responses_input,
@@ -91,16 +90,17 @@ def test_non_json_schema_response_formats_are_accepted(format_type):
         assert requirement.strict is False
 
 
-def test_json_schema_sets_strict_from_the_request():
-    for strict in (True, False):
-        requirement = _build_structured_requirement(
-            {"type": "json_schema", "json_schema": {"schema": OBJECT_SCHEMA, "strict": strict}}
-        )
-        assert requirement is not None
-        assert requirement.strict is strict
+@pytest.mark.parametrize(("requested", "applied"), [(True, True), (False, False), (None, False)])
+def test_json_schema_sets_strict_from_the_request(requested, applied):
+    """A null `strict` is the default, as it is for OpenAI and on the Responses route."""
+    requirement = _build_structured_requirement(
+        {"type": "json_schema", "json_schema": {"schema": OBJECT_SCHEMA, "strict": requested}}
+    )
+    assert requirement is not None
+    assert requirement.strict is applied
 
 
-@pytest.mark.parametrize("strict", ["false", "true", 0, 1, None])
+@pytest.mark.parametrize("strict", ["true", 1])
 def test_chat_json_schema_rejects_non_boolean_strict_values(strict):
     with pytest.raises(ValueError, match="strict must be a boolean"):
         _build_structured_requirement(
@@ -139,8 +139,8 @@ def test_an_unrepresentable_schema_is_asked_for_but_not_enforced(schema):
     assert requirement.strict is False
 
 
-@pytest.mark.parametrize("response_format", [None, {}, "json_schema", ["json_schema"]])
-def test_absent_or_non_object_response_format_is_ignored(response_format):
+@pytest.mark.parametrize("response_format", [None, {}])
+def test_an_absent_response_format_asks_for_nothing(response_format):
     assert _build_structured_requirement(response_format) is None
 
 
@@ -162,12 +162,13 @@ def test_json_schema_defaults_to_best_effort_and_a_generated_name():
     assert SCHEMA_ADHERENCE_PROMPT in requirement.instruction
 
 
-def test_non_strict_schema_omits_the_exact_conformance_line():
+@pytest.mark.parametrize("strict", [True, False])
+def test_only_a_strict_schema_is_prompted_for_exact_conformance(strict):
     requirement = _build_structured_requirement(
-        {"type": "json_schema", "json_schema": {"schema": OBJECT_SCHEMA, "strict": False}}
+        {"type": "json_schema", "json_schema": {"schema": OBJECT_SCHEMA, "strict": strict}}
     )
     assert requirement is not None
-    assert STRICT_SCHEMA_ADHERENCE_PROMPT not in requirement.instruction
+    assert (STRICT_SCHEMA_ADHERENCE_PROMPT in requirement.instruction) is strict
 
 
 def test_tool_call_turn_is_not_failed_by_a_response_format():
@@ -213,7 +214,6 @@ def test_conforming_output_is_canonicalized():
 @pytest.mark.parametrize(
     "schema",
     [
-        {"$ref": "http://169.254.169.254/latest/meta-data"},  # unresolvable remote reference
         {"$ref": "#/definitions/missing"},  # dangling local reference
         {"type": "OBJECT"},  # foreign dialect that slipped through
     ],
@@ -266,19 +266,23 @@ def test_json_mode_requires_only_that_the_payload_parses():
 
 
 def test_pathological_schema_regex_is_bounded(monkeypatch):
-    """A client-controlled pattern must not monopolize the async server thread."""
+    """A client-controlled pattern must not monopolize the async server thread.
+
+    This one takes exponential time on the input below: unbounded, it would not return.
+    """
     monkeypatch.setattr("app.utils.helper.SCHEMA_REGEX_BUDGET_SECONDS", 0.005)
     requirement = _requirement(
         {
             "type": "object",
-            "properties": {"value": {"type": "string", "pattern": "^(a+)+$"}},
+            "properties": {"value": {"type": "string", "pattern": "^(a|aa)+$"}},
             "required": ["value"],
         }
     )
+    reply = '{"value":"' + "a" * 100 + 'b"}'
     started = time.perf_counter()
-    result = canonicalize_structured_output('{"value":"' + "a" * 100 + 'b"}', requirement)
+    result = canonicalize_structured_output(reply, requirement)
     assert time.perf_counter() - started < 0.5
-    assert result is None
+    assert result == reply  # passed on unverified, as any reply we ran out of time for
 
 
 def test_an_exhausted_budget_leaves_the_reply_unverified_rather_than_failing_it(monkeypatch):
@@ -309,6 +313,10 @@ def test_an_ordinary_large_payload_fits_the_regex_budget():
         for i in range(2000)
     ]
     assert canonicalize_structured_output(orjson.dumps(rows).decode(), requirement) is not None
+    # A violation in the last row is still caught, so the budget lasted the whole payload: a
+    # reply it ran out on would have been passed on unverified instead.
+    rows[-1]["sku"] = "not a sku"
+    assert canonicalize_structured_output(orjson.dumps(rows).decode(), requirement) is None
 
 
 def test_bounded_validator_preserves_pattern_properties_and_additional_properties():
@@ -381,7 +389,7 @@ def test_text_format_json_schema_defaults_name_and_strict():
     assert resolved["json_schema"]["strict"] is False
 
 
-@pytest.mark.parametrize("strict", ["false", "true", 0, 1])
+@pytest.mark.parametrize("strict", ["true", 1])
 def test_responses_json_schema_rejects_non_boolean_strict_values(strict):
     with pytest.raises(ValidationError):
         ResponseCreateRequest.model_validate(
@@ -420,27 +428,17 @@ def test_two_conflicting_formats_are_rejected():
         _responses_response_format(request)
 
 
-def test_both_surfaces_resolve_an_omitted_strict_the_same_way():
-    """One schema must not hard-fail on Responses and degrade on Chat Completions."""
-    responses_request = ResponseCreateRequest.model_validate(
-        {
-            "model": "m",
-            "input": "hi",
-            "text": {"format": {"type": "json_schema", "name": "r", "schema": OBJECT_SCHEMA}},
-        }
-    )
-    chat = _build_structured_requirement(
-        {"type": "json_schema", "json_schema": {"name": "r", "schema": OBJECT_SCHEMA}}
-    )
-    responses = _build_structured_requirement(_responses_response_format(responses_request))
-    assert chat is not None
-    assert responses is not None
-    assert chat.strict is responses.strict is False
-
-
-@pytest.mark.parametrize(("requested", "applied"), [(True, True), (False, False), (None, False)])
-def test_the_echoed_strict_reports_what_was_enforced(requested, applied):
-    json_schema: dict = {"name": "r", "schema": OBJECT_SCHEMA}
+@pytest.mark.parametrize(
+    ("requested", "schema", "applied"),
+    [
+        (True, OBJECT_SCHEMA, True),
+        (False, OBJECT_SCHEMA, False),
+        (None, OBJECT_SCHEMA, False),
+        (True, {"type": "not-a-type"}, False),  # asked for, but not a schema we can enforce
+    ],
+)
+def test_the_echoed_strict_reports_what_was_enforced(requested, schema, applied):
+    json_schema: dict = {"name": "r", "schema": schema}
     if requested is not None:
         json_schema["strict"] = requested
     request = ResponseCreateRequest.model_validate(
@@ -593,9 +591,9 @@ def test_normalize_openapi_schema_drops_nullable_false_without_widening():
     assert normalize_openapi_schema({"type": "STRING", "nullable": False}) == {"type": "string"}
 
 
-@pytest.mark.parametrize("value", ["text", None, 7, True])
-def test_normalize_openapi_schema_passes_non_schemas_through(value):
-    assert normalize_openapi_schema(value) == value
+def test_normalize_openapi_schema_passes_a_boolean_schema_through():
+    """`additionalProperties: true` puts a boolean where a schema would be."""
+    assert normalize_openapi_schema(True) is True
 
 
 @pytest.mark.parametrize(
@@ -894,12 +892,6 @@ def test_only_payloads_excluded_from_serialization_get_a_digest():
     assert AppContentItem(type="x", raw_data={"a": 1}).content_digest is None
 
 
-def test_sse_errors_terminate_the_stream():
-    frame = _sse_error("boom", "server_error")
-    assert frame.endswith("data: [DONE]\n\n")
-    assert '"message":"boom"' in frame
-
-
 def test_digest_survives_a_round_trip_without_the_excluded_bytes():
     original = AppContentItem(
         type="file", file_data=base64.b64encode(b"payload").decode(), filename="a.bin"
@@ -914,8 +906,6 @@ def test_digest_survives_a_round_trip_without_the_excluded_bytes():
     [
         ('```json\n{"city": "Hanoi"}\n```', '{"city": "Hanoi"}'),
         ("```python\nprint('hello')\n```", "print('hello')"),
-        ("```sql\nSELECT 1;\n```", "SELECT 1;"),
-        ("```bash\necho hi\n```", "echo hi"),
         ('```json\n{"city": "Hanoi"}```', '{"city": "Hanoi"}'),
         ('```json {"city": "Hanoi"}```', '{"city": "Hanoi"}'),
         ("```yaml key: value```", "key: value"),

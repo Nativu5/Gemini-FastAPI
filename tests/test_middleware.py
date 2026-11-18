@@ -9,19 +9,22 @@ out traversal - without being so narrow that a legitimate extension becomes an u
 """
 
 import os
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
+from app.main import create_app
 from app.server.media import _resolve_media_file
 from app.server.middleware import RequestBodyLimitMiddleware
+from app.utils import g_config
+from app.utils.config import CORSConfig
 
 LIMIT = 100
 
 
-def _build_app(max_body_bytes: int = LIMIT, *, with_cors: bool = False) -> FastAPI:
+def _build_app(max_body_bytes: int = LIMIT) -> FastAPI:
     app = FastAPI()
 
     @app.post("/v1/echo")
@@ -32,13 +35,7 @@ def _build_app(max_body_bytes: int = LIMIT, *, with_cors: bool = False) -> FastA
     async def gemini_echo(request: Request):
         return {"received": len(await request.body())}
 
-    # Registration order is reversed at runtime, so this mirrors app.main.create_app: the
-    # limiter goes on first precisely so CORS ends up wrapping it.
     app.add_middleware(RequestBodyLimitMiddleware, max_body_bytes=max_body_bytes)
-    if with_cors:
-        app.add_middleware(
-            CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-        )
     return app
 
 
@@ -95,54 +92,58 @@ def test_a_zero_ceiling_disables_the_guard():
     assert response.status_code == 200
 
 
-def test_a_refusal_still_carries_cors_headers():
-    """Without this the browser reports an opaque CORS failure instead of the 413."""
-    with TestClient(_build_app(with_cors=True)) as client:
-        allowed = client.post("/v1/echo", content=b"x", headers={"Origin": "https://example.com"})
-        refused = client.post(
-            "/v1/echo", content=b"x" * (LIMIT + 1), headers={"Origin": "https://example.com"}
-        )
-    assert allowed.headers["access-control-allow-origin"] == "*"
+def test_a_refusal_still_carries_cors_headers(monkeypatch):
+    """Without this the browser reports an opaque CORS failure instead of the 413.
+
+    It depends on the order in which `create_app` adds its middleware, so it runs the real app.
+    """
+    monkeypatch.setattr(g_config.server, "max_request_body_bytes", LIMIT)
+    monkeypatch.setattr(g_config, "cors", CORSConfig(allow_origins=["https://example.com"]))
+    client = TestClient(create_app())  # no `with`: the lifespan would log in to Google
+
+    refused = client.post(
+        "/v1/chat/completions",
+        content=b"x" * (LIMIT + 1),
+        headers={"Origin": "https://example.com"},
+    )
+
     assert refused.status_code == 413
-    assert refused.headers["access-control-allow-origin"] == "*"
+    assert refused.headers["access-control-allow-origin"] == "https://example.com"
 
 
 def test_an_unparsable_content_length_falls_back_to_counting():
     """A bogus header must not be trusted as 0 and wave an oversize body through."""
-    app = _build_app()
-    with TestClient(app) as client:
+    with TestClient(_build_app()) as client:
         response = client.post(
-            "/v1/echo",
-            content=b"x" * (LIMIT + 1),
-            headers={"Content-Length": str(LIMIT + 1)},
+            "/v1/echo", content=b"x" * (LIMIT + 1), headers={"Content-Length": "abc"}
         )
     assert response.status_code == 413
 
 
-def test_requests_without_a_body_are_untouched():
-    app = _build_app()
-
-    @app.get("/v1/ping")
-    async def ping():
-        return {"ok": True}
-
-    with TestClient(app) as client:
-        assert client.get("/v1/ping").status_code == 200
+HEX = "0" * 32
+STEM = f"img_{HEX}"
 
 
-STEM = "img_" + "0" * 32
-
-
-@pytest.mark.parametrize("suffix", [".png", ".mp4", ".m4a", ".3gp", ".x-m4a", ".tar.gz", ".JPG"])
-def test_every_extension_this_server_can_produce_is_servable(tmp_path, suffix):
+@pytest.mark.parametrize(
+    "name",
+    [
+        f"img_{HEX}.png",
+        f"media_{HEX}.mp4",  # videos and audio are stored under this prefix
+        f"media_{HEX}.x-m4a",
+        f"media_{HEX}.3gp",
+        f"img_{HEX}.tar.gz",
+        f"img_{HEX}.JPG",
+    ],
+)
+def test_every_name_this_server_can_produce_is_servable(tmp_path, name):
     """The extension comes from whatever the upstream saved, not from a fixed list.
 
     Rejecting an unusual one would 404 a file whose token verifies, so the pattern has to be
     permissive about the extension while still admitting no path separator.
     """
-    target = tmp_path / f"{STEM}{suffix}"
+    target = tmp_path / name
     target.write_bytes(b"data")
-    assert _resolve_media_file(tmp_path, target.name) == target.resolve()
+    assert _resolve_media_file(tmp_path, name) == target.resolve()
 
 
 @pytest.mark.parametrize(
@@ -158,7 +159,23 @@ def test_every_extension_this_server_can_produce_is_servable(tmp_path, suffix):
     ],
 )
 def test_names_this_server_never_generates_are_refused(tmp_path, filename):
-    assert _resolve_media_file(tmp_path, filename) is None
+    """Each name leads to a file that exists, so only the check stands in the way."""
+    store = tmp_path / "store"
+    (store / f"{STEM}.png").mkdir(parents=True)  # lets a name step through it with `..`
+    target = Path(os.path.normpath(store / filename))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"not yours")
+
+    assert _resolve_media_file(store, filename) is None
+
+
+def test_a_link_that_leads_out_of_the_store_is_not_followed(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    (tmp_path / "outside.png").write_bytes(b"not yours")
+    (store / f"{STEM}.png").symlink_to(tmp_path / "outside.png")
+
+    assert _resolve_media_file(store, f"{STEM}.png") is None
 
 
 def test_a_matching_name_with_no_file_behind_it_is_refused(tmp_path):

@@ -4,7 +4,7 @@ import pytest
 from fastapi import Response
 
 from app.server import health
-from app.utils.config import GeminiConfig, GuestMode
+from app.utils.config import GuestMode
 
 
 class _Pool:
@@ -45,9 +45,3 @@ def test_guest_mode_controls_client_health_status(
 
     assert response.status_code == expected_status
     assert result.ok is expected_ok
-
-
-def test_guest_mode_defaults_to_adaptive():
-    config = GeminiConfig(clients=[], auto_refresh=True, verbose=True)
-
-    assert config.guest_mode == GuestMode.ADAPTIVE

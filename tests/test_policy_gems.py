@@ -347,19 +347,23 @@ def test_gem_cleanup_alone_keeps_the_periodic_task_alive_and_runs_on_its_own_clo
     assert gem_cleanups == 1  # at startup, then not again until six hours have passed
 
 
-def test_extract_leading_system_prompt_handles_edge_cases():
-    msgs = [
+def test_leading_system_messages_are_joined_and_a_later_one_stays_in_place():
+    messages = [
         AppMessage(role="system", content="First"),
         AppMessage(role="system", content="Second"),
         AppMessage(role="user", content="Hi"),
         AppMessage(role="system", content="Late system"),
     ]
-    extracted, rest = chat._extract_leading_system_prompt(msgs)
+
+    extracted, rest = chat._extract_leading_system_prompt(messages)
+
     assert extracted == "First\n\nSecond"
     assert [m.role for m in rest] == ["user", "system"]
 
-    # Multimodal leading system message must not be stripped.
-    multimodal = [
+
+def test_a_system_message_with_an_attachment_is_not_moved_into_a_gem():
+    """A gem holds text only, so the attachment would be lost."""
+    messages = [
         AppMessage(
             role="system",
             content=[
@@ -369,9 +373,11 @@ def test_extract_leading_system_prompt_handles_edge_cases():
         ),
         AppMessage(role="user", content="Go"),
     ]
-    extracted_mm, rest_mm = chat._extract_leading_system_prompt(multimodal)
-    assert extracted_mm is None
-    assert len(rest_mm) == 2
+
+    extracted, rest = chat._extract_leading_system_prompt(messages)
+
+    assert extracted is None
+    assert rest == messages
 
 
 def test_chat_completion_persists_canonical_history_and_isolates_changed_system_prompt(

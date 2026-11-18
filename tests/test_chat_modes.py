@@ -9,14 +9,13 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from conftest import CLIENT_ID
 
 from app.models.core import AppMessage, ConversationInStore
 from app.server.chat import _is_reusable_chat
 from app.services.client import GeminiClientWrapper
 from app.utils import g_config
 from app.utils.config import ChatMode
-
-CLIENT_ID = "client-id-1"
 
 
 def _stored(chat_mode: ChatMode | None) -> ConversationInStore:
