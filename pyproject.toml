@@ -7,7 +7,7 @@ requires-python = "==3.13.*"
 dependencies = [
     "curl-cffi>=0.14.0",
     "fastapi>=0.135.0",
-    "gemini-webapi>=1.19.2",
+    "gemini-webapi>=2.1.1",
     "httptools>=0.7.1",
     "lmdb>=1.7.5",
     "loguru>=0.7.3",

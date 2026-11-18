@@ -157,7 +157,7 @@ dev = [
 requires-dist = [
     { name = "curl-cffi", specifier = ">=0.14.0" },
     { name = "fastapi", specifier = ">=0.135.0" },
-    { name = "gemini-webapi", specifier = ">=1.19.2" },
+    { name = "gemini-webapi", specifier = ">=2.1.1" },
     { name = "httptools", specifier = ">=0.7.1" },
     { name = "lmdb", specifier = ">=1.7.5" },
     { name = "loguru", specifier = ">=0.7.3" },
