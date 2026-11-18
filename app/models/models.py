@@ -206,23 +206,6 @@ class ResponseInputFile(BaseModel):
     filename: str | None = Field(default=None)
 
 
-class ResponseInputMessageContentList(BaseModel):
-    """Normalised content item stored on ``ResponseInputMessage`` server-side.
-
-    Superset of all input content types (text, image, file, reasoning) so they
-    can be represented in a single model after round-tripping through the server.
-    """
-
-    type: Literal["input_text", "output_text", "reasoning_text", "input_image", "input_file"]
-    text: str | None = Field(default=None)
-    image_url: str | None = Field(default=None)
-    detail: Literal["auto", "low", "high"] | None = Field(default=None)
-    file_id: str | None = Field(default=None)
-    file_url: str | None = Field(default=None)
-    file_data: str | None = Field(default=None)
-    filename: str | None = Field(default=None)
-
-
 class ResponseInputMessage(BaseModel):
     """A single conversation turn in a Responses API input list."""
 
@@ -364,17 +347,6 @@ class ResponseReasoningItem(BaseModel):
     summary: list[SummaryTextContent] | None = Field(default=None)
     content: list[ReasoningTextContent] | None = Field(default=None)
     encrypted_content: str | None = Field(default=None)
-
-
-class ResponseToolCall(BaseModel):
-    """A function-call output item emitted by the model."""
-
-    id: str | None = Field(default=None)
-    type: Literal["function_call"] | None = Field(default="function_call")
-    call_id: str | None = Field(default=None)
-    name: str | None = Field(default=None)
-    arguments: str | None = Field(default=None)
-    status: Literal["in_progress", "completed", "incomplete"] | None = Field(default="completed")
 
 
 class ImageGenerationCall(BaseModel):

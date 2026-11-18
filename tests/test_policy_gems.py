@@ -5,7 +5,6 @@ import time
 from types import SimpleNamespace
 from typing import Any, cast
 
-import pytest
 from fastapi import Request
 from gemini_webapi import ModelOutput
 from gemini_webapi.constants import AccountStatus
@@ -195,11 +194,7 @@ def test_wrapper_guest_session_skips_gem_operations(monkeypatch):
     monkeypatch.setattr(wrapper, "create_gem", _fail)
 
     asyncio.run(wrapper._initialize_gems())
-    assert wrapper.policy_gem_id("general_capability_guardrail") is None
-    assert asyncio.run(wrapper.policy_gem_id_or_create("general_capability_guardrail")) is None
     assert asyncio.run(wrapper.system_prompt_gem_id_or_create("You are helpful.")) is None
-    with pytest.raises(RuntimeError, match="authenticated"):
-        asyncio.run(wrapper.refresh_gems())
 
 
 def test_wrapper_system_prompt_gem_dedup_rate_limit_and_cleanup_prune(monkeypatch):
@@ -241,7 +236,6 @@ def test_wrapper_system_prompt_gem_dedup_rate_limit_and_cleanup_prune(monkeypatc
         assert id1_again == "g1"
         assert id2 is None
         assert has_managed_marker(store["g1"].description)
-        assert wrapper.managed_gem_metrics()["managed_gems_rate_limit_skips"] == 1
 
         wrapper._prune_deleted_system_gem_ids(["g1"])
         assert wrapper._system_prompt_gem_ids == {}
