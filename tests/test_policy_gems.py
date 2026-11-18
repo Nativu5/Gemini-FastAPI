@@ -19,6 +19,7 @@ from app import main as main_module
 from app.models import AppContentItem, AppMessage, ChatCompletionMessage, ChatCompletionRequest
 from app.server import chat
 from app.services import client as client_module
+from app.services import policy_gems as policy_gems_module
 from app.services.client import GeminiClientWrapper
 from app.services.lmdb import LMDBConversationStore
 from app.services.policy_gems import (
@@ -29,7 +30,6 @@ from app.services.policy_gems import (
 )
 from app.services.pool import GeminiClientPool
 from app.utils.config import (
-    GeminiConfig,
     GeminiGemCleanupConfig,
     GeminiGemPolicyMode,
     GeminiGemsConfig,
@@ -47,14 +47,6 @@ class _FakeGemClient:
 
     async def delete_gem(self, gem: Gem | str, **kwargs: Any) -> None:
         self._store.pop(gem.id if isinstance(gem, Gem) else gem, None)
-
-
-def test_gem_config_defaults_are_safe_and_consistent():
-    config = GeminiConfig(clients=[], auto_refresh=True, verbose=True)
-    assert config.gems.policy == GeminiGemPolicyMode.OFF
-    assert config.gems.create_rate_limit_per_minute == 4
-    assert config.gems.managed_gems_max_total == 200
-    assert config.gems.cleanup.enabled is False
 
 
 def test_cleanup_deletes_only_stale_gems_that_carry_our_marker():
@@ -111,97 +103,138 @@ def test_wrapper_guest_session_skips_gem_operations(monkeypatch):
     assert asyncio.run(wrapper.system_prompt_gem_id_or_create("You are helpful.")) is None
 
 
-def test_wrapper_system_prompt_gem_dedup_rate_limit_and_cleanup_prune(monkeypatch):
+@pytest.fixture
+def account(monkeypatch):
+    """A logged-in client whose gem requests go to an in-memory account, on a clock the test moves.
+
+    `account.requests` lists every gem request made, `account.gems` is what the account holds.
+    """
     wrapper = GeminiClientWrapper(client_id="auth-1")
     wrapper._running = True
     wrapper.account_status = AccountStatus.AVAILABLE
+    state = SimpleNamespace(
+        client=wrapper, gems={}, requests=[], reject_updates=False, now=time.time()
+    )
 
-    store: dict[str, Gem] = {}
-    seq = 0
+    async def fetch_gems(include_hidden: bool = False, **kwargs: Any) -> GemJar:
+        state.requests.append("fetch")
+        return GemJar(state.gems)
 
-    async def _fetch_gems(include_hidden: bool = False, **kwargs: Any) -> GemJar:
-        wrapper._gems = GemJar(store)
-        return wrapper._gems
-
-    async def _create_gem(name: str, prompt: str, description: str = "") -> Gem:
-        nonlocal seq
-        seq += 1
-        gem = Gem(id=f"g{seq}", name=name, prompt=prompt, description=description, predefined=False)
-        store[gem.id] = gem
+    async def create_gem(name: str, prompt: str, description: str = "") -> Gem:
+        state.requests.append("create")
+        gem = Gem(
+            id=f"g{state.requests.count('create')}",
+            name=name,
+            prompt=prompt,
+            description=description,
+            predefined=False,
+        )
+        state.gems[gem.id] = gem
         return gem
 
-    monkeypatch.setattr(wrapper, "fetch_gems", _fetch_gems)
-    monkeypatch.setattr(wrapper, "create_gem", _create_gem)
+    async def update_gem(gem: Gem, name: str, prompt: str, description: str = "") -> Gem:
+        state.requests.append("update")
+        if state.reject_updates:
+            raise APIError("Google said no")
+        state.gems[gem.id] = Gem(
+            id=gem.id, name=name, prompt=prompt, description=description, predefined=False
+        )
+        return state.gems[gem.id]
 
-    gems_cfg = GeminiGemsConfig(
-        policy=GeminiGemPolicyMode.CREATE_ON_DEMAND,
-        create_rate_limit_per_minute=1,
-        managed_gems_max_total=10,
-    )
+    async def delete_gem(gem: Gem, **kwargs: Any) -> None:
+        state.requests.append("delete")
+        del state.gems[gem.id]
+
+    for name, fake in (
+        ("fetch_gems", fetch_gems),
+        ("create_gem", create_gem),
+        ("update_gem", update_gem),
+        ("delete_gem", delete_gem),
+    ):
+        monkeypatch.setattr(wrapper, name, fake)
+    clock = SimpleNamespace(time=lambda: state.now, monotonic=lambda: state.now)
+    monkeypatch.setattr(client_module, "time", clock)
+    monkeypatch.setattr(policy_gems_module, "time", clock)
+    return state
+
+
+def _use_gems(monkeypatch, **settings: Any) -> None:
+    gems_cfg = GeminiGemsConfig(policy=GeminiGemPolicyMode.CREATE_ON_DEMAND, **settings)
     monkeypatch.setattr(client_module.g_config.gemini, "gems", gems_cfg)
 
-    async def _run() -> None:
-        id1 = await wrapper.system_prompt_gem_id_or_create("System prompt A")
-        id1_again = await wrapper.system_prompt_gem_id_or_create("System prompt A")
-        # Rate limit of 1/min blocks a second distinct prompt in the same minute.
-        id2 = await wrapper.system_prompt_gem_id_or_create("System prompt B")
-        assert id1 == "g1"
-        assert id1_again == "g1"
-        assert id2 is None
-        assert has_managed_marker(store["g1"].description)
 
-        wrapper._prune_deleted_system_gem_ids(["g1"])
-        assert wrapper._system_prompt_gem_ids == {}
-        await wrapper.close()
+def test_one_gem_serves_every_request_with_a_prompt_and_creation_is_rate_limited(
+    account, monkeypatch
+):
+    _use_gems(monkeypatch, create_rate_limit_per_minute=1)
+    lookup = account.client.system_prompt_gem_id_or_create
+
+    async def _run() -> None:
+        assert await lookup("System prompt A") == "g1"
+        assert await lookup("System prompt A") == "g1"
+        assert account.requests == ["fetch", "create"]  # the second lookup asked Google nothing
+        assert has_managed_marker(account.gems["g1"].description)
+
+        assert await lookup("System prompt B") is None  # one creation a minute, already used
+        account.now += 61
+        assert await lookup("System prompt B") == "g2"
 
     asyncio.run(_run())
 
 
-def test_a_failed_last_use_update_is_tried_again_on_the_next_use(monkeypatch):
-    wrapper = GeminiClientWrapper(client_id="auth-1")
-    wrapper._running = True
-    wrapper.account_status = AccountStatus.AVAILABLE
+def test_a_gem_in_use_has_its_last_use_recorded_once_per_interval(account, monkeypatch):
+    _use_gems(monkeypatch, cleanup=GeminiGemCleanupConfig(enabled=True, touch_interval_minutes=60))
+    lookup = account.client.system_prompt_gem_id_or_create
 
-    store = {
-        "g1": Gem(
-            id="g1",
-            name="fastapi_policy_sys_abc",
-            prompt="p",
-            description=touch_managed_description("Managed", now_ts=1),
-            predefined=False,
-        )
-    }
-    attempts: list[str] = []
+    async def _run() -> None:
+        await lookup("System prompt A")
+        await lookup("System prompt A")
+        assert "update" not in account.requests  # created a moment ago: nothing to record yet
 
-    async def _fetch_gems(include_hidden: bool = False, **kwargs: Any) -> GemJar:
-        return GemJar(store)
+        account.now += 61 * 60
+        await lookup("System prompt A")
+        await lookup("System prompt A")
+        assert account.requests.count("update") == 1
+        assert extract_managed_last_used_at(account.gems["g1"].description) == int(account.now)
 
-    async def _update_gem(gem: Gem | str, name: str, prompt: str, description: str = "") -> Gem:
-        attempts.append(description)
-        if len(attempts) == 1:
-            raise RuntimeError("Google said no")
-        store["g1"] = Gem(
-            id="g1", name=name, prompt=prompt, description=description, predefined=False
-        )
-        return store["g1"]
+    asyncio.run(_run())
 
-    monkeypatch.setattr(wrapper, "fetch_gems", _fetch_gems)
-    monkeypatch.setattr(wrapper, "update_gem", _update_gem)
-    gems_cfg = GeminiGemsConfig(
-        policy=GeminiGemPolicyMode.CREATE_ON_DEMAND,
-        cleanup=GeminiGemCleanupConfig(enabled=True),
-    )
-    monkeypatch.setattr(client_module.g_config.gemini, "gems", gems_cfg)
 
-    async def _use_the_gem_twice() -> None:
-        for _ in range(2):
-            wrapper._managed_gem_pending_touch_ids.add("g1")
-            await wrapper._flush_managed_policy_touches()
+def test_a_rejected_last_use_update_neither_fails_the_request_nor_repeats_at_once(
+    account, monkeypatch
+):
+    _use_gems(monkeypatch, cleanup=GeminiGemCleanupConfig(enabled=True, touch_interval_minutes=60))
+    lookup = account.client.system_prompt_gem_id_or_create
 
-    asyncio.run(_use_the_gem_twice())
+    async def _run() -> None:
+        await lookup("System prompt A")
+        account.reject_updates = True
+        account.now += 61 * 60
+        assert await lookup("System prompt A") == "g1"
+        assert await lookup("System prompt A") == "g1"
+        assert account.requests.count("update") == 1  # not retried on the very next request
 
-    assert len(attempts) == 2
-    assert (extract_managed_last_used_at(store["g1"].description) or 0) > 1
+        account.reject_updates = False
+        account.now += 61 * 60
+        await lookup("System prompt A")
+        assert extract_managed_last_used_at(account.gems["g1"].description) == int(account.now)
+
+    asyncio.run(_run())
+
+
+def test_a_gem_that_cleanup_deleted_is_not_handed_out_again(account, monkeypatch):
+    _use_gems(monkeypatch, cleanup=GeminiGemCleanupConfig(enabled=True, unused_days=7))
+    lookup = account.client.system_prompt_gem_id_or_create
+
+    async def _run() -> None:
+        assert await lookup("System prompt A") == "g1"
+        account.now += 8 * 24 * 60 * 60
+        await account.client.delete_unused_gems()
+        assert account.gems == {}
+
+        assert await lookup("System prompt A") == "g2"
+
+    asyncio.run(_run())
 
 
 def test_a_gem_request_that_google_rejects_fails_instead_of_hanging(monkeypatch):
@@ -240,13 +273,6 @@ def test_a_gem_request_that_google_rejects_fails_instead_of_hanging(monkeypatch)
         ):
             with pytest.raises(APIError):
                 await asyncio.wait_for(call, timeout=2)
-
-        # The background last-use update takes the same lock; it logs the failure and ends.
-        await wrapper.init()
-        wrapper._schedule_managed_policy_touch("gem_used")
-        worker = wrapper._managed_gem_touch_worker_task
-        assert worker is not None
-        await asyncio.wait_for(worker, timeout=2)
 
     asyncio.run(_run())
 

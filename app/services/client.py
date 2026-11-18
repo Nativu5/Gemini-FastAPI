@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import hashlib
 import io
 import time
@@ -10,7 +9,7 @@ from typing import Any
 import orjson
 from gemini_webapi import GeminiClient
 from gemini_webapi.constants import AccountStatus
-from gemini_webapi.types import AvailableModel
+from gemini_webapi.types import AvailableModel, Gem
 from loguru import logger
 
 from app.models import AppMessage
@@ -47,115 +46,9 @@ class GeminiClientWrapper(GeminiClient):
         # once the session that opened a window is gone, nothing can vouch for it.
         self.latest_chat_cid: str | None = None
         self._gem_lock = asyncio.Lock()
-        self._system_prompt_gem_ids: dict[str, str] = {}
-        self._managed_gem_create_timestamps: deque[float] = deque()
-        self._managed_gem_last_touch_timestamps: dict[str, float] = {}
-        self._managed_gem_pending_touch_ids: set[str] = set()
-        self._managed_gem_touch_worker_task: asyncio.Task[None] | None = None
-
-    def _acquire_managed_gem_create_budget(self, per_minute: int) -> int:
-        """Return remaining create budget in the current 60-second window."""
-        now = time.monotonic()
-        window_start = now - 60.0
-        while (
-            self._managed_gem_create_timestamps
-            and self._managed_gem_create_timestamps[0] < window_start
-        ):
-            self._managed_gem_create_timestamps.popleft()
-
-        used = len(self._managed_gem_create_timestamps)
-        return max(0, per_minute - used)
-
-    def _prune_deleted_system_gem_ids(self, deleted_ids: list[str]) -> None:
-        """Remove deleted gem ids from in-memory system prompt cache."""
-        if not deleted_ids:
-            return
-        deleted_set = set(deleted_ids)
-        self._system_prompt_gem_ids = {
-            k: v for k, v in self._system_prompt_gem_ids.items() if v not in deleted_set
-        }
-        for gem_id in deleted_set:
-            self._managed_gem_last_touch_timestamps.pop(gem_id, None)
-            self._managed_gem_pending_touch_ids.discard(gem_id)
-
-    def _schedule_managed_policy_touch(self, gem_id: str) -> None:
-        """Queue gem usage touch updates and ensure a background worker exists."""
-        if not g_config.gemini.gems.cleanup.enabled or self.is_guest():
-            return
-
-        self._managed_gem_pending_touch_ids.add(gem_id)
-        if (
-            self._managed_gem_touch_worker_task is None
-            or self._managed_gem_touch_worker_task.done()
-        ):
-            self._managed_gem_touch_worker_task = asyncio.create_task(
-                self._managed_policy_touch_worker()
-            )
-
-    async def _managed_policy_touch_worker(self) -> None:
-        """Batch and flush pending managed gem touches in the background."""
-        try:
-            while self._managed_gem_pending_touch_ids and self.running() and not self.is_guest():
-                await asyncio.sleep(0.5)
-                await self._flush_managed_policy_touches()
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            logger.warning(f"Failed to record the last use of managed gems: {exc}")
-        finally:
-            self._managed_gem_touch_worker_task = None
-
-    async def _flush_managed_policy_touches(self) -> None:
-        """Flush queued managed gem touch updates in a single fetch/update pass."""
-        gem_cfg = g_config.gemini.gems
-        if not gem_cfg.cleanup.enabled or not self.running() or self.is_guest():
-            self._managed_gem_pending_touch_ids.clear()
-            return
-
-        pending = list(self._managed_gem_pending_touch_ids)
-        if not pending:
-            return
-
-        self._managed_gem_pending_touch_ids.clear()
-
-        now_ts = time.time()
-        min_interval_sec = gem_cfg.cleanup.touch_interval_minutes * 60
-
-        async with self._gem_lock:
-            if not self.running() or self.is_guest():
-                return
-            gems = list(await self.fetch_gems(include_hidden=True))
-            by_id = {gem.id: gem for gem in gems}
-
-            for gem_id in pending:
-                last_touch = self._managed_gem_last_touch_timestamps.get(gem_id)
-                if last_touch is not None and now_ts - last_touch < min_interval_sec:
-                    continue
-
-                target = by_id.get(gem_id)
-                if target is None or target.predefined:
-                    continue
-                if not target.name.startswith(gem_cfg.policies.prefix):
-                    continue
-                if target.prompt is None:
-                    continue
-
-                updated_description = touch_managed_description(target.description, now_ts=now_ts)
-                if (target.description or "") == updated_description:
-                    self._managed_gem_last_touch_timestamps[gem_id] = now_ts
-                    continue
-
-                try:
-                    await self.update_gem(
-                        gem=target,
-                        name=target.name,
-                        description=updated_description,
-                        prompt=target.prompt,
-                    )
-                    self._managed_gem_last_touch_timestamps[gem_id] = now_ts
-                except Exception as exc:
-                    # Not recorded as touched, so the next request that uses the gem tries again.
-                    logger.warning(f"Failed to record the last use of gem {target.name!r}: {exc}")
+        self._system_prompt_gems: dict[str, Gem] = {}  # sha256 of a system prompt -> its gem
+        self._gems_created_at: deque[float] = deque()  # creations within the last minute
+        self._gem_use_recorded_at: dict[str, float] = {}  # gem id -> time of the last update
 
     async def init(self, *args: Any, **kwargs: Any) -> None:
         """
@@ -181,16 +74,6 @@ class GeminiClientWrapper(GeminiClient):
             self._initialized = False
             logger.exception(f"Failed to initialize GeminiClient {self.id}")
             raise
-
-    async def close(self, *args: Any, **kwargs: Any) -> None:
-        """Cancel background gem workers and close the underlying Gemini client."""
-        task = self._managed_gem_touch_worker_task
-        if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        self._managed_gem_touch_worker_task = None
-        await super().close(*args, **kwargs)
 
     def running(self) -> bool:
         return self._running
@@ -218,85 +101,90 @@ class GeminiClientWrapper(GeminiClient):
                 max_deletes=gem_cfg.cleanup.max_deletes_per_run,
                 require_marker=gem_cfg.cleanup.require_managed_marker,
             )
-        self._prune_deleted_system_gem_ids(deleted)
+        self._system_prompt_gems = {
+            key: gem for key, gem in self._system_prompt_gems.items() if gem.id not in deleted
+        }
 
     async def system_prompt_gem_id_or_create(self, system_prompt: str) -> str | None:
-        """Return or create a managed gem id for a raw system prompt text."""
-        prompt = (system_prompt or "").strip()
-        if not prompt or self.is_guest():
-            return None
+        """Id of the managed gem that holds this system prompt, or None to send it inline.
 
-        gem_cfg = g_config.gemini.gems
-        policy_mode = gem_cfg.policy
-        if policy_mode == GeminiGemPolicyMode.OFF:
+        None when gems are off, the session is a guest, no gem exists and the policy forbids
+        creating one, or a creation limit is reached.
+        """
+        prompt = (system_prompt or "").strip()
+        if not prompt or self.is_guest() or g_config.gemini.gems.policy == GeminiGemPolicyMode.OFF:
             return None
 
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        cache_key = f"sys:{prompt_hash}"
-        cached = self._system_prompt_gem_ids.get(cache_key)
-        if cached is not None:
-            self._schedule_managed_policy_touch(cached)
-            return cached
+        gem = self._system_prompt_gems.get(prompt_hash)
+        if gem is None:
+            async with self._gem_lock:
+                # Looked up again: another request may have created it while this one waited.
+                gem = self._system_prompt_gems.get(prompt_hash) or await self._find_or_create_gem(
+                    prompt, prompt_hash
+                )
+                if gem is None:
+                    return None
+                self._system_prompt_gems[prompt_hash] = gem
+        await self._record_gem_use(gem, prompt)
+        return gem.id
 
+    async def _find_or_create_gem(self, prompt: str, prompt_hash: str) -> Gem | None:
+        """The account's gem for this prompt, created if the policy and the limits allow."""
+        gem_cfg = g_config.gemini.gems
         name = f"{gem_cfg.policies.prefix}sys_{prompt_hash[:24]}"
-        base_description = "Managed system prompt gem created on-demand from API system message."
+        gems = [gem for gem in await self.fetch_gems(include_hidden=True) if not gem.predefined]
+        if existing := next((gem for gem in gems if gem.name == name), None):
+            return existing
+        if gem_cfg.policy != GeminiGemPolicyMode.CREATE_ON_DEMAND:
+            return None
 
-        async with self._gem_lock:
-            if self.is_guest():
-                return None
+        while self._gems_created_at and self._gems_created_at[0] < time.monotonic() - 60:
+            self._gems_created_at.popleft()
+        managed = sum(gem.name.startswith(gem_cfg.policies.prefix) for gem in gems)
+        if (
+            len(self._gems_created_at) >= gem_cfg.create_rate_limit_per_minute
+            or managed >= gem_cfg.managed_gems_max_total
+        ):
+            return None
 
-            cached = self._system_prompt_gem_ids.get(cache_key)
-            if cached is not None:
-                self._schedule_managed_policy_touch(cached)
-                return cached
+        created = await self.create_gem(
+            name=name,
+            prompt=prompt,
+            description=touch_managed_description(
+                "Managed system prompt gem created on-demand from API system message.",
+                now_ts=time.time(),
+            ),
+        )
+        self._gems_created_at.append(time.monotonic())
+        return created
 
-            gems = list(await self.fetch_gems(include_hidden=True))
-            custom_gems = [gem for gem in gems if not gem.predefined]
+    async def _record_gem_use(self, gem: Gem, prompt: str) -> None:
+        """Write the time of this use into the gem's description, where cleanup reads it.
 
-            existing = next((gem for gem in custom_gems if gem.name == name), None)
-            if existing is not None:
-                if (
-                    policy_mode == GeminiGemPolicyMode.CREATE_ON_DEMAND
-                    and extract_managed_last_used_at(existing.description) is None
-                ):
-                    now_ts = time.time()
-                    await self.update_gem(
-                        gem=existing,
-                        name=existing.name,
-                        prompt=existing.prompt or prompt,
-                        description=touch_managed_description(
-                            existing.description or base_description,
-                            now_ts=now_ts,
-                        ),
-                    )
-                    self._managed_gem_last_touch_timestamps[existing.id] = now_ts
-                else:
-                    self._schedule_managed_policy_touch(existing.id)
-                self._system_prompt_gem_ids[cache_key] = existing.id
-                return existing.id
-
-            if policy_mode != GeminiGemPolicyMode.CREATE_ON_DEMAND:
-                return None
-
-            create_budget = self._acquire_managed_gem_create_budget(
-                gem_cfg.create_rate_limit_per_minute
+        At most once per `touch_interval_minutes` for a gem, counted from the time already in its
+        description. A failed update waits for the next interval too: while Google rejects gem
+        requests, retrying on every request would hold each one up for the library's retries.
+        """
+        cleanup = g_config.gemini.gems.cleanup
+        now = time.time()
+        recorded_at = (
+            self._gem_use_recorded_at.get(gem.id)
+            or extract_managed_last_used_at(gem.description)
+            or 0
+        )
+        if not cleanup.enabled or now - recorded_at < cleanup.touch_interval_minutes * 60:
+            return
+        self._gem_use_recorded_at[gem.id] = now
+        try:
+            await self.update_gem(
+                gem=gem,
+                name=gem.name,
+                prompt=gem.prompt or prompt,
+                description=touch_managed_description(gem.description, now_ts=now),
             )
-            if create_budget <= 0:
-                return None
-
-            managed_total = len(
-                [gem for gem in custom_gems if gem.name.startswith(gem_cfg.policies.prefix)]
-            )
-            if managed_total >= gem_cfg.managed_gems_max_total:
-                return None
-
-            now_ts = time.time()
-            description = touch_managed_description(base_description, now_ts=now_ts)
-            created = await self.create_gem(name=name, prompt=prompt, description=description)
-            self._managed_gem_create_timestamps.append(time.monotonic())
-            self._managed_gem_last_touch_timestamps[created.id] = now_ts
-            self._system_prompt_gem_ids[cache_key] = created.id
-            return created.id
+        except Exception as exc:
+            logger.warning(f"Failed to record the last use of gem {gem.name!r}: {exc}")
 
     def is_healthy(self) -> bool:
         """
