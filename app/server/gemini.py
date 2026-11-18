@@ -20,8 +20,9 @@ from __future__ import annotations
 import io
 import reprlib
 import uuid
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import orjson
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -29,6 +30,7 @@ from fastapi.exception_handlers import http_exception_handler, request_validatio
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from gemini_webapi import ModelOutput
+from gemini_webapi.client import ChatSession
 from loguru import logger
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -108,22 +110,14 @@ def add_gemini_exception_handlers(app: FastAPI) -> None:
             429: "RESOURCE_EXHAUSTED",
             503: "UNAVAILABLE",
         }.get(exc.status_code, "INTERNAL")
-        err = _to_gemini_error(exc.status_code, str(exc.detail), grpc_status)
-        return JSONResponse(status_code=exc.status_code, content=err.model_dump(mode="json"))
+        return _error_response(exc.status_code, str(exc.detail), grpc_status)
 
     @app.exception_handler(RequestValidationError)
     async def gemini_validation_exception_handler(request: Request, exc: RequestValidationError):
         """Convert Gemini-route 422 validation errors into Google API error format."""
         if request.url.path.startswith("/v1beta/"):
             detail = str(exc.errors()) if exc.errors() else str(exc)
-            err = GeminiErrorResponse(
-                error=GeminiErrorDetail(
-                    code=400,
-                    message=f"Invalid request: {detail}",
-                    status="INVALID_ARGUMENT",
-                )
-            )
-            return JSONResponse(status_code=400, content=err.model_dump(mode="json"))
+            return _error_response(400, f"Invalid request: {detail}", "INVALID_ARGUMENT")
         return await request_validation_exception_handler(request, exc)
 
 
@@ -371,6 +365,12 @@ def _to_gemini_error(status_code: int, message: str, grpc_status: str) -> Gemini
     )
 
 
+def _error_response(status_code: int, message: str, grpc_status: str) -> JSONResponse:
+    """An HTTP error in Google's envelope."""
+    err = _to_gemini_error(status_code, message, grpc_status)
+    return JSONResponse(status_code=status_code, content=err.model_dump(mode="json"))
+
+
 def _log_ignored_gemini_options(
     request: GeminiGenerateContentRequest, response_schema: dict[str, Any] | None
 ) -> None:
@@ -541,8 +541,7 @@ async def gemini_get_model(model: str, api_key: str = Depends(verify_gemini_api_
     try:
         _resolve_model_name(GeminiClientPool(), model_name)
     except ValueError as exc:
-        err = _to_gemini_error(404, str(exc), "NOT_FOUND")
-        return JSONResponse(status_code=404, content=err.model_dump(mode="json"))
+        return _error_response(404, str(exc), "NOT_FOUND")
 
     all_models = await _get_available_models(GeminiClientPool())
     for m in all_models:
@@ -558,35 +557,41 @@ async def gemini_get_model(model: str, api_key: str = Depends(verify_gemini_api_
     )
 
 
-@router.post("/v1beta/models/{model:path}:generateContent")
-async def gemini_generate_content(
-    model: str,
-    request: GeminiGenerateContentRequest,
-    raw_request: Request,
-    api_key: str = Depends(verify_gemini_api_key),
-    tmp_dir: Path = Depends(get_temp_dir),
-):
-    """Non-streaming content generation (Gemini API format)."""
+class _SentRequest(NamedTuple):
+    """A generation request that has been sent upstream, with what finishing it needs."""
+
+    output: AsyncGenerator[ModelOutput] | ModelOutput
+    session: ChatSession
+    client: GeminiClientWrapper
+    db: LMDBConversationStore
+    model_name: str
+    resolved_model: str
+    messages: list[AppMessage]  # as the caller sent them; usage is counted on these
+    prepared: list[AppMessage]  # with tool and schema instructions added; this is what is stored
+    tool_choice: Literal["none", "auto", "required"] | ToolChoiceFunction | None
+    structured_requirement: StructuredOutputRequirement | None
+
+
+async def _send_gemini_request(
+    model: str, request: GeminiGenerateContentRequest, tmp_dir: Path, *, stream: bool
+) -> _SentRequest | JSONResponse:
+    """Validate a generation request and send it upstream, or return the error to answer with."""
     model_name = _strip_model_prefix(model)
 
     try:
         model_obj = _resolve_model_name(GeminiClientPool(), model_name)
     except ValueError as exc:
-        err = _to_gemini_error(400, str(exc), "INVALID_ARGUMENT")
-        return JSONResponse(status_code=400, content=err.model_dump(mode="json"))
+        return _error_response(400, str(exc), "INVALID_ARGUMENT")
 
     if validation_error := _validate_gemini_request(request):
-        err = _to_gemini_error(400, validation_error, "INVALID_ARGUMENT")
-        return JSONResponse(status_code=400, content=err.model_dump(mode="json"))
+        return _error_response(400, validation_error, "INVALID_ARGUMENT")
     response_schema, structured_requirement = _gemini_structured_requirement(request)
     _log_ignored_gemini_options(request, response_schema)
 
     messages = _gemini_contents_to_messages(request.contents, request.systemInstruction)
-
     internal_tools, tool_choice = _gemini_tools_to_internal(request.tools, request.toolConfig)
 
     extra_instr = [structured_requirement.instruction] if structured_requirement else None
-
     msgs = _prepare_messages_for_model(messages, internal_tools, tool_choice, extra_instr)
 
     pool, db = GeminiClientPool(), LMDBConversationStore()
@@ -603,8 +608,7 @@ async def gemini_generate_content(
 
     if session:
         if not remain:
-            err = _to_gemini_error(400, "No new messages to send.", "INVALID_ARGUMENT")
-            return JSONResponse(status_code=400, content=err.model_dump(mode="json"))
+            return _error_response(400, "No new messages to send.", "INVALID_ARGUMENT")
 
         input_msgs = _prepare_messages_for_model(
             remain, internal_tools, tool_choice, extra_instr, False
@@ -621,8 +625,7 @@ async def gemini_generate_content(
             m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
         except Exception as e:
             logger.exception("[Gemini API] Failed to prepare session")
-            err = _to_gemini_error(503, str(e), "UNAVAILABLE")
-            return JSONResponse(status_code=503, content=err.model_dump(mode="json"))
+            return _error_response(503, str(e), "UNAVAILABLE")
 
     try:
         assert session is not None
@@ -630,7 +633,7 @@ async def gemini_generate_content(
         logger.debug(
             f"[Gemini API] Client: {client.id}, input len: {len(m_input)}, files: {len(files)}"
         )
-        resp, session, client = await _send_with_internal_fallback(
+        output, session, client = await _send_with_internal_fallback(
             pool=pool,
             db=db,
             resolved_model=model_obj,
@@ -641,13 +644,67 @@ async def gemini_generate_content(
             full_prepared_messages=msgs,
             stored_conversation=stored_conv,
             tmp_dir=tmp_dir,
-            stream=False,
+            stream=stream,
             temporary=use_temporary,
         )
     except Exception as e:
         logger.exception("[Gemini API] Gemini call failed")
-        err = _to_gemini_error(502, str(e), "INTERNAL")
-        return JSONResponse(status_code=502, content=err.model_dump(mode="json"))
+        return _error_response(502, str(e), "INTERNAL")
+
+    return _SentRequest(
+        output,
+        session,
+        client,
+        db,
+        model_name,
+        model_obj,
+        messages,
+        msgs,
+        tool_choice,
+        structured_requirement,
+    )
+
+
+_IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+async def _inline_image(
+    image: Any, seen_hashes: set[str], base_url: str
+) -> tuple[GeminiPart, str] | None:
+    """One generated image as an `inlineData` part, with the markdown link stored for it.
+
+    Returns None for a copy of an image this response already carries.
+    """
+    image_store = get_media_store_dir()
+    b64_str, _w, _h, fname, file_hash = await _image_to_base64(image, image_store)
+    if file_hash in seen_hashes:
+        (image_store / fname).unlink(missing_ok=True)
+        return None
+    seen_hashes.add(file_hash)
+    mime_type = _IMAGE_MIME_TYPES.get(Path(fname).suffix.lower(), "image/png")
+    part = GeminiPart(inlineData=GeminiInlineData(mimeType=mime_type, data=b64_str))
+    return part, f"\n\n![{fname}]({base_url}/media/{fname}?token={get_media_token(fname)})"
+
+
+@router.post("/v1beta/models/{model:path}:generateContent")
+async def gemini_generate_content(
+    model: str,
+    request: GeminiGenerateContentRequest,
+    raw_request: Request,
+    api_key: str = Depends(verify_gemini_api_key),
+    tmp_dir: Path = Depends(get_temp_dir),
+):
+    """Non-streaming content generation (Gemini API format)."""
+    sent = await _send_gemini_request(model, request, tmp_dir, stream=False)
+    if isinstance(sent, JSONResponse):
+        return sent
+    resp = sent.output
 
     try:
         assert isinstance(resp, ModelOutput)
@@ -655,64 +712,43 @@ async def gemini_generate_content(
         raw_clean = normalize_llm_text(resp.text or "")
     except Exception:
         logger.exception("[Gemini API] Output parsing failed")
-        err = _to_gemini_error(502, "Malformed response.", "INTERNAL")
-        return JSONResponse(status_code=502, content=err.model_dump(mode="json"))
+        return _error_response(502, "Malformed response.", "INTERNAL")
 
     try:
         thoughts, visible_output, storage_output, tool_calls = process_llm_output(
-            thoughts, raw_clean, structured_requirement
+            thoughts, raw_clean, sent.structured_requirement
         )
     except StructuredOutputValidationError as exc:
-        err = _to_gemini_error(502, str(exc), "INTERNAL")
-        return JSONResponse(status_code=502, content=err.model_dump(mode="json"))
-    if choice_error := _tool_choice_failure(tool_choice, tool_calls):
-        err = _to_gemini_error(502, choice_error, "INTERNAL")
-        return JSONResponse(status_code=502, content=err.model_dump(mode="json"))
+        return _error_response(502, str(exc), "INTERNAL")
+    if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
+        return _error_response(502, choice_error, "INTERNAL")
 
     # Images: collect Gemini images → inlineData parts + markdown URL for LMDB persistence
     image_parts: list[GeminiPart] = []
     seen_hashes: set[str] = set()
-    image_store = get_media_store_dir()
     base_url = str(raw_request.base_url).rstrip("/")
     for image in resp.images or []:
         try:
-            b64_str, _w, _h, fname, file_hash = await _image_to_base64(image, image_store)
-            if file_hash in seen_hashes:
-                (image_store / fname).unlink(missing_ok=True)
-                continue
-            seen_hashes.add(file_hash)
-            suffix = Path(fname).suffix.lower()
-            mime_map = {
-                ".png": "image/png",
-                ".jpg": "image/jpeg",
-                ".jpeg": "image/jpeg",
-                ".webp": "image/webp",
-                ".gif": "image/gif",
-            }
-            mime_type = mime_map.get(suffix, "image/png")
-            image_parts.append(
-                GeminiPart(inlineData=GeminiInlineData(mimeType=mime_type, data=b64_str))
-            )
-            token = get_media_token(fname)
-            img_url = f"{base_url}/media/{fname}?token={token}"
-            storage_output += f"\n\n![{fname}]({img_url})"
+            if inline := await _inline_image(image, seen_hashes, base_url):
+                image_parts.append(inline[0])
+                storage_output += inline[1]
         except Exception as exc:
             logger.warning(f"[Gemini API] Failed to process image: {exc}")
 
-    usage_tuple = calculate_usage(messages, visible_output, tool_calls, thoughts)
+    usage_tuple = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
 
     _persist_conversation(
-        db,
-        model_obj,
-        client,
-        session.metadata,
-        msgs,
+        sent.db,
+        sent.resolved_model,
+        sent.client,
+        sent.session.metadata,
+        sent.prepared,
         storage_output,
         tool_calls,
     )
 
     return _to_gemini_response(
-        visible_output, tool_calls, thoughts, usage_tuple, model_name, image_parts
+        visible_output, tool_calls, thoughts, usage_tuple, sent.model_name, image_parts
     )
 
 
@@ -725,90 +761,21 @@ async def gemini_stream_generate_content(
     tmp_dir: Path = Depends(get_temp_dir),
 ):
     """Streaming content generation (Gemini API format, SSE)."""
-    model_name = _strip_model_prefix(model)
-
-    try:
-        model_obj = _resolve_model_name(GeminiClientPool(), model_name)
-    except ValueError as exc:
-        err = _to_gemini_error(400, str(exc), "INVALID_ARGUMENT")
-        return JSONResponse(status_code=400, content=err.model_dump(mode="json"))
-
-    if validation_error := _validate_gemini_request(request):
-        err = _to_gemini_error(400, validation_error, "INVALID_ARGUMENT")
-        return JSONResponse(status_code=400, content=err.model_dump(mode="json"))
-    response_schema, structured_requirement = _gemini_structured_requirement(request)
-    _log_ignored_gemini_options(request, response_schema)
-
-    messages = _gemini_contents_to_messages(request.contents, request.systemInstruction)
-    internal_tools, tool_choice = _gemini_tools_to_internal(request.tools, request.toolConfig)
-
-    extra_instr = [structured_requirement.instruction] if structured_requirement else None
-    msgs = _prepare_messages_for_model(messages, internal_tools, tool_choice, extra_instr)
-
-    pool, db = GeminiClientPool(), LMDBConversationStore()
-    use_temporary = _use_temporary_chat_mode()
-    needs_upload = _requires_upload(msgs, use_temporary)
-    session, client, remain, stored_conv = await _find_reusable_session(
-        db,
-        pool,
-        model_obj,
-        msgs,
-        temporary=use_temporary,
-        require_account=needs_upload,
-    )
-
-    if session:
-        if not remain:
-            err = _to_gemini_error(400, "No new messages to send.", "INVALID_ARGUMENT")
-            return JSONResponse(status_code=400, content=err.model_dump(mode="json"))
-
-        input_msgs = _prepare_messages_for_model(
-            remain, internal_tools, tool_choice, extra_instr, False
-        )
-        m_input, files = await GeminiClientWrapper.process_conversation(input_msgs, tmp_dir)
-    else:
-        try:
-            client = await pool.acquire(require_account=needs_upload)
-            session = client.start_chat(model=client.usable_model(model_obj))
-            m_input, files = await GeminiClientWrapper.process_conversation(msgs, tmp_dir)
-        except Exception as e:
-            logger.exception("[Gemini API] Failed to prepare streaming session")
-            err = _to_gemini_error(503, str(e), "UNAVAILABLE")
-            return JSONResponse(status_code=503, content=err.model_dump(mode="json"))
-
-    try:
-        assert session is not None
-        assert client is not None
-        generator, session, client = await _send_with_internal_fallback(
-            pool=pool,
-            db=db,
-            resolved_model=model_obj,
-            session=session,
-            client=client,
-            current_input=m_input,
-            files=cast("list[Path | str | io.BytesIO]", files),
-            full_prepared_messages=msgs,
-            stored_conversation=stored_conv,
-            tmp_dir=tmp_dir,
-            stream=True,
-            temporary=use_temporary,
-        )
-    except Exception as e:
-        logger.exception("[Gemini API] Gemini streaming call failed")
-        err = _to_gemini_error(502, str(e), "INTERNAL")
-        return JSONResponse(status_code=502, content=err.model_dump(mode="json"))
+    sent = await _send_gemini_request(model, request, tmp_dir, stream=True)
+    if isinstance(sent, JSONResponse):
+        return sent
 
     return _create_gemini_streaming_response(
-        generator=generator,
-        model_name=model_name,
-        messages=msgs,
-        original_messages=messages,
-        db=db,
-        resolved_model=model_obj,
-        client_wrapper=client,
-        session=session,
-        tool_choice=tool_choice,
-        structured_requirement=structured_requirement,
+        generator=sent.output,
+        model_name=sent.model_name,
+        messages=sent.prepared,
+        original_messages=sent.messages,
+        db=sent.db,
+        resolved_model=sent.resolved_model,
+        client_wrapper=sent.client,
+        session=sent.session,
+        tool_choice=sent.tool_choice,
+        structured_requirement=sent.structured_requirement,
         base_url=str(raw_request.base_url).rstrip("/"),
     )
 
@@ -940,45 +907,20 @@ def _create_gemini_streaming_response(
                 )
                 yield f"data: {orjson.dumps(structured_chunk.model_dump(mode='json', exclude_none=True)).decode('utf-8')}\n\n"
 
-            image_store = get_media_store_dir()
             seen_hashes: set[str] = set()
             for image in all_images:
                 try:
-                    b64_str, _w, _h, fname, file_hash = await _image_to_base64(image, image_store)
-                    if file_hash in seen_hashes:
-                        (image_store / fname).unlink(missing_ok=True)
-                        continue
-                    seen_hashes.add(file_hash)
-                    suffix = Path(fname).suffix.lower()
-                    mime_map = {
-                        ".png": "image/png",
-                        ".jpg": "image/jpeg",
-                        ".jpeg": "image/jpeg",
-                        ".webp": "image/webp",
-                        ".gif": "image/gif",
-                    }
-                    mime_type = mime_map.get(suffix, "image/png")
-                    img_chunk = GeminiGenerateContentResponse(
-                        candidates=[
-                            GeminiCandidate(
-                                content=GeminiContent(
-                                    role="model",
-                                    parts=[
-                                        GeminiPart(
-                                            inlineData=GeminiInlineData(
-                                                mimeType=mime_type, data=b64_str
-                                            )
-                                        )
-                                    ],
-                                ),
-                                index=0,
-                            )
-                        ],
-                    )
-                    yield f"data: {orjson.dumps(img_chunk.model_dump(mode='json', exclude_none=True)).decode('utf-8')}\n\n"
-                    token = get_media_token(fname)
-                    img_url = f"{base_url}/media/{fname}?token={token}"
-                    storage_output += f"\n\n![{fname}]({img_url})"
+                    if inline := await _inline_image(image, seen_hashes, base_url):
+                        img_chunk = GeminiGenerateContentResponse(
+                            candidates=[
+                                GeminiCandidate(
+                                    content=GeminiContent(role="model", parts=[inline[0]]),
+                                    index=0,
+                                )
+                            ],
+                        )
+                        yield f"data: {orjson.dumps(img_chunk.model_dump(mode='json', exclude_none=True)).decode('utf-8')}\n\n"
+                        storage_output += inline[1]
                 except Exception as exc:
                     logger.warning(f"[Gemini API] Failed to process streaming image: {exc}")
             # Final chunk (finishReason + usageMetadata)
