@@ -694,8 +694,6 @@ def text_from_message(message: AppMessage) -> str:
         base_text = "\n".join(
             item.text or "" for item in message.content if getattr(item, "type", "") == "text"
         )
-    elif message.content is None:
-        base_text = ""
 
     if message.tool_calls:
         tool_arg_text = "".join(call.function.arguments or "" for call in message.tool_calls)

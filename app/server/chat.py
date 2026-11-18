@@ -172,14 +172,12 @@ async def _media_to_local_file(
         if not spath:
             continue
         try:
+            if spath in path_map:
+                # One saved file listed under two roles; it was renamed the first time round.
+                results[mtype] = path_map[spath]
+                continue
             original_path = Path(spath)
             if not original_path.exists():
-                if spath in path_map:
-                    results[mtype] = path_map[spath]
-                continue
-
-            if spath in path_map:
-                results[mtype] = path_map[spath]
                 continue
 
             data = original_path.read_bytes()
@@ -1254,15 +1252,11 @@ class StreamingOutputFilter:
 
     def flush(self) -> str:
         """Release remaining buffer content and perform final cleanup at stream end."""
-        res = ""
-        if self._is_outputting():
-            res = self.buffer
-            if tail_match := STREAM_FLUSH_TAIL_RE.search(res):
-                res = res[: -len(tail_match.group(0))]
-
-        self.buffer = ""
-        self.stack = ["NORMAL"]
-        self.current_role = ""
+        if not self._is_outputting():
+            return ""
+        res = self.buffer
+        if tail_match := STREAM_FLUSH_TAIL_RE.search(res):
+            res = res[: -len(tail_match.group(0))]
         return strip_system_hints(res)
 
 
