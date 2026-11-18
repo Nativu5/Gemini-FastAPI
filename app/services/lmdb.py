@@ -19,7 +19,7 @@ from app.utils import g_config
 from app.utils.config import ChatMode
 from app.utils.helper import (
     normalize_llm_text,
-    remove_tool_call_blocks,
+    strip_system_hints,
     unescape_text,
 )
 from app.utils.singleton import Singleton
@@ -57,7 +57,7 @@ def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
 
     text = normalize_llm_text(text)
     text = unescape_text(text)
-    text = remove_tool_call_blocks(text)
+    text = strip_system_hints(text)
 
     return _fuzzy_normalize(text) if fuzzy else text.strip() or None
 

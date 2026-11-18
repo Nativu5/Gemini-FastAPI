@@ -1,7 +1,7 @@
 import os
 import sys
 from enum import StrEnum
-from typing import Any, Literal, cast, get_args
+from typing import Any, Literal, cast
 
 from curl_cffi import BrowserTypeLiteral
 from loguru import logger
@@ -59,7 +59,7 @@ class GeminiClientSettings(BaseModel):
     secure_1psid: str | None = Field(default=None, description="Gemini Secure 1PSID")
     secure_1psidts: str | None = Field(default=None, description="Gemini Secure 1PSIDTS")
     proxy: str | None = Field(default=None, description="Proxy URL for this Gemini client")
-    impersonate: str | None = Field(
+    impersonate: BrowserTypeLiteral | None = Field(
         default=None,
         description="Browser impersonation target for curl_cffi. None uses library default",
     )
@@ -72,19 +72,6 @@ class GeminiClientSettings(BaseModel):
             return None
         stripped = value.strip()
         return stripped or None
-
-    @field_validator("impersonate")
-    @classmethod
-    def _validate_impersonate(cls, value: str | None) -> str | None:
-        """Validate that impersonate is a supported curl_cffi BrowserTypeLiteral value."""
-        if value is None:
-            return None
-        allowed = get_args(BrowserTypeLiteral)
-        if value not in allowed:
-            raise ValueError(
-                f"impersonate={value!r} is not supported. Allowed values: {', '.join(allowed)}"
-            )
-        return value
 
 
 class ChatMode(StrEnum):
@@ -145,10 +132,6 @@ class GeminiGemCleanupConfig(BaseModel):
         default=5,
         ge=1,
         description="Maximum managed-gem deletions per account in one cleanup",
-    )
-    require_managed_marker: bool = Field(
-        default=True,
-        description="Delete only gems that contain Gemini-FastAPI managed marker metadata",
     )
 
 

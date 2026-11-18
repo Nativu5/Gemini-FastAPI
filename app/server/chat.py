@@ -83,15 +83,12 @@ from app.utils.helper import (
     build_tool_prompt,
     calculate_usage,
     convert_to_app_messages,
-    detect_image_extension,
     dump_model,
     extract_image_dimensions,
     extract_named_tool_choice,
     normalize_app_message_role,
     normalize_llm_text,
     process_llm_output,
-    serialize_tool_choice_for_response,
-    serialize_tools_for_response,
     strip_system_hints,
     text_from_message,
     validate_json_schema,
@@ -137,13 +134,8 @@ async def _image_to_base64(
 
     original_path = Path(saved_path)
     data = original_path.read_bytes()
-    suffix = original_path.suffix
-
-    if not suffix:
-        detected_ext = detect_image_extension(data)
-        suffix = detected_ext or (".png" if isinstance(image, GeneratedImage) else ".jpg")
-
-    random_name = f"img_{uuid.uuid4().hex}{suffix}"
+    # The library names the file after its content type, so it always has an extension.
+    random_name = f"img_{uuid.uuid4().hex}{original_path.suffix}"
     new_path = temp_dir / random_name
     original_path.rename(new_path)
 
@@ -206,6 +198,15 @@ async def _media_to_local_file(
             logger.warning(f"Error processing {mtype} at {spath}: {e}")
 
     return results
+
+
+def _echoed_tools(request: ResponseCreateRequest) -> dict[str, Any]:
+    """The tools and tool choice of a request, as its response reports them back."""
+    choice = request.tool_choice
+    return {
+        "tools": [dump_model(tool) for tool in request.tools or []],
+        "tool_choice": choice or "auto" if isinstance(choice, str | None) else dump_model(choice),
+    }
 
 
 def _create_responses_standard_payload(
@@ -289,8 +290,7 @@ def _create_responses_standard_payload(
         status="completed",
         usage=usage,
         metadata=request.metadata or {},
-        tools=serialize_tools_for_response(request.tools),
-        tool_choice=serialize_tool_choice_for_response(request.tool_choice),
+        **_echoed_tools(request),
         text=text_config,
     )
 
@@ -1656,8 +1656,7 @@ def _create_responses_real_streaming_response(
                         "status": "in_progress",
                         "metadata": request.metadata or {},
                         "input": None,
-                        "tools": serialize_tools_for_response(request.tools),
-                        "tool_choice": serialize_tool_choice_for_response(request.tool_choice),
+                        **_echoed_tools(request),
                         "output": [],
                         "usage": None,
                     },

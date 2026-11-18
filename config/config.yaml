@@ -69,7 +69,6 @@ gemini:
       touch_interval_minutes: 60     # Min minutes between last-use updates of one gem
       dry_run: false                 # If true, logs stale candidates without deleting
       max_deletes_per_run: 5         # Safety cap for deletions per account in one cleanup
-      require_managed_marker: true   # Delete only gems carrying the Gemini-FastAPI marker
 
 storage:
   path: "data/lmdb" # Database storage path

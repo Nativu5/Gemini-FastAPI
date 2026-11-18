@@ -1,4 +1,5 @@
 import base64
+import functools
 import hashlib
 import html
 import ipaddress
@@ -44,7 +45,6 @@ MAX_REMOTE_FETCH_BYTES = 20 * 1024 * 1024
 
 type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue] | None
 
-VALID_TAG_ROLES = {"user", "assistant", "system", "tool"}
 TOOL_WRAP_HINT = (
     "\n\nSYSTEM: TOOL CALLING PROTOCOL (MANDATORY)\n"
     "Either emit the tool-call block alone, or answer in natural language with no protocol tags. Never both.\n\n"
@@ -149,7 +149,7 @@ SYSTEM_HINTS = (TOOL_WRAP_HINT, STRUCTURED_JSON_WRAP_HINT)
 def _hint_anchors(hint: str) -> tuple[str, str]:
     """Return a hint's first and last non-empty lines, used to locate echoed copies."""
     lines = [line.strip() for line in hint.split("\n") if line.strip()]
-    return (lines[0], lines[-1]) if lines else ("", "")
+    return lines[0], lines[-1]
 
 
 HINT_START_ANCHORS: list[str] = []
@@ -160,8 +160,6 @@ HINT_END_RES: list[re.Pattern[str]] = []
 
 for _hint in SYSTEM_HINTS:
     _start, _end = _hint_anchors(_hint)
-    if not _start or not _end:
-        continue
     _start_esc, _end_esc = re.escape(_start), re.escape(_end)
     HINT_START_ANCHORS.append(_start)
     HINT_END_ANCHORS.append(_end)
@@ -185,15 +183,13 @@ _START_PATTERNS = {
 _PROTOCOL_ENDS = r"\\?\[\\?/(?:ToolCalls|Call|ToolResults|CallParameter|ToolResult|Result)\\?]"
 _TAG_END = r"\\?<\\?\|im\\?_end\\?\|\\?>"
 
-if HINT_START_ANCHORS and HINT_END_ANCHORS:
-    _starts = "|".join(re.escape(anchor) for anchor in HINT_START_ANCHORS)
-    _START_PATTERNS["HINT"] = rf"\n?(?:{_starts}):?\s*"
+_starts = "|".join(re.escape(anchor) for anchor in HINT_START_ANCHORS)
+_START_PATTERNS["HINT"] = rf"\n?(?:{_starts}):?\s*"
 
 _master_parts = [f"(?P<{name}_START>{pattern})" for name, pattern in _START_PATTERNS.items()]
 _master_parts.extend((f"(?P<PROTOCOL_EXIT>{_PROTOCOL_ENDS})", f"(?P<TAG_EXIT>{_TAG_END})"))
-if HINT_START_ANCHORS and HINT_END_ANCHORS:
-    _ends = "|".join(re.escape(anchor) for anchor in HINT_END_ANCHORS)
-    _master_parts.append(f"(?P<HINT_EXIT>(?:{_ends})\n?)")
+_ends = "|".join(re.escape(anchor) for anchor in HINT_END_ANCHORS)
+_master_parts.append(f"(?P<HINT_EXIT>(?:{_ends})\n?)")
 
 STREAM_MASTER_RE = re.compile("|".join(_master_parts), re.IGNORECASE)
 
@@ -211,9 +207,8 @@ _partial_anchors = sorted(
     key=len,
     reverse=True,
 )
-if _partial_anchors:
-    _partial_anchor_alt = "|".join(re.escape(prefix) for prefix in _partial_anchors)
-    _PARTIAL_MARKER = rf"{_PARTIAL_MARKER}|(?:^|\n)(?:{_partial_anchor_alt})"
+_partial_anchor_alt = "|".join(re.escape(prefix) for prefix in _partial_anchors)
+_PARTIAL_MARKER = rf"{_PARTIAL_MARKER}|(?:^|\n)(?:{_partial_anchor_alt})"
 
 STREAM_TAIL_RE = re.compile(rf"(?:{_PARTIAL_MARKER})$", re.IGNORECASE)
 
@@ -224,12 +219,8 @@ STREAM_FLUSH_TAIL_RE = re.compile(
 )
 
 
-def add_tag(role: str, content: str, unclose: bool = False) -> str:
+def add_tag(role: AppMessageRole, content: str, unclose: bool = False) -> str:
     """Surround content with ChatML role tags."""
-    if role not in VALID_TAG_ROLES:
-        logger.warning(f"Unknown role: {role}, returning content without tags")
-        return content
-
     return f"<|im_start|>{role}\n{content}" + ("" if unclose else "\n<|im_end|>")
 
 
@@ -314,7 +305,6 @@ class SchemaEvaluationTimeoutError(ValueError):
 # not for a single pattern: a large conforming payload is ordinary, not pathological.
 SCHEMA_REGEX_BUDGET_SECONDS: float = g_config.server.schema_validation_budget_seconds
 _schema_regex_deadline: ContextVar[float | None] = ContextVar("schema_regex_deadline", default=None)
-_bounded_validator_classes: dict[type[Any], type[Any]] = {}
 # The schema is client input. jsonschema's default registry fetches a remote `$ref` over the
 # network, which would let any caller make this server request an arbitrary URL. An empty
 # registry resolves only in-document references and the bundled metaschemas; a remote one is
@@ -375,21 +365,22 @@ def _validate_bounded_additional_properties(validator, additional, instance, sch
         yield ValidationError(f"Additional properties are not allowed ({joined} unexpected)")
 
 
+@functools.cache
+def _bounded(validator_class: type[Any]) -> type[Any]:
+    """A validator class whose regex keywords run against the request's time budget."""
+    return validators.extend(
+        validator_class,
+        {
+            "pattern": _validate_bounded_pattern,
+            "patternProperties": _validate_bounded_pattern_properties,
+            "additionalProperties": _validate_bounded_additional_properties,
+        },
+    )
+
+
 def _bounded_validator_for(schema: dict[str, Any]):
     """Return a dialect-appropriate validator with timeout-bounded regex keywords."""
-    base = validator_for(schema)
-    bounded = _bounded_validator_classes.get(base)
-    if bounded is None:
-        bounded = validators.extend(
-            base,
-            {
-                "pattern": _validate_bounded_pattern,
-                "patternProperties": _validate_bounded_pattern_properties,
-                "additionalProperties": _validate_bounded_additional_properties,
-            },
-        )
-        _bounded_validator_classes[base] = bounded
-    return bounded(schema, registry=_SCHEMA_REGISTRY)
+    return _bounded(validator_for(schema))(schema, registry=_SCHEMA_REGISTRY)
 
 
 def validate_json_schema(schema: dict[str, Any]) -> None:
@@ -658,70 +649,39 @@ def strip_system_hints(text: str) -> str:
     return TAGGED_RESULT_RE.sub("", cleaned)
 
 
-def _process_tools_internal(text: str, extract: bool = True) -> tuple[str, list[AppToolCall]]:
-    """
-    Extract tool metadata and return text stripped of technical markers.
-    Tagged arguments preserve JSON-compatible types and receive deterministic call IDs.
-    """
-    if not text:
-        return text, []
+def extract_tool_calls(text: str) -> tuple[str, list[AppToolCall]]:
+    """The tool calls in a reply, and the reply with every protocol block and hint removed.
 
+    Tagged arguments keep their JSON types. A call's id is derived from its content, so the same
+    reply always yields the same ids.
+    """
     tool_calls: list[AppToolCall] = []
-
-    def _create_tool_call(name: str, raw_args: str) -> None:
-        if not extract:
-            return
-        if not name:
-            logger.warning("Encountered tool_call without a function name.")
-            return
-
-        name = unescape_text(name.strip())
-        raw_args = unescape_text(raw_args)
+    for match in TOOL_CALL_RE.finditer(text):
+        name = unescape_text(match.group(1).strip())
+        raw_args = unescape_text(match.group(2))
 
         # Leftovers mean the call was cut short: drop it rather than emit partial arguments.
-        residue = TAGGED_ARG_RE.sub("", raw_args).strip()
-        if residue:
+        if residue := TAGGED_ARG_RE.sub("", raw_args).strip():
             logger.warning(
                 f"Dropping malformed tool call '{name}'. Unparsed content: {reprlib.repr(residue)}"
             )
-            return
+            continue
 
-        arg_matches = TAGGED_ARG_RE.findall(raw_args)
         args_dict = {
             arg_name.strip(): _parse_tool_argument_value(arg_value)
-            for arg_name, arg_value in arg_matches
+            for arg_name, arg_value in TAGGED_ARG_RE.findall(raw_args)
         }
         arguments = orjson.dumps(args_dict).decode("utf-8")
-        logger.debug(f"Successfully parsed {len(args_dict)} arguments for tool: {name}")
-
-        index = len(tool_calls)
-        seed = f"{name}:{arguments}:{index}".encode()
-        call_id = f"call_{hashlib.sha256(seed).hexdigest()[:24]}"
-
+        seed = f"{name}:{arguments}:{len(tool_calls)}".encode()
         tool_calls.append(
             AppToolCall(
-                id=call_id,
+                id=f"call_{hashlib.sha256(seed).hexdigest()[:24]}",
                 type="function",
                 function=AppToolCallFunction(name=name, arguments=arguments),
             )
         )
 
-    for match in TOOL_CALL_RE.finditer(text):
-        _create_tool_call(match.group(1), match.group(2))
-
-    cleaned = strip_system_hints(text)
-    return cleaned, tool_calls
-
-
-def remove_tool_call_blocks(text: str) -> str:
-    """Strip tool call blocks from text for display."""
-    cleaned, _ = _process_tools_internal(text, extract=False)
-    return cleaned
-
-
-def extract_tool_calls(text: str) -> tuple[str, list[AppToolCall]]:
-    """Extract tool calls and return cleaned text."""
-    return _process_tools_internal(text, extract=True)
+    return strip_system_hints(text), tool_calls
 
 
 def text_from_message(message: AppMessage) -> str:
@@ -784,48 +744,9 @@ def extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
     return None, None
 
 
-def detect_image_extension(data: bytes) -> str | None:
-    """Detect image extension from magic bytes."""
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return ".png"
-    if data.startswith(b"\xff\xd8"):
-        return ".jpg"
-    if data.startswith(b"GIF8"):
-        return ".gif"
-    return ".webp" if data.startswith(b"RIFF") and data[8:12] == b"WEBP" else None
-
-
 def dump_model(model: BaseModel) -> dict[str, Any]:
     """Serialize a Pydantic model into a JSON-compatible dict with None values excluded."""
     return model.model_dump(mode="json", exclude_none=True)
-
-
-def serialize_tools_for_response(tools: Sequence[Any] | None) -> list[dict[str, Any]]:
-    """Serialize tool objects into clean dictionary representations without None values."""
-    if not tools:
-        return []
-    result: list[dict[str, Any]] = []
-    for t in tools:
-        if hasattr(t, "model_dump"):
-            result.append(t.model_dump(exclude_none=True))
-        elif hasattr(t, "dict"):
-            result.append(t.dict(exclude_none=True))
-        elif isinstance(t, dict):
-            result.append({k: v for k, v in t.items() if v is not None})
-        else:
-            result.append(t)
-    return result
-
-
-def serialize_tool_choice_for_response(tool_choice: Any) -> Any:
-    """Serialize tool choice object into a clean dictionary or string representation."""
-    if tool_choice is None:
-        return "auto"
-    if hasattr(tool_choice, "model_dump"):
-        return tool_choice.model_dump(exclude_none=True)
-    if hasattr(tool_choice, "dict"):
-        return tool_choice.dict(exclude_none=True)
-    return tool_choice
 
 
 def calculate_usage(
@@ -1033,50 +954,12 @@ def process_llm_output(
     return thoughts, visible_output, storage_output, tool_calls
 
 
-def extract_tool_info(tool: Any) -> tuple[str, str, dict[str, Any] | None]:
-    """Extract (name, description, parameters) from any tool representation."""
-    if hasattr(tool, "function") and tool.function is not None:
-        fn = tool.function
-        if isinstance(fn, dict):
-            name = fn.get("name", "")
-            description = fn.get("description") or "No description provided."
-            parameters = fn.get("parameters")
-        else:
-            name = getattr(fn, "name", "")
-            description = getattr(fn, "description", None) or "No description provided."
-            parameters = getattr(fn, "parameters", None)
-        return name, description, parameters
-
-    if isinstance(tool, dict):
-        if "function" in tool and isinstance(tool["function"], dict):
-            fn = tool["function"]
-            return (
-                fn.get("name", ""),
-                fn.get("description") or "No description provided.",
-                fn.get("parameters"),
-            )
-        return (
-            tool.get("name", ""),
-            tool.get("description") or "No description provided.",
-            tool.get("parameters"),
-        )
-
-    name = getattr(tool, "name", "")
-    description = getattr(tool, "description", None) or "No description provided."
-    parameters = getattr(tool, "parameters", None)
-    return name, description, parameters
-
-
-def extract_named_tool_choice(tool_choice: Any) -> str | None:
-    """Extract target function name from any named tool choice representation."""
+def extract_named_tool_choice(tool_choice: object) -> str | None:
+    """Name of the function a tool choice forces, in either API's layout; None if it names none."""
     if isinstance(tool_choice, ChatCompletionNamedToolChoice):
         return tool_choice.function.name
     if isinstance(tool_choice, ToolChoiceFunction):
         return tool_choice.name
-    if isinstance(tool_choice, dict):
-        if "function" in tool_choice and isinstance(tool_choice["function"], dict):
-            return tool_choice["function"].get("name")
-        return tool_choice.get("name")
     return None
 
 
@@ -1097,12 +980,11 @@ def build_tool_prompt(
     lines: list[str] = [TOOL_INTERFACE_PROMPT]
 
     for tool in tools:
-        name, description, parameters = extract_tool_info(tool)
-        if not name:
-            continue
-        lines.append(TOOL_DESCRIPTION_PROMPT.format(name=name, description=description))
-        if parameters:
-            schema_text = orjson.dumps(parameters, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+        fn = getattr(tool, "function", tool)  # nested in Chat Completions, flat in Responses
+        description = fn.description or "No description provided."
+        lines.append(TOOL_DESCRIPTION_PROMPT.format(name=fn.name, description=description))
+        if fn.parameters:
+            schema_text = orjson.dumps(fn.parameters, option=orjson.OPT_SORT_KEYS).decode("utf-8")
             lines.extend((TOOL_ARGUMENTS_SCHEMA_PROMPT, schema_text))
         else:
             lines.append(TOOL_EMPTY_ARGUMENTS_SCHEMA_PROMPT)
@@ -1124,18 +1006,9 @@ def build_image_generation_instruction(
     tool_choice: ToolChoiceTypes | None,
 ) -> str | None:
     """Construct explicit guidance so Gemini emits images when requested."""
-    has_forced_choice = tool_choice is not None and tool_choice.type == "image_generation"
-    primary = tools[0] if tools else None
-
-    if not has_forced_choice and primary is None:
-        return None
-
-    instructions = [IMAGE_GENERATION_PROMPT]
-
-    if has_forced_choice:
-        instructions.append(IMAGE_GENERATION_FORCED_PROMPT)
-
-    return "\n\n".join(instructions)
+    if tool_choice is not None:
+        return f"{IMAGE_GENERATION_PROMPT}\n\n{IMAGE_GENERATION_FORCED_PROMPT}"
+    return IMAGE_GENERATION_PROMPT if tools else None
 
 
 def append_tool_hint_to_last_user_message(messages: list[AppMessage]) -> None:

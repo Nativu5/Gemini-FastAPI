@@ -99,7 +99,6 @@ class GeminiClientWrapper(GeminiClient):
                 unused_days=gem_cfg.cleanup.unused_days,
                 dry_run=gem_cfg.cleanup.dry_run,
                 max_deletes=gem_cfg.cleanup.max_deletes_per_run,
-                require_marker=gem_cfg.cleanup.require_managed_marker,
             )
         self._system_prompt_gems = {
             key: gem for key, gem in self._system_prompt_gems.items() if gem.id not in deleted
@@ -301,20 +300,6 @@ class GeminiClientWrapper(GeminiClient):
         return text_fragments, files
 
     @staticmethod
-    def _format_tool_results(
-        text_fragments: list[str], tool_name: str | None, wrap_tool: bool
-    ) -> list[str]:
-        """
-        Format tool results into the PascalCase technical protocol blocks.
-        """
-        tool_name = tool_name or "unknown"
-        combined_content = "\n".join(text_fragments).strip()
-        res_block = (
-            f"[Result:{tool_name}]\n[ToolResult]\n{combined_content}\n[/ToolResult]\n[/Result]"
-        )
-        return [f"[ToolResults]\n{res_block}\n[/ToolResults]"] if wrap_tool else [res_block]
-
-    @staticmethod
     def _format_tool_calls(message: AppMessage) -> str | None:
         """
         Format tool calls into the PascalCase technical protocol blocks.
@@ -346,33 +331,26 @@ class GeminiClientWrapper(GeminiClient):
 
     @staticmethod
     async def process_message(
-        message: AppMessage,
-        tempdir: Path | None = None,
-        tagged: bool = True,
-        wrap_tool: bool = True,
+        message: AppMessage, tempdir: Path | None = None
     ) -> tuple[str, list[Path | str]]:
-        """
-        Process a Message into Gemini API format using the PascalCase technical protocol.
-        Extracts text, handles files, and appends ToolCalls/ToolResults blocks.
+        """One message as prompt text plus the files it attaches.
+
+        A tool message becomes a `[Result:name]` block, which `process_conversation` groups with
+        its neighbours; any other message is wrapped in its role's ChatML tags, with its tool
+        calls appended as a `[ToolCalls]` block.
         """
         text_fragments, files = await GeminiClientWrapper._extract_content_and_files(
             message, tempdir
         )
-
         if message.role == "tool":
-            text_fragments = GeminiClientWrapper._format_tool_results(
-                text_fragments, message.name, wrap_tool
-            )
+            result = "\n".join(text_fragments).strip()
+            name = message.name or "unknown"
+            return f"[Result:{name}]\n[ToolResult]\n{result}\n[/ToolResult]\n[/Result]", files
 
         if tool_section := GeminiClientWrapper._format_tool_calls(message):
             text_fragments.append(tool_section)
-
-        model_input = "\n".join(fragment for fragment in text_fragments if fragment is not None)
-
-        if (model_input or message.role == "tool") and tagged:
-            model_input = add_tag(message.role, model_input)
-
-        return model_input, files
+        model_input = "\n".join(text_fragments)
+        return add_tag(message.role, model_input) if model_input else "", files
 
     @staticmethod
     async def process_conversation(
@@ -388,7 +366,7 @@ class GeminiClientWrapper(GeminiClient):
                 tool_blocks: list[str] = []
                 while i < len(messages) and messages[i].role == "tool":
                     part, part_files = await GeminiClientWrapper.process_message(
-                        messages[i], tempdir, tagged=False, wrap_tool=False
+                        messages[i], tempdir
                     )
                     tool_blocks.append(part)
                     files.extend(part_files)
@@ -398,9 +376,7 @@ class GeminiClientWrapper(GeminiClient):
                 wrapped_content = f"[ToolResults]\n{combined_tool_content}\n[/ToolResults]"
                 conversation.append(add_tag("tool", wrapped_content))
             else:
-                input_part, files_part = await GeminiClientWrapper.process_message(
-                    msg, tempdir, tagged=True
-                )
+                input_part, files_part = await GeminiClientWrapper.process_message(msg, tempdir)
                 conversation.append(input_part)
                 files.extend(files_part)
                 i += 1
