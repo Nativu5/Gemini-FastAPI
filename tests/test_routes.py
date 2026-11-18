@@ -579,3 +579,22 @@ def test_gemini_native_ends_a_reply_with_a_finish_reason_and_its_usage(api, stre
         usage["promptTokenCount"] + usage["candidatesTokenCount"] + usage["thoughtsTokenCount"]
     )
     assert chunks[-1]["modelVersion"] == MODEL
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/v1/chat/completions", "/v1/responses", f"/v1beta/models/{MODEL}:streamGenerateContent"],
+)
+def test_a_file_that_every_chunk_of_a_stream_lists_is_downloaded_once(api, path):
+    """Gemini repeats the files of a reply in each chunk that follows their first mention."""
+    chunks = reply("Here ", "it ", "is.")
+    for chunk in chunks:
+        chunk.candidates[0].web_images = [WebImage(url="http://img/a", title="A")]
+    api.upstream.replies.append(chunks)
+    prompt = {"messages": CHAT["messages"]} if "chat" in path else {"input": "Draw"}
+    body = (
+        {"contents": USER_TURN} if "v1beta" in path else {"model": MODEL, "stream": True, **prompt}
+    )
+
+    assert api.post(path, json=body).status_code == 200
+    assert api.upstream.downloaded == ["http://img/a"]
