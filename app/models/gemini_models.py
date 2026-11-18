@@ -134,74 +134,12 @@ class GeminiGenerateContentRequest(BaseModel):
     cachedContent: str | None = None
 
 
-class GeminiSafetyRating(BaseModel):
-    """Safety rating."""
-
-    category: str
-    probability: str
-
-
-class GeminiCitationSource(BaseModel):
-    """Individual citation source."""
-
-    startIndex: int | None = None
-    endIndex: int | None = None
-    uri: str | None = None
-    license: str | None = None
-
-
-class GeminiCitationMetadata(BaseModel):
-    """Citation metadata."""
-
-    citationSources: list[GeminiCitationSource] = Field(default_factory=list)
-
-
-class GeminiGroundingChunkWeb(BaseModel):
-    """Web information for a grounding source."""
-
-    uri: str | None = None
-    title: str | None = None
-
-
-class GeminiGroundingChunk(BaseModel):
-    """Grounding source chunk."""
-
-    web: GeminiGroundingChunkWeb | None = None
-
-
-class GeminiSearchEntryPoint(BaseModel):
-    """Search entry point."""
-
-    renderedContent: str | None = None
-    sdkBlob: str | None = None
-
-
-class GeminiGroundingSupport(BaseModel):
-    """Grounding support segment."""
-
-    segment: dict[str, Any] | None = None
-    groundingChunkIndices: list[int] = Field(default_factory=list)
-    confidenceScores: list[float] = Field(default_factory=list)
-
-
-class GeminiGroundingMetadata(BaseModel):
-    """Grounding metadata, such as Google Search results."""
-
-    webSearchQueries: list[str] = Field(default_factory=list)
-    groundingChunks: list[GeminiGroundingChunk] = Field(default_factory=list)
-    searchEntryPoint: GeminiSearchEntryPoint | None = None
-    groundingSupports: list[GeminiGroundingSupport] = Field(default_factory=list)
-
-
 class GeminiCandidate(BaseModel):
     """Generated candidate."""
 
     content: GeminiContent | None = None
     finishReason: str | None = None
     index: int = 0
-    safetyRatings: list[GeminiSafetyRating] = Field(default_factory=list)
-    citationMetadata: GeminiCitationMetadata | None = None
-    groundingMetadata: GeminiGroundingMetadata | None = None
     tokenCount: int | None = None
     avgLogprobs: float | None = None
 
