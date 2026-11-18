@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import io
 import reprlib
-import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
@@ -145,9 +144,6 @@ def _gemini_contents_to_messages(
         if sys_texts := [p.text for p in sys_parts if p.text]:
             messages.append(AppMessage(role="system", content="\n".join(sys_texts)))
 
-    # Track the previous assistant message's tool_call IDs for functionResponse mapping
-    last_tool_call_ids: dict[str, str] = {}  # function_name → call_id
-
     for content in contents:
         role = content.role or "user"
         parts = content.parts or []
@@ -186,10 +182,12 @@ def _gemini_contents_to_messages(
                 )
 
             if part.functionCall:
-                call_id = f"call_{uuid.uuid4().hex[:24]}"
                 tool_calls.append(
                     AppToolCall(
-                        id=call_id,
+                        # The native API pairs a call and its response by function name. An id
+                        # invented here must not vary between requests, or the same history
+                        # would stop matching the chat stored for it.
+                        id=f"call_{len(tool_calls)}",
                         type="function",
                         function=AppToolCallFunction(
                             name=part.functionCall.name,
@@ -201,7 +199,6 @@ def _gemini_contents_to_messages(
                         ),
                     )
                 )
-                last_tool_call_ids[part.functionCall.name] = call_id
 
             if part.functionResponse:
                 resp_content = orjson.dumps(part.functionResponse.response).decode("utf-8")
@@ -210,15 +207,7 @@ def _gemini_contents_to_messages(
         if function_responses:
             # functionResponse → tool messages regardless of original role
             for fn_name, fn_content in function_responses:
-                call_id = last_tool_call_ids.get(fn_name or "", f"call_{uuid.uuid4().hex[:24]}")
-                messages.append(
-                    AppMessage(
-                        role="tool",
-                        content=fn_content,
-                        name=fn_name,
-                        tool_call_id=call_id,
-                    )
-                )
+                messages.append(AppMessage(role="tool", content=fn_content, name=fn_name))
             if text_fragments and internal_role != "tool":
                 messages.append(AppMessage(role=internal_role, content="\n".join(text_fragments)))
         elif tool_calls:

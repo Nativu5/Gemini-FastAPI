@@ -1,13 +1,15 @@
 """Shared fixtures: one configured account, and the real app in front of a scripted Gemini."""
 
 import itertools
+import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from gemini_webapi.types import Candidate, ModelOutput
+from gemini_webapi.types import Candidate, Image, ModelOutput
 
 from app.main import create_app
 from app.server import chat, gemini, middleware
@@ -125,6 +127,14 @@ def api(tmp_path, monkeypatch) -> Iterator[SimpleNamespace]:
         monkeypatch.setattr(module, "LMDBConversationStore", lambda: store)
         monkeypatch.setattr(module, "_resolve_model_name", lambda pool, name: MODEL)
     (tmp_path / "media").mkdir()
+
+    async def save_image(image: Image, path: str = "temp", **kwargs: Any) -> str:
+        """Stands in for the download: an image's bytes are its url."""
+        target = Path(path) / f"download-{uuid.uuid4().hex}.png"
+        target.write_bytes(image.url.encode())
+        return str(target)
+
+    monkeypatch.setattr(Image, "save", save_image)
     monkeypatch.setattr(middleware, "MEDIA_STORE_DIR", tmp_path / "media")
     monkeypatch.setattr(g_config.server, "api_key", None)
     # No `with`: the lifespan would log in to Google.
