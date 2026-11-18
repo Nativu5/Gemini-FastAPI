@@ -132,14 +132,20 @@ def verify_media_token(filename: str, token: str | None) -> bool:
     return True  # No auth required
 
 
-def cleanup_expired_media(retention_days: int) -> int:
-    """Delete media files in MEDIA_STORE_DIR older than retention_days."""
-    if retention_days <= 0:
+def cleanup_expired_media(retention_days: int = 14, ttl_seconds: int | None = None) -> int:
+    """Delete media files in MEDIA_STORE_DIR older than retention window."""
+    if ttl_seconds is not None:
+        seconds = max(0, int(ttl_seconds))
+    elif retention_days > 0:
+        seconds = retention_days * 24 * 60 * 60
+    else:
+        return 0
+
+    if seconds <= 0:
         return 0
 
     now = time.time()
-    retention_seconds = retention_days * 24 * 60 * 60
-    cutoff = now - retention_seconds
+    cutoff = now - seconds
 
     count = 0
     for file_path in MEDIA_STORE_DIR.iterdir():

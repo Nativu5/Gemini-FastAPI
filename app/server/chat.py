@@ -369,6 +369,7 @@ def _persist_conversation(
             messages=full_history,
             metadata=metadata,
             chat_scope=chat_scope,
+            chat_mode=g_config.gemini.chat_mode,
         )
         logger.debug("Conversation saved to LMDB.")
         return "success"
@@ -1005,7 +1006,22 @@ def _is_reusable_chat(
     opened, since a newer conversation has closed anything older.
 
     A `latest_chat_cid` match is necessary but not proof: the cid's kind is never verified.
+
+    A chat is also never continued across the `auto_delete` boundary. Records are tagged with the
+    mode active when they are written, and that tag alone decides whether the chat is later
+    removed from the Google account. Continuing a kept chat under `auto_delete` would tag it for
+    deletion; continuing an `auto_delete` chat under another mode would keep it alive for good.
+    Replaying into a fresh chat keeps every Google chat under the one mode that created it.
     """
+    stored_auto_delete = conv.chat_mode == ChatMode.AUTO_DELETE
+    if stored_auto_delete != (g_config.gemini.chat_mode == ChatMode.AUTO_DELETE):
+        logger.debug(
+            f"Stored chat was written under chat mode {conv.chat_mode or 'normal'!r} but "
+            f"{g_config.gemini.chat_mode.value!r} is active; replaying the full history in a "
+            "fresh conversation."
+        )
+        return False
+
     scope = client.chat_scope(temporary)
     if conv.chat_scope is None and scope is None:
         return True

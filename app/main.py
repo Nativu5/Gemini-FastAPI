@@ -19,6 +19,8 @@ from .server.middleware import (
     cleanup_expired_media,
 )
 from .services import GeminiClientPool, LMDBConversationStore
+from .utils import g_config
+from .utils.config import ChatMode
 
 # Canonical audio MIME types: Python's platform mapping yields legacy "x-"
 # types (audio/x-wav, audio/x-aac, audio/x-flac) that Google's upload
@@ -36,30 +38,68 @@ for _ext, _mime in (
 RETENTION_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60  # Check every 6 hours
 
 
+def _get_cleanup_interval() -> int:
+    """Determine the retention cleanup check interval."""
+    interval = RETENTION_CLEANUP_INTERVAL_SECONDS
+    if g_config.gemini.chat_mode == ChatMode.AUTO_DELETE:
+        interval = min(interval, max(60, g_config.gemini.auto_delete_ttl // 2))
+    return interval
+
+
 async def _run_retention_cleanup(stop_event: asyncio.Event) -> None:
     """
-    Periodically enforce LMDB retention policy until the stop_event is set.
+    Periodically enforce LMDB retention policy and remote chat deletion until the stop_event is set.
     """
     store = LMDBConversationStore()
-    if store.retention_days <= 0:
+    pool = GeminiClientPool()
+
+    if (
+        store.retention_days <= 0
+        and g_config.gemini.chat_mode != ChatMode.AUTO_DELETE
+        and not store.get_pending_deletions()
+        and not store.has_auto_delete_records()
+    ):
         logger.info("LMDB retention cleanup disabled; skipping scheduler.")
         return
 
+    interval = _get_cleanup_interval()
     logger.info(
-        f"Starting LMDB retention cleanup task (retention={store.retention_days} day(s), interval={RETENTION_CLEANUP_INTERVAL_SECONDS} seconds)."
+        f"Starting LMDB retention cleanup task (retention={store.retention_days} day(s), "
+        f"auto_delete_ttl={g_config.gemini.auto_delete_ttl}s, interval={interval}s)."
     )
 
     while not stop_event.is_set():
         try:
-            store.cleanup_expired()
-            cleanup_expired_media(store.retention_days)
+            _, to_delete = store.cleanup_expired()
+            if to_delete:
+                for client_id, cid in to_delete:
+                    if stop_event.is_set():
+                        break
+                    try:
+                        success = await pool.delete_chat(client_id, cid)
+                        if success:
+                            store.remove_pending_deletion(cid)
+                        else:
+                            store.record_pending_deletion_failure(cid)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to delete remote chat {cid} for client {client_id}: {e}"
+                        )
+                        store.record_pending_deletion_failure(cid)
+                    await asyncio.sleep(0.1)
+
+            if g_config.gemini.chat_mode == ChatMode.AUTO_DELETE:
+                cleanup_expired_media(ttl_seconds=g_config.gemini.auto_delete_ttl)
+            else:
+                cleanup_expired_media(retention_days=store.retention_days)
         except Exception:
             logger.exception("LMDB retention cleanup task failed.")
 
         try:
+            current_interval = _get_cleanup_interval()
             await asyncio.wait_for(
                 stop_event.wait(),
-                timeout=RETENTION_CLEANUP_INTERVAL_SECONDS,
+                timeout=current_interval,
             )
         except TimeoutError:
             continue
@@ -104,19 +144,14 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         cleanup_stop_event.set()
+        cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup_task
+
         try:
             await pool.close()
         except Exception:
             logger.exception("Failed to close Gemini client pool gracefully.")
-
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            logger.debug("Background tasks cancelled during shutdown.")
-        except Exception:
-            logger.exception(
-                "One or more background tasks terminated with an unexpected error during shutdown."
-            )
 
 
 def create_app() -> FastAPI:
