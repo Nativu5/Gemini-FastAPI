@@ -69,6 +69,8 @@ indent-style = "space"
 
 [tool.pyright]
 typeCheckingMode = "standard"
+# Setting `exclude` replaces pyright's defaults, so they are restated; `tmp` is local scratch.
+exclude = ["**/__pycache__", "**/.*", "**/node_modules", "tmp"]
 reportUnreachable = "warning"
 
 [tool.pytest.ini_options]
