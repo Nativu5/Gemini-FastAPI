@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from gemini_webapi.types import Candidate, Image, ModelOutput
+from gemini_webapi.types import Candidate, GeneratedVideo, Image, ModelOutput
 
 from app.main import create_app
 from app.server import chat, gemini, middleware
@@ -34,10 +34,11 @@ def reply(*deltas: str, **last_chunk: Any) -> list[ModelOutput]:
     `last_chunk` sets further candidate fields on the final chunk, e.g. `web_images=[...]`.
     """
     chunks, text = [], ""
-    for i, delta in enumerate(deltas or ("",)):
+    pieces = deltas or ("",)
+    for i, delta in enumerate(pieces):
         text += delta
         fields: dict[str, Any] = {"rcid": "rc", "text": text, "text_delta": delta or None}
-        if i == len(deltas) - 1:
+        if i == len(pieces) - 1:
             fields.update(last_chunk)
         chunks.append(ModelOutput(metadata=[], chosen=0, candidates=[Candidate(**fields)]))
     return chunks
@@ -128,13 +129,21 @@ def api(tmp_path, monkeypatch) -> Iterator[SimpleNamespace]:
         monkeypatch.setattr(module, "_resolve_model_name", lambda pool, name: MODEL)
     (tmp_path / "media").mkdir()
 
-    async def save_image(image: Image, path: str = "temp", **kwargs: Any) -> str:
-        """Stands in for the download: an image's bytes are its url."""
-        target = Path(path) / f"download-{uuid.uuid4().hex}.png"
-        target.write_bytes(image.url.encode())
+    def download(item: Image | GeneratedVideo, path: str, suffix: str) -> str:
+        """Stands in for a download: a file's bytes are its url without the fragment, so two
+        urls that differ only there are two copies of one file."""
+        target = Path(path) / f"download-{uuid.uuid4().hex}{suffix}"
+        target.write_bytes(item.url.partition("#")[0].encode())
         return str(target)
 
+    async def save_image(image: Image, path: str = "temp", **kwargs: Any) -> str:
+        return download(image, path, ".png")
+
+    async def save_video(video: GeneratedVideo, path: str = "temp", **kwargs: Any) -> dict:
+        return {"video": download(video, path, ".mp4")}
+
     monkeypatch.setattr(Image, "save", save_image)
+    monkeypatch.setattr(GeneratedVideo, "save", save_video)
     monkeypatch.setattr(middleware, "MEDIA_STORE_DIR", tmp_path / "media")
     monkeypatch.setattr(g_config.server, "api_key", None)
     # No `with`: the lifespan would log in to Google.

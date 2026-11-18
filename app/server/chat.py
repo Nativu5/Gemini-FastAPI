@@ -1527,10 +1527,11 @@ def _media_markdown(
     seen_hashes: dict[str, str],
     base_url: str,
 ) -> str:
-    """Markdown links to one generated video or audio item, or "" if it produced no file.
+    """Markdown links to one generated video or audio item, or "" if it has nothing new to show.
 
-    `seen_hashes` maps content hash to the file already linked for it in this response: a second
-    copy of the same content is deleted and the first one linked instead.
+    `seen_hashes` maps content hash to the file this response already keeps for it. A second copy
+    of the same content is deleted; a video or audio track that is such a copy is not linked
+    again, and a thumbnail that is one reuses the file kept.
     """
     media_store = get_media_store_dir()
     urls: dict[str, str] = {}
@@ -1538,6 +1539,8 @@ def _media_markdown(
         kept = seen_hashes.setdefault(content_hash, name)
         if kept != name:
             (media_store / name).unlink(missing_ok=True)
+            if kind in ("video", "audio"):
+                continue
         urls[kind] = f"{base_url}media/{kept}?token={get_media_token(kept)}"
 
     title = getattr(item, "title", "Media")
@@ -1747,10 +1750,10 @@ def _create_real_streaming_response(
                         if rtype == "image":
                             _, _, _, fname, fhash = media_data
                             if fhash in seen_hashes:
+                                # The same image under a second url: shown once.
                                 (media_store / fname).unlink(missing_ok=True)
-                                fname = seen_hashes[fhash]
-                            else:
-                                seen_hashes[fhash] = fname
+                                continue
+                            seen_hashes[fhash] = fname
 
                             img_url = f"{base_url}media/{fname}?token={get_media_token(fname)}"
                             title = getattr(original_item, "title", "Image")
@@ -2134,8 +2137,10 @@ def _create_responses_real_streaming_response(
 
                             yield text_delta(visible)
 
-            remaining = "" if structured_requirement else suppressor.flush()
-            if remaining and message_open:
+            if not structured_requirement and (remaining := suppressor.flush()):
+                # Text that arrived only with the final chunk can still be held back here.
+                for event in open_message():
+                    yield event
                 yield text_delta(remaining)
 
             for event in close_thought():
@@ -2195,10 +2200,10 @@ def _create_responses_real_streaming_response(
                         if rtype == "image":
                             b64, w, h, fname, fhash = media_data
                             if fhash in seen_hashes:
+                                # The same image under a second url: shown once.
                                 (media_store / fname).unlink(missing_ok=True)
-                                b64, w, h, fname = seen_hashes[fhash]
-                            else:
-                                seen_hashes[fhash] = (b64, w, h, fname)
+                                continue
+                            seen_hashes[fhash] = fname
 
                             parts = fname.rsplit(".", 1)
                             img_id = parts[0]
@@ -2526,10 +2531,10 @@ async def create_chat_completion(
             media_data = res[2]
             _, _, _, fname, fhash = media_data
             if fhash in seen_hashes:
+                # The same image under a second url: shown once.
                 (media_store / fname).unlink(missing_ok=True)
-                fname = seen_hashes[fhash]
-            else:
-                seen_hashes[fhash] = fname
+                continue
+            seen_hashes[fhash] = fname
 
             img_url = f"{base_url}media/{fname}?token={get_media_token(fname)}"
             title = getattr(original_item, "title", "Image")
@@ -2725,10 +2730,10 @@ async def create_response(
             media_data = res[2]
             b64, w, h, fname, fhash = media_data
             if fhash in seen_hashes:
+                # The same image under a second url: shown once.
                 (media_store / fname).unlink(missing_ok=True)
-                b64, w, h, fname = seen_hashes[fhash]
-            else:
-                seen_hashes[fhash] = (b64, w, h, fname)
+                continue
+            seen_hashes[fhash] = fname
 
             parts = fname.rsplit(".", 1)
             img_id = parts[0]

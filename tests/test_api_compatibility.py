@@ -956,9 +956,7 @@ def test_tool_call_with_language_tagged_parameter_fences():
     assert args["config"] == {"timeout": 30, "debug": True}
 
 
-def test_a_second_copy_of_generated_media_is_deleted_and_the_first_one_linked(
-    tmp_path, monkeypatch
-):
+def test_generated_media_is_linked_once_and_a_second_copy_is_deleted(tmp_path, monkeypatch):
     monkeypatch.setattr("app.server.chat.get_media_store_dir", lambda: tmp_path)
     monkeypatch.setattr("app.server.chat.get_media_token", lambda name: f"t-{name}")
     for name in ("v1.mp4", "v1.jpg", "copy.mp4", "copy.jpg"):
@@ -972,7 +970,7 @@ def test_a_second_copy_of_generated_media_is_deleted_and_the_first_one_linked(
 
     link = "[![Clip](http://h/media/v1.jpg?token=t-v1.jpg)](http://h/media/v1.mp4?token=t-v1.mp4)"
     assert _media_markdown(Clip(), first, seen, "http://h/") == link
-    assert _media_markdown(Clip(), copy, seen, "http://h/") == link
+    assert _media_markdown(Clip(), copy, seen, "http://h/") == ""
     assert sorted(f.name for f in tmp_path.iterdir()) == ["v1.jpg", "v1.mp4"]
     # Audio without a thumbnail is a plain link; an item that produced no file yields nothing.
     audio = {"audio": ("a.mp3", "hash-a")}
