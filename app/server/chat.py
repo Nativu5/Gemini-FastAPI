@@ -1433,6 +1433,34 @@ async def _process_media_item(
         return None
 
 
+def _media_markdown(
+    item: object,  # only its title is used
+    files: ProcessedMediaData,
+    seen_hashes: dict[str, str],
+    base_url: str,
+) -> str:
+    """Markdown links to one generated video or audio item, or "" if it produced no file.
+
+    `seen_hashes` maps content hash to the file already linked for it in this response: a second
+    copy of the same content is deleted and the first one linked instead.
+    """
+    media_store = get_media_store_dir()
+    urls: dict[str, str] = {}
+    for kind, (name, content_hash) in files.items():
+        kept = seen_hashes.setdefault(content_hash, name)
+        if kept != name:
+            (media_store / name).unlink(missing_ok=True)
+        urls[kind] = f"{base_url}media/{kept}?token={get_media_token(kept)}"
+
+    title = getattr(item, "title", "Media")
+    thumbnail = urls.get("video_thumbnail") or urls.get("audio_thumbnail")
+    links = []
+    for kind, label in (("video", title), ("audio", f"{title} - Audio")):
+        if url := urls.get(kind):
+            links.append(f"[![{label}]({thumbnail})]({url})" if thumbnail else f"[{label}]({url})")
+    return "\n\n".join(links)
+
+
 # --- Response Builders & Streaming ---
 
 
@@ -1645,48 +1673,12 @@ def _create_real_streaming_response(
                             )
 
                         elif rtype == "media":
-                            m_dict = cast(ProcessedMediaData, media_data)
-                            if not m_dict:
-                                continue
-
-                            m_urls = {}
-                            for mtype, (random_name, fhash) in m_dict.items():
-                                if fhash in seen_media_hashes:
-                                    existing_name = seen_media_hashes[fhash]
-                                    if random_name != existing_name:
-                                        (media_store / random_name).unlink(missing_ok=True)
-                                    m_urls[mtype] = (
-                                        f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
-                                    )
-                                else:
-                                    seen_media_hashes[fhash] = random_name
-                                    m_urls[mtype] = (
-                                        f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
-                                    )
-
-                            title = getattr(original_item, "title", "Media")
-                            video_url = m_urls.get("video")
-                            audio_url = m_urls.get("audio")
-                            current_thumb = m_urls.get("video_thumbnail") or m_urls.get(
-                                "audio_thumbnail"
-                            )
-
-                            md_parts = []
-                            if video_url:
-                                md_parts.append(
-                                    f"[![{title}]({current_thumb})]({video_url})"
-                                    if current_thumb
-                                    else f"[{title}]({video_url})"
-                                )
-                            if audio_url:
-                                md_parts.append(
-                                    f"[![{title} - Audio]({current_thumb})]({audio_url})"
-                                    if current_thumb
-                                    else f"[{title} - Audio]({audio_url})"
-                                )
-
-                            if md_parts:
-                                md = "\n\n".join(md_parts)
+                            if md := _media_markdown(
+                                original_item,
+                                cast(ProcessedMediaData, media_data),
+                                seen_media_hashes,
+                                base_url,
+                            ):
                                 storage_output += f"\n\n{md}"
                                 yield make_chunk(
                                     {"delta": {"content": f"\n\n{md}"}, "finish_reason": None}
@@ -2374,48 +2366,12 @@ def _create_responses_real_streaming_response(
                             image_items.append(img_item)
 
                         elif rtype == "media":
-                            m_dict = cast(ProcessedMediaData, media_data)
-                            if not m_dict:
-                                continue
-
-                            m_urls = {}
-                            for mtype, (random_name, fhash) in m_dict.items():
-                                if fhash in seen_media_hashes:
-                                    existing_name = seen_media_hashes[fhash]
-                                    if random_name != existing_name:
-                                        (media_store / random_name).unlink(missing_ok=True)
-                                    m_urls[mtype] = (
-                                        f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
-                                    )
-                                else:
-                                    seen_media_hashes[fhash] = random_name
-                                    m_urls[mtype] = (
-                                        f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
-                                    )
-
-                            title = getattr(original_item, "title", "Media")
-                            video_url = m_urls.get("video")
-                            audio_url = m_urls.get("audio")
-                            current_thumb = m_urls.get("video_thumbnail") or m_urls.get(
-                                "audio_thumbnail"
-                            )
-
-                            md_parts = []
-                            if video_url:
-                                md_parts.append(
-                                    f"[![{title}]({current_thumb})]({video_url})"
-                                    if current_thumb
-                                    else f"[{title}]({video_url})"
-                                )
-                            if audio_url:
-                                md_parts.append(
-                                    f"[![{title} - Audio]({current_thumb})]({audio_url})"
-                                    if current_thumb
-                                    else f"[{title} - Audio]({audio_url})"
-                                )
-
-                            if md_parts:
-                                media_md = "\n\n".join(md_parts)
+                            if media_md := _media_markdown(
+                                original_item,
+                                cast(ProcessedMediaData, media_data),
+                                seen_media_hashes,
+                                base_url,
+                            ):
                                 md_to_add = f"\n\n{media_md}"
 
                                 if not message_open:
@@ -2838,48 +2794,8 @@ async def create_chat_completion(
             image_markdown += f"\n\n![{title}]({img_url})"
 
         elif res[0] == "media":
-            original_item = res[1]
-            media_data = res[2]
-            m_dict = media_data
-            if not m_dict:
-                continue
-
-            m_urls = {}
-            for mtype, (random_name, fhash) in m_dict.items():
-                if fhash in seen_media_hashes:
-                    existing_name = seen_media_hashes[fhash]
-                    if random_name != existing_name:
-                        (media_store / random_name).unlink(missing_ok=True)
-                    m_urls[mtype] = (
-                        f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
-                    )
-                else:
-                    seen_media_hashes[fhash] = random_name
-                    m_urls[mtype] = (
-                        f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
-                    )
-
-            title = getattr(original_item, "title", "Media")
-            video_url = m_urls.get("video")
-            audio_url = m_urls.get("audio")
-            current_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-
-            md_parts = []
-            if video_url:
-                md_parts.append(
-                    f"[![{title}]({current_thumb})]({video_url})"
-                    if current_thumb
-                    else f"[{title}]({video_url})"
-                )
-            if audio_url:
-                md_parts.append(
-                    f"[![{title} - Audio]({current_thumb})]({audio_url})"
-                    if current_thumb
-                    else f"[{title} - Audio]({audio_url})"
-                )
-
-            if md_parts:
-                media_markdown += f"\n\n{'\n\n'.join(md_parts)}"
+            if md := _media_markdown(res[1], res[2], seen_media_hashes, base_url):
+                media_markdown += f"\n\n{md}"
 
     if image_markdown:
         visible_output += image_markdown
@@ -3160,48 +3076,8 @@ async def create_response(
             )
 
         elif res[0] == "media":
-            original_item = res[1]
-            media_data = res[2]
-            m_dict = media_data
-            if not m_dict:
-                continue
-
-            m_urls = {}
-            for mtype, (random_name, fhash) in m_dict.items():
-                if fhash in seen_media_hashes:
-                    existing_name = seen_media_hashes[fhash]
-                    if random_name != existing_name:
-                        (media_store / random_name).unlink(missing_ok=True)
-                    m_urls[mtype] = (
-                        f"{base_url}media/{existing_name}?token={get_media_token(existing_name)}"
-                    )
-                else:
-                    seen_media_hashes[fhash] = random_name
-                    m_urls[mtype] = (
-                        f"{base_url}media/{random_name}?token={get_media_token(random_name)}"
-                    )
-
-            title = getattr(original_item, "title", "Media")
-            video_url = m_urls.get("video")
-            audio_url = m_urls.get("audio")
-            current_thumb = m_urls.get("video_thumbnail") or m_urls.get("audio_thumbnail")
-
-            md_parts = []
-            if video_url:
-                md_parts.append(
-                    f"[![{title}]({current_thumb})]({video_url})"
-                    if current_thumb
-                    else f"[{title}]({video_url})"
-                )
-            if audio_url:
-                md_parts.append(
-                    f"[![{title} - Audio]({current_thumb})]({audio_url})"
-                    if current_thumb
-                    else f"[{title} - Audio]({audio_url})"
-                )
-
-            if md_parts:
-                media_markdown += f"\n\n{'\n\n'.join(md_parts)}"
+            if md := _media_markdown(res[1], res[2], seen_media_hashes, base_url):
+                media_markdown += f"\n\n{md}"
 
     if assistant_text:
         contents.append(ResponseOutputText(type="output_text", text=assistant_text))
