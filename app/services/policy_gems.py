@@ -16,7 +16,6 @@ _META_MARKER = "\n\n[gemini_fastapi_meta]"
 
 
 def _split_description_meta(description: str | None) -> tuple[str, dict[str, Any]]:
-    """Split managed metadata suffix from gem description."""
     text = description or ""
     marker_index = text.rfind(_META_MARKER)
     if marker_index == -1:
@@ -37,7 +36,6 @@ def _split_description_meta(description: str | None) -> tuple[str, dict[str, Any
 
 
 def _compose_description_with_meta(base_description: str, last_used_at: float) -> str:
-    """Compose description with stable managed metadata suffix."""
     meta = {
         "managed_by": "gemini_fastapi",
         "last_used_at": int(last_used_at),

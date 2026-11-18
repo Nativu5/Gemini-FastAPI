@@ -364,3 +364,35 @@ def test_a_system_message_with_an_attachment_is_not_moved_into_a_gem():
 
     assert extracted is None
     assert rest == messages
+
+
+def test_startup_fails_when_the_cleanup_task_dies_on_its_first_step(monkeypatch):
+    class _Pool:
+        clients: list[Any] = []  # noqa: RUF012
+
+        async def init(self) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    async def broken() -> None:
+        raise RuntimeError("store is unusable")
+
+    store = SimpleNamespace(prune_stale_indexes=lambda: 0)
+    monkeypatch.setattr(main_module, "GeminiClientPool", _Pool)
+    monkeypatch.setattr(main_module, "LMDBConversationStore", lambda: store)
+    monkeypatch.setattr(main_module, "available_models", lambda pool: [])
+    monkeypatch.setattr(main_module, "_run_retention_cleanup", broken)
+
+    came_up = False
+
+    async def start() -> None:
+        nonlocal came_up
+        async with main_module.lifespan(cast(Any, None)):
+            came_up = True
+
+    with pytest.raises(RuntimeError, match="store is unusable"):
+        asyncio.run(start())
+    # Without the check the same error still surfaces, but only at shutdown.
+    assert not came_up

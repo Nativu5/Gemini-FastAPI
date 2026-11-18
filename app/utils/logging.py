@@ -8,10 +8,8 @@ from loguru import logger
 
 def setup_logging(level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]) -> None:
     """Send all logging, the standard library's included, to one loguru sink on stderr."""
-    # Reset all logger handlers
     logger.remove()
 
-    # Add unified handler for all logs
     logger.add(
         sys.stderr,
         level=level,
@@ -21,7 +19,6 @@ def setup_logging(level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
         enqueue=True,
     )
 
-    # Setup standard logging library interceptor
     _setup_logging_intercept()
 
     logger.debug("Logger initialized.")

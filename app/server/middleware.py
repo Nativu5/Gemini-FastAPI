@@ -13,7 +13,6 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.utils import g_config
 
-# Persistent directory for storing generated media
 MEDIA_STORE_DIR = Path(g_config.storage.media_path)
 MEDIA_STORE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -104,7 +103,6 @@ class RequestBodyLimitMiddleware:
 
 
 def get_media_store_dir() -> Path:
-    """Returns a persistent directory for storing media."""
     return MEDIA_STORE_DIR
 
 
@@ -120,10 +118,11 @@ def get_media_token(filename: str) -> str:
 
 
 def verify_media_token(filename: str, token: str | None) -> bool:
-    """Verify the provided token against the filename."""
+    """True if the token is the one signed for this file, or if no API key is configured:
+    media is then open, like the rest of the API."""
     if expected := get_media_token(filename):
         return hmac.compare_digest(token, expected) if token else False
-    return True  # No auth required
+    return True
 
 
 def cleanup_expired_media(ttl_seconds: int) -> int:

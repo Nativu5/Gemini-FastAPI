@@ -70,8 +70,6 @@ class AppMessage(BaseModel):
 
 
 class ConversationInStore(BaseModel):
-    """Persisted conversation record stored in LMDB."""
-
     created_at: datetime | None = Field(default=None)
     updated_at: datetime | None = Field(default=None)
     model: str = Field(..., description="Model used for the conversation")

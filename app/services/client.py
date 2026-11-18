@@ -33,8 +33,6 @@ type ModelSpec = str | AvailableModel | None
 
 
 class GeminiClientWrapper(GeminiClient):
-    """Gemini client with helper methods."""
-
     def __init__(self, client_id: str, **kwargs):
         self._cfg_impersonate: str | None = kwargs.pop("impersonate", None)
         super().__init__(**kwargs)
@@ -290,9 +288,7 @@ class GeminiClientWrapper(GeminiClient):
 
     @staticmethod
     def _format_tool_calls(message: AppMessage) -> str | None:
-        """
-        Format tool calls into the PascalCase technical protocol blocks.
-        """
+        """A message's tool calls as a `[ToolCalls]` protocol block, or None if it has none."""
         if not message.tool_calls:
             return None
 

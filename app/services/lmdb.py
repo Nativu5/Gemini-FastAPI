@@ -63,9 +63,7 @@ def _normalize_text(text: str | None, fuzzy: bool = False) -> str | None:
 
 
 def _hash_message(message: AppMessage, fuzzy: bool = False) -> str:
-    """
-    Generate a stable, canonical hash for a single message.
-    """
+    """Generate a stable, canonical hash for a single message."""
     core_data: dict[str, Any] = {
         "role": message.role,
         "name": message.name,
@@ -187,14 +185,7 @@ class LMDBConversationStore(metaclass=Singleton):
         max_db_size: int | None = None,
         retention_days: int | None = None,
     ):
-        """
-        Initialize LMDB store.
-
-        Args:
-            db_path: Path to LMDB database directory
-            max_db_size: Maximum database size in bytes (default: 256 MB)
-            retention_days: Number of days to retain conversations (default: 14, 0 disables cleanup)
-        """
+        """Open the store; an argument left as None takes its value from `g_config.storage`."""
         if db_path is None:
             db_path = g_config.storage.path
         if max_db_size is None:
@@ -211,11 +202,10 @@ class LMDBConversationStore(metaclass=Singleton):
         self._init_environment()
 
     def _ensure_db_path(self) -> None:
-        """Create database directory if it doesn't exist."""
+        """Create the parent of the database directory; LMDB creates the directory itself."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _init_environment(self) -> None:
-        """Initialize LMDB environment."""
         try:
             self._env = lmdb.open(
                 str(self.db_path),
@@ -256,18 +246,7 @@ class LMDBConversationStore(metaclass=Singleton):
         chat_scope: str | None = None,
         chat_mode: str | None = None,
     ) -> None:
-        """
-        Store a conversation model in LMDB.
-
-        Args:
-            client_id: The client identifier
-            model: The model name
-            messages: Unsanitized API messages
-            metadata: Session metadata
-            chat_scope: Identity of the ephemeral window owning the chat, None if it is a normal
-                chat kept in the account's history
-            chat_mode: Chat mode under which the conversation was created ('normal', 'temporary', 'auto_delete')
-        """
+        """Store a conversation, replacing one with the same client, model and messages."""
         if not messages:
             raise ValueError("Messages list cannot be empty")
 
@@ -453,7 +432,6 @@ class LMDBConversationStore(metaclass=Singleton):
             logger.error(f"Failed to update pending deletion for {cid}: {e}")
 
     def has_auto_delete_records(self) -> bool:
-        """Check whether the store contains any conversations marked for auto-deletion."""
         try:
             with self._get_transaction(write=False) as txn:
                 cursor = txn.cursor()
@@ -489,7 +467,7 @@ class LMDBConversationStore(metaclass=Singleton):
         )
 
     def cleanup_before(self, cutoff: datetime) -> int:
-        """Delete conversations older than an explicit timestamp and repair both indexes."""
+        """Delete conversations last used before `cutoff`, in any chat mode; returns how many."""
         removed, _ = self.cleanup_with_remote(normal_cutoff=cutoff, auto_delete_cutoff=cutoff)
         return removed
 
@@ -498,7 +476,11 @@ class LMDBConversationStore(metaclass=Singleton):
         normal_cutoff: datetime | None = None,
         auto_delete_cutoff: datetime | None = None,
     ) -> tuple[int, list[tuple[str, str]]]:
-        """Delete expired conversations and return list of (client_id, cid) for remote deletion."""
+        """Delete conversations last used before the cutoff for their kind; None keeps that kind.
+
+        Returns how many were removed, and every (client_id, cid) waiting for remote deletion,
+        those queued by earlier passes included.
+        """
         expired_entries: list[tuple[str, ConversationInStore, bool]] = []
         active_cids: set[str] = set()
 
@@ -586,7 +568,7 @@ class LMDBConversationStore(metaclass=Singleton):
         return removed
 
     def stats(self) -> Mapping[str, Any]:
-        """Get database statistics."""
+        """LMDB's statistics for the environment; {} when they cannot be read."""
         if not self._env:
             logger.error("LMDB environment not initialized")
             return {}
@@ -597,12 +579,10 @@ class LMDBConversationStore(metaclass=Singleton):
             return {}
 
     def close(self) -> None:
-        """Close the LMDB environment."""
         if self._env:
             self._env.close()
             self._env = None
             logger.info("LMDB environment closed")
 
     def __del__(self):
-        """Cleanup on destruction."""
         self.close()

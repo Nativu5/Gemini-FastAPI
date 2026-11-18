@@ -99,7 +99,7 @@ def test_keys_reports_conversations_without_index_entries(store):
     store.store(CLIENT_ID, MODEL, _exchange(), metadata=["c", "r", "rc"])
 
     assert len(store.keys()) == 1
-    # The indexes exist, they are just not conversations.
+    # The lookup entry exists, it is just not a conversation.
     assert len(_raw_keys(store)) > 1
 
 

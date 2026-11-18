@@ -16,16 +16,12 @@ CONFIG_PATH = "config/config.yaml"
 
 
 class HTTPSConfig(BaseModel):
-    """HTTPS configuration"""
-
     enabled: bool = Field(default=False, description="Enable HTTPS")
     key_file: str = Field(default="certs/privkey.pem", description="SSL private key file path")
     cert_file: str = Field(default="certs/fullchain.pem", description="SSL certificate file path")
 
 
 class ServerConfig(BaseModel):
-    """Server configuration"""
-
     host: str = Field(default="0.0.0.0", description="Server host address")
     port: int = Field(default=8000, ge=1, le=65535, description="Server port number")
     api_key: str | None = Field(
@@ -67,7 +63,6 @@ class GeminiClientSettings(BaseModel):
     @field_validator("proxy", "impersonate", mode="before")
     @classmethod
     def _blank_string_to_none(cls, value: str | None) -> str | None:
-        """Normalize empty or whitespace-only strings to None."""
         if value is None:
             return None
         stripped = value.strip()
@@ -75,8 +70,6 @@ class GeminiClientSettings(BaseModel):
 
 
 class ChatMode(StrEnum):
-    """Chat mode options for Gemini conversation handling."""
-
     NORMAL = "normal"
     TEMPORARY = "temporary"
     AUTO_DELETE = "auto_delete"
@@ -108,8 +101,6 @@ class GeminiGemPoliciesConfig(BaseModel):
 
 
 class GeminiGemCleanupConfig(BaseModel):
-    """Cleanup policy for server-managed gems."""
-
     enabled: bool = Field(
         default=False,
         description="Enable deletion of managed gems that have not been used recently",
@@ -136,8 +127,6 @@ class GeminiGemCleanupConfig(BaseModel):
 
 
 class GeminiGemsConfig(BaseModel):
-    """Configuration for gem behaviors managed by the server."""
-
     policy: GeminiGemPolicyMode = Field(
         default=GeminiGemPolicyMode.OFF,
         description=(
@@ -166,8 +155,6 @@ class GeminiGemsConfig(BaseModel):
 
 
 class GeminiConfig(BaseModel):
-    """Gemini API configuration, including session behavior and generation options."""
-
     clients: list[GeminiClientSettings] = Field(
         ..., description="List of Gemini client credential pairs"
     )
@@ -242,8 +229,6 @@ class GeminiConfig(BaseModel):
 
 
 class CORSConfig(BaseModel):
-    """CORS configuration"""
-
     enabled: bool = Field(default=True, description="Enable CORS support")
     allow_origins: list[str] = Field(
         default=["*"], description="List of allowed origins for CORS requests"
@@ -258,8 +243,6 @@ class CORSConfig(BaseModel):
 
 
 class StorageConfig(BaseModel):
-    """LMDB Storage configuration"""
-
     path: str = Field(
         default="data/lmdb",
         description="Path to the storage directory where data will be saved",
@@ -285,8 +268,6 @@ class StorageConfig(BaseModel):
 
 
 class LoggingConfig(BaseModel):
-    """Logging configuration"""
-
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="DEBUG",
         description="Logging level",
@@ -294,21 +275,16 @@ class LoggingConfig(BaseModel):
 
 
 class Config(BaseSettings):
-    """Application configuration"""
-
-    # Server configuration
     server: ServerConfig = Field(
         default=ServerConfig(),
         description="Server configuration, including host, port, and API key",
     )
 
-    # CORS configuration
     cors: CORSConfig = Field(
         default=CORSConfig(),
         description="CORS configuration, allows cross-origin requests",
     )
 
-    # Gemini API configuration
     gemini: GeminiConfig = Field(..., description="Gemini API configuration, must be set")
 
     storage: StorageConfig = Field(
@@ -316,7 +292,6 @@ class Config(BaseSettings):
         description="Storage configuration, defines where and how data will be stored",
     )
 
-    # Logging configuration
     logging: LoggingConfig = Field(
         default=LoggingConfig(),
         description="Logging configuration",
@@ -395,12 +370,7 @@ def _merge_clients_with_env(
 
 
 def initialize_config() -> Config:
-    """
-    Initialize configuration from environment variables and the YAML settings source.
-
-    Returns:
-        Config: Configuration object with Gemini client overrides merged
-    """
+    """Load the configuration from the environment and YAML, merging per-client overrides."""
     try:
         env_clients_overrides = extract_gemini_clients_env()
         settings_cls: type[Any] = Config

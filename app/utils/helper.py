@@ -169,7 +169,6 @@ for _hint in SYSTEM_HINTS:
     HINT_START_RES.append(re.compile(rf"\n?{_start_esc}:?\s*", re.IGNORECASE))
     HINT_END_RES.append(re.compile(rf"\s*{_end_esc}\n?", re.IGNORECASE))
 
-# --- Streaming Specific Patterns ---
 _START_PATTERNS = {
     "TOOL": r"\\?\[ToolCalls\\?]",
     "ORPHAN": r"\\?\[Call\\?:[^]]+\\?]",
@@ -289,7 +288,6 @@ def _parse_tool_argument_value(raw_value: str) -> JsonValue:
 
 
 def estimate_tokens(text: str | None) -> int:
-    """Estimate the number of tokens heuristically based on character count."""
     return len(text) // 3 if text else 0
 
 
@@ -493,7 +491,6 @@ def guess_extension_for_mime(mime_type: str | None) -> str:
 async def save_file_to_tempfile(
     file_in_base64: str | bytes, file_name: str = "", tempdir: Path | None = None
 ) -> Path:
-    """Decode base64 file data and save to a temporary file."""
     with tempfile.NamedTemporaryFile(
         delete=False, suffix=Path(file_name).suffix if file_name else ".bin", dir=tempdir
     ) as tmp:
@@ -793,7 +790,6 @@ def normalize_app_message_role(role_name: str) -> AppMessageRole:
 
 
 def convert_to_app_messages(messages: list[ChatCompletionMessage]) -> list[AppMessage]:
-    """Convert OpenAI ChatCompletionMessage list into AppMessage format."""
     app_messages: list[AppMessage] = []
     for msg in messages:
         app_content: str | list[AppContentItem] | None = None
