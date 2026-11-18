@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import mimetypes
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -20,7 +21,7 @@ from .server.middleware import (
 )
 from .services import GeminiClientPool, LMDBConversationStore
 from .utils import g_config
-from .utils.config import ChatMode
+from .utils.config import ChatMode, GeminiGemPolicyMode
 
 # Canonical audio MIME types: Python's platform mapping yields legacy "x-"
 # types (audio/x-wav, audio/x-aac, audio/x-flac) that Google's upload
@@ -48,16 +49,21 @@ def _get_cleanup_interval() -> int:
 
 async def _run_retention_cleanup(stop_event: asyncio.Event) -> None:
     """
-    Periodically enforce LMDB retention policy and remote chat deletion until the stop_event is set.
+    Periodically enforce LMDB retention policy, remote chat deletion and managed-gem cleanup
+    until the stop_event is set.
     """
     store = LMDBConversationStore()
     pool = GeminiClientPool()
+    gems = g_config.gemini.gems
+    gem_cleanup = gems.policy != GeminiGemPolicyMode.OFF and gems.cleanup.enabled
+    next_gem_cleanup = 0.0
 
     if (
         store.retention_days <= 0
         and g_config.gemini.chat_mode != ChatMode.AUTO_DELETE
         and not store.get_pending_deletions()
         and not store.has_auto_delete_records()
+        and not gem_cleanup
     ):
         logger.info("LMDB retention cleanup disabled; skipping scheduler.")
         return
@@ -94,6 +100,11 @@ async def _run_retention_cleanup(stop_event: asyncio.Event) -> None:
                 cleanup_expired_media(retention_days=store.retention_days)
         except Exception:
             logger.exception("LMDB retention cleanup task failed.")
+
+        if gem_cleanup and time.monotonic() >= next_gem_cleanup:
+            # On its own clock: in auto_delete mode this loop can come round every minute.
+            next_gem_cleanup = time.monotonic() + RETENTION_CLEANUP_INTERVAL_SECONDS
+            await pool.delete_unused_gems()
 
         try:
             current_interval = _get_cleanup_interval()
@@ -136,6 +147,17 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.exception(f"{name} task failed to start.")
                 raise
+
+    if (gem_policy := g_config.gemini.gems.policy) != GeminiGemPolicyMode.OFF:
+        logger.warning(
+            f"Gems are enabled (gemini.gems.policy={gem_policy.value}), but Google is retiring "
+            "them: personal accounts from 2026-11-17 (removed 2026-12-17), Workspace accounts in "
+            "March 2027, education accounts in June 2027. "
+            'See https://support.google.com/gemini/answer/18560919. Set the policy to "off" '
+            "once the account has lost them: a gem request that Google rejects is retried for up "
+            "to about 15 seconds, restarting the client each time, before the system prompt is "
+            "sent inline. That happens on every request."
+        )
 
     logger.info(f"Gemini clients initialized: {[c.id for c in pool.clients]}.")
     logger.info("Gemini API Server ready to serve requests.")

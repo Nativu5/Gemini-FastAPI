@@ -147,6 +147,15 @@ class GeminiClientPool(metaclass=Singleton):
         """Return healthy status for each client."""
         return {client.id: client.is_healthy() for client in self._clients}
 
+    async def delete_unused_gems(self) -> None:
+        """Run the managed-gem cleanup on every account; one failing does not stop the rest."""
+        for client in self._clients:
+            try:
+                if await self._ensure_client_ready(client):
+                    await client.delete_unused_gems()
+            except Exception as e:
+                logger.warning(f"Managed gem cleanup failed for client {client.id}: {e}")
+
     async def delete_chat(self, client_id: str, cid: str) -> bool:
         """Delete a remote chat from Google for a given client."""
         client = self._id_map.get(client_id)

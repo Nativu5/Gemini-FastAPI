@@ -208,6 +208,9 @@ Models are discovered from each account at startup, so there is nothing to confi
 
 ### Gems
 
+> [!WARNING]
+> Google has announced the [retirement of Gems](https://support.google.com/gemini/answer/18560919): for personal accounts they become read-only from 2026-11-17 and are removed on 2026-12-17; Workspace accounts follow in March 2027 and education accounts in June 2027. This feature only works while the account still has Gems. Once it does not, set the policy back to `off`: a gem request that Google rejects is retried for up to about 15 seconds, restarting the client each time, before the prompt is sent inline. That happens on every request.
+
 Off by default; set `gemini.gems.policy` to turn it on. The system prompt at the start of a `/v1/chat/completions` or `/v1/responses` request is then stored once as a gem (Gemini's saved custom instructions) in the Google account and referenced from then on, instead of being sent inside the message. Conversations with the same system prompt share one gem.
 
 | `policy` | System prompt |
@@ -221,7 +224,7 @@ Off by default; set `gemini.gems.policy` to turn it on. The system prompt at the
 
 - There is one gem per distinct prompt, so use this for stable prompts. A prompt that changes with every request, for example one that contains the time, creates a new gem each time.
 - Creation is limited by `create_rate_limit_per_minute` (default `4`) and `managed_gems_max_total` (default `200`). Past a limit, or whenever a gem cannot be used, the prompt is sent inline.
-- Gems stay in the account until you delete them. With `cleanup.enabled: true`, under either policy, gems unused for `cleanup.unused_days` (default `7`) are deleted when a client starts, and each gem's description is updated to record when it was last used.
+- Gems stay in the account until you delete them. With `cleanup.enabled: true`, under either policy, gems unused for `cleanup.unused_days` (default `7`) are deleted by a cleanup that runs at startup and every 6 hours after that, and each gem's description is updated to record when it was last used.
 - Guest sessions and `/v1beta` requests always send the prompt inline.
 
 ### Input size

@@ -100,6 +100,8 @@ class GeminiClientWrapper(GeminiClient):
                 await self._flush_managed_policy_touches()
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            logger.warning(f"Failed to record the last use of managed gems: {exc}")
         finally:
             self._managed_gem_touch_worker_task = None
 
@@ -175,7 +177,6 @@ class GeminiClientWrapper(GeminiClient):
             await super().init(**init_kwargs)
             self._initialized = True
             self.latest_chat_cid = None
-            await self._delete_unused_gems()
         except Exception:
             self._initialized = False
             logger.exception(f"Failed to initialize GeminiClient {self.id}")
@@ -194,8 +195,12 @@ class GeminiClientWrapper(GeminiClient):
     def running(self) -> bool:
         return self._running
 
-    async def _delete_unused_gems(self) -> None:
-        """Delete the managed gems that went unused for longer than the configured retention."""
+    async def delete_unused_gems(self) -> None:
+        """Delete the managed gems that went unused for longer than the configured retention.
+
+        Never call this from `init()`: when Google rejects a gem request the library restarts
+        the client inside the call that holds `_gem_lock`, and `init()` would wait for it forever.
+        """
         gem_cfg = g_config.gemini.gems
         if (
             gem_cfg.policy == GeminiGemPolicyMode.OFF

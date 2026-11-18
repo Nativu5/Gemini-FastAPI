@@ -51,6 +51,8 @@ gemini:
   guest_mode: "adaptive"
   # Send the system prompt at the start of a request as a gem (saved custom instructions) in the
   # Google account instead of inline. Guest sessions cannot use gems and always send it inline.
+  # Google is retiring Gems (personal accounts: read-only from 2026-11-17, removed 2026-12-17;
+  # Workspace: March 2027; education: June 2027), so this only works while the account has them.
   gems:
     #   "off"              - send system prompts inline.
     #   "fetch_only"       - use a gem that already exists for the prompt; never create one.
@@ -60,13 +62,13 @@ gemini:
     managed_gems_max_total: 200      # Managed gems one client may hold
     policies:
       prefix: "fastapi_policy_"      # Name prefix that marks a gem as managed by this server
-    # Deletes managed gems from the account when a client starts, under either policy above.
+    # Deletes managed gems from the account at startup and every 6 hours, under either policy above.
     cleanup:
       enabled: false                 # Delete managed gems unused for `unused_days`
       unused_days: 7                 # Delete if not used for this many days
       touch_interval_minutes: 60     # Min minutes between last-use updates of one gem
       dry_run: false                 # If true, logs stale candidates without deleting
-      max_deletes_per_run: 5         # Safety cap for deletions per client start
+      max_deletes_per_run: 5         # Safety cap for deletions per account in one cleanup
       require_managed_marker: true   # Delete only gems carrying the Gemini-FastAPI marker
 
 storage:
