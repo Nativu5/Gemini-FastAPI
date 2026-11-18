@@ -146,3 +146,34 @@ class GeminiClientPool(metaclass=Singleton):
     def status(self) -> dict[str, bool]:
         """Return healthy status for each client."""
         return {client.id: client.is_healthy() for client in self._clients}
+
+    async def delete_chat(self, client_id: str, cid: str) -> bool:
+        """Delete a remote chat from Google for a given client."""
+        client = self._id_map.get(client_id)
+        if not client:
+            logger.warning(
+                f"Cannot delete chat {cid}: client {client_id} not found in pool. "
+                "Dropping pending deletion."
+            )
+            return True
+        if client.is_guest():
+            logger.warning(
+                f"Cannot delete remote chat {cid}: client {client_id} is currently unauthenticated (guest session)"
+            )
+            return False
+        try:
+            if not client.running():
+                ready = await self._ensure_client_ready(client)
+                if not ready:
+                    logger.warning(
+                        f"Cannot delete chat {cid}: client {client_id} is stopped and could not be restarted"
+                    )
+                    return False
+            await client.delete_chat(cid)
+            if client.latest_chat_cid == cid:
+                client.latest_chat_cid = None
+            logger.info(f"Deleted remote chat {cid} on Google for client {client_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to delete remote chat {cid} for client {client_id}: {e}")
+            return False

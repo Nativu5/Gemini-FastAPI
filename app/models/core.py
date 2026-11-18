@@ -90,3 +90,7 @@ class ConversationInStore(BaseModel):
             "in the account's history. Reusable only while the client still reports this scope"
         ),
     )
+    chat_mode: str | None = Field(
+        default=None,
+        description="Chat mode under which this conversation was created ('normal', 'temporary', 'auto_delete')",
+    )
