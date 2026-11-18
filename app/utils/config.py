@@ -104,40 +104,19 @@ class GuestMode(StrEnum):
 
 
 class GeminiGemPolicyMode(StrEnum):
-    """Synchronization and creation mode for server-managed policy gems."""
+    """Whether a leading system prompt is sent as a server-managed gem, and who may create it."""
 
     OFF = "off"
     FETCH_ONLY = "fetch_only"
     CREATE_ON_DEMAND = "create_on_demand"
 
 
-class GeminiGemDefaultPolicyConfig(BaseModel):
-    """Configuration for the optional default managed policy gem."""
-
-    enabled: bool = Field(
-        default=False,
-        description="Create or update the default managed policy gem",
-    )
-    key: str = Field(
-        default="general_capability_guardrail",
-        description="Logical policy key to map for the default policy gem",
-    )
-    prompt: str | None = Field(
-        default=None,
-        description=("Prompt override for the default policy gem; null uses the built-in prompt"),
-    )
-
-
 class GeminiGemPoliciesConfig(BaseModel):
-    """Configuration for built-in policy gems managed by the server."""
+    """How the gems managed by the server are named."""
 
     prefix: str = Field(
         default="fastapi_policy_",
-        description="Name prefix used to identify policy gems created by this server",
-    )
-    default_policy: GeminiGemDefaultPolicyConfig = Field(
-        default=GeminiGemDefaultPolicyConfig(),
-        description="Optional default policy gem bootstrap settings",
+        description="Name prefix used to identify gems created by this server",
     )
 
 
@@ -165,7 +144,7 @@ class GeminiGemCleanupConfig(BaseModel):
     max_deletes_per_run: int = Field(
         default=5,
         ge=1,
-        description="Maximum managed-gem deletions per synchronization run",
+        description="Maximum managed-gem deletions per client start",
     )
     require_managed_marker: bool = Field(
         default=True,
@@ -176,13 +155,11 @@ class GeminiGemCleanupConfig(BaseModel):
 class GeminiGemsConfig(BaseModel):
     """Configuration for gem behaviors managed by the server."""
 
-    enabled: bool = Field(default=False, description="Enable managed gem support")
     policy: GeminiGemPolicyMode = Field(
         default=GeminiGemPolicyMode.OFF,
         description=(
-            "Policy gem mode: 'off' disables sync/attachment, 'fetch_only' reads existing "
-            "prefixed gems without mutating account gems, 'create_on_demand' creates/updates "
-            "missing managed gems within configured limits"
+            "'off' sends system prompts inline; 'fetch_only' uses a gem that already exists "
+            "for a system prompt; 'create_on_demand' also creates one within the limits below"
         ),
     )
     create_rate_limit_per_minute: int = Field(
@@ -195,17 +172,9 @@ class GeminiGemsConfig(BaseModel):
         ge=1,
         description="Maximum number of managed gems (by prefix) allowed per client",
     )
-    fetch_on_init: bool = Field(
-        default=True,
-        description="Fetch and cache gem inventory during client initialization",
-    )
-    include_hidden_on_fetch: bool = Field(
-        default=False,
-        description="Include hidden gems when fetching gem inventory",
-    )
     policies: GeminiGemPoliciesConfig = Field(
         default=GeminiGemPoliciesConfig(),
-        description="Built-in policy gem synchronization settings",
+        description="Naming of managed gems",
     )
     cleanup: GeminiGemCleanupConfig = Field(
         default=GeminiGemCleanupConfig(),

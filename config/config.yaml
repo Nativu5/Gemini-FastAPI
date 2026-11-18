@@ -49,35 +49,25 @@ gemini:
   auto_delete_ttl: 86400 # Idle seconds before an "auto_delete" chat is deleted (Not less than 60s)
   # Guest client health policy: "strict" fails if any client is unhealthy; "adaptive" fails only if all are unhealthy; "permissive" only logs a warning.
   guest_mode: "adaptive"
-  # Managed gem support (custom 'gems' in your Gemini account, e.g. system prompt deduplication).
-  # WARNING: Enabling "create_on_demand" or "cleanup" may create, update, or delete gems in the
-  # associated Gemini account. Guest sessions cannot use gems and ignore this section.
+  # Send the system prompt at the start of a request as a gem (saved custom instructions) in the
+  # Google account instead of inline. Guest sessions cannot use gems and always send it inline.
   gems:
-    enabled: false                   # Master switch for managed gem support (defaults to OFF)
-    # Policy mode:
-    # - off: disabled
-    # - fetch_only: read existing server-managed gems (prefix-filtered), never create/update/delete
-    # - create_on_demand: create missing managed gems up to rate-limit and total caps
+    #   "off"              - send system prompts inline.
+    #   "fetch_only"       - use a gem that already exists for the prompt; never create one.
+    #   "create_on_demand" - create a gem the first time a prompt is seen. This adds gems to the account.
     policy: "off"
-    create_rate_limit_per_minute: 4  # Per-client budget for server-managed gem creations
-    managed_gems_max_total: 200      # Per-client cap for managed gems with our prefix
+    create_rate_limit_per_minute: 4  # Gems one client may create per minute
+    managed_gems_max_total: 200      # Managed gems one client may hold
+    policies:
+      prefix: "fastapi_policy_"      # Name prefix that marks a gem as managed by this server
+    # Deletes managed gems from the account when a client starts, under either policy above.
     cleanup:
       enabled: false                 # Delete managed gems unused for `unused_days`
       unused_days: 7                 # Delete if not used for this many days
-      touch_interval_minutes: 60     # Min minutes between metadata touch updates per gem
+      touch_interval_minutes: 60     # Min minutes between last-use updates of one gem
       dry_run: false                 # If true, logs stale candidates without deleting
-      max_deletes_per_run: 5         # Safety cap for deletions in a single sync pass
-      require_managed_marker: true   # Delete only gems carrying Gemini-FastAPI marker
-    fetch_on_init: true              # Fetch and cache gems when each client starts
-    include_hidden_on_fetch: false   # Include hidden gems when fetching inventory
-    policies:
-      prefix: "fastapi_policy_"      # Prefix used for server-managed policy gems
-      default_policy:
-        enabled: false               # Create/update the default policy gem when true
-        key: "general_capability_guardrail"
-        # Base prompt used when creating the default policy gem. Set to null (or omit) to use
-        # the built-in default prompt.
-        prompt: null
+      max_deletes_per_run: 5         # Safety cap for deletions per client start
+      require_managed_marker: true   # Delete only gems carrying the Gemini-FastAPI marker
 
 storage:
   path: "data/lmdb" # Database storage path
