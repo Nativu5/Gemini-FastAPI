@@ -133,7 +133,7 @@ Gemini 网页端提供的控制项比本服务所模拟的 API 少。合法的�
 - **会被忽略的选项。** `temperature`、`top_p`、输出 token 上限、`parallel_tool_calls`、Gemini 的 `generationConfig` 字段和安全设置都会被接受，但不产生任何效果。
 - **会被拒绝的输入。** 格式错误的请求，以及服务完全无法解析的内容，例如 Files API 的 `file_id` 或 `cachedContent` 句柄。
 - **错误使用被调用 API 自己的格式**：OpenAI 接口为 `{"error": {"message", "type", "param", "code"}}`，`/v1beta` 为 `{"error": {"code", "message", "status"}}`。格式错误的请求在两者上都返回 `400`。
-- **生成的视频和音频以链接形式返回**，在所有接口上都放在回复文本中。图片另外还会由 `/v1/responses` 以 `image_generation_call` 项、由 `/v1beta` 以 `inlineData` 分段返回。
+- **生成的视频和音频以链接形式返回**，在所有接口上都放在回复文本中。图片在 OpenAI 接口上同样是链接，其中 `/v1/responses` 还会为每张图片附带一个 `image_generation_call` 项；`/v1beta` 则以 `inlineData` 分段返回图片。
 - **结构化输出是在提示词中提出要求**，再由服务在事后校验，因为 Gemini 网页端没有约束解码。
   - `strict: true` 时，回复不符合 Schema 即为错误：返回 `502`，流式响应中则是一个错误事件。
   - `strict: false`（两套 OpenAI 接口的默认值）或 JSON 模式下，回复按原样返回。
