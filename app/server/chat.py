@@ -342,7 +342,7 @@ def _persist_conversation(
     client: GeminiClientWrapper,
     metadata: list[str | None],
     messages: list[AppMessage],
-    storage_output: str | None,
+    storage_output: str | list[AppContentItem] | None,
     tool_calls: list[AppToolCall] | None,
 ) -> str | None:
     """Unified logic to save conversation history to LMDB."""
