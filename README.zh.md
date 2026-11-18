@@ -208,6 +208,9 @@ export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 
 ### Gem
 
+> [!WARNING]
+> Google 已宣布[下线 Gem](https://support.google.com/gemini/answer/18560919)：个人账号自 2026-11-17 起只读，2026-12-17 移除；Workspace 账号为 2027 年 3 月，教育账号为 2027 年 6 月。此功能仅在账号仍可使用 Gem 时有效。账号失去 Gem 后请把策略改回 `off`：被 Google 拒绝的 Gem 请求最多会重试约 15 秒，每次重试都会重启客户端，之后提示词才放在消息正文中发送，每个请求都是如此。
+
 默认关闭，通过 `gemini.gems.policy` 启用。启用后，`/v1/chat/completions` 或 `/v1/responses` 请求开头的系统提示词会作为一个 Gem（Gemini 中保存的自定义指令）在 Google 账号里保存一次，之后的请求只引用它，而不再把提示词放进消息正文。系统提示词相同的会话共用一个 Gem。
 
 | `policy` | 系统提示词 |
@@ -221,7 +224,7 @@ export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 
 - 每个不同的提示词对应一个 Gem，因此只适用于稳定的提示词。如果提示词每次请求都变化（例如包含当前时间），每次都会创建一个新的 Gem。
 - 创建受 `create_rate_limit_per_minute`（默认 `4`）和 `managed_gems_max_total`（默认 `200`）限制。超出限制或 Gem 无法使用时，提示词会放在消息正文中发送。
-- Gem 会一直保留在账号中，直到你删除。设置 `cleanup.enabled: true` 后，无论使用哪种策略，超过 `cleanup.unused_days`（默认 `7`）未使用的 Gem 会在客户端启动时被删除，并且每个 Gem 的描述会被更新以记录最近使用时间。
+- Gem 会一直保留在账号中，直到你删除。设置 `cleanup.enabled: true` 后，无论使用哪种策略，超过 `cleanup.unused_days`（默认 `7`）未使用的 Gem 会被清理任务删除（启动时运行一次，之后每 6 小时一次），并且每个 Gem 的描述会被更新以记录最近使用时间。
 - 访客会话和 `/v1beta` 请求始终把提示词放在消息正文中发送。
 
 ### 输入长度

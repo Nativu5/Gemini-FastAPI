@@ -144,7 +144,7 @@ class GeminiGemCleanupConfig(BaseModel):
     max_deletes_per_run: int = Field(
         default=5,
         ge=1,
-        description="Maximum managed-gem deletions per client start",
+        description="Maximum managed-gem deletions per account in one cleanup",
     )
     require_managed_marker: bool = Field(
         default=True,

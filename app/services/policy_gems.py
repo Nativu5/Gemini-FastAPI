@@ -98,7 +98,7 @@ async def delete_unused_gems(
             await client.delete_gem(gem)
             deleted.append(gem.id)
         except Exception as exc:
-            # Still stale, so the next start tries again.
+            # Still stale, so the next cleanup tries again.
             logger.warning(f"Failed to delete unused managed gem {gem.name!r}: {exc}")
 
     logger.info(
