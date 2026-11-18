@@ -916,10 +916,11 @@ def process_llm_output(
     thoughts: str | None,
     raw_text: str,
     structured_requirement: StructuredOutputRequirement | None,
-) -> tuple[str | None, str, str, list[AppToolCall]]:
-    """
-    Post-process Gemini output to extract tool calls, unwrap structured JSON fences, and prepare clean text for display and storage.
-    Returns: (thoughts, visible_text, storage_output, tool_calls)
+) -> tuple[str | None, str, list[AppToolCall]]:
+    """A finished reply as (thoughts, text, tool calls).
+
+    The text has the protocol blocks removed and, under a response format, is the canonical JSON
+    the reply held. Raises `StructuredOutputValidationError` when a strict format is not met.
     """
     if thoughts:
         thoughts = thoughts.strip()
@@ -929,13 +930,11 @@ def process_llm_output(
         logger.debug(f"Detected {len(tool_calls)} tool call(s) in model output.")
 
     visible_output = visible_output.strip()
-    storage_output = visible_output
 
     if structured_requirement and visible_output:
         canonical_output = canonicalize_structured_output(visible_output, structured_requirement)
         if canonical_output is not None:
             visible_output = canonical_output
-            storage_output = canonical_output
         elif tool_calls:
             # The format constrains the final answer, not a turn that asks for a tool.
             logger.debug(
@@ -951,7 +950,7 @@ def process_llm_output(
                 f"{structured_requirement.schema_name!r}."
             )
 
-    return thoughts, visible_output, storage_output, tool_calls
+    return thoughts, visible_output, tool_calls
 
 
 def extract_named_tool_choice(tool_choice: object) -> str | None:

@@ -173,9 +173,7 @@ def test_only_a_strict_schema_is_prompted_for_exact_conformance(strict):
 
 def test_tool_call_turn_is_not_failed_by_a_response_format():
     """The schema constrains the final answer, not a turn that asks for a tool."""
-    _, visible, _, tool_calls = process_llm_output(
-        None, TOOL_CALL_OUTPUT, _requirement(OBJECT_SCHEMA)
-    )
+    _, visible, tool_calls = process_llm_output(None, TOOL_CALL_OUTPUT, _requirement(OBJECT_SCHEMA))
     assert [call.function.name for call in tool_calls] == ["get_weather"]
     assert visible == ""
 
@@ -184,31 +182,29 @@ def test_strict_violation_raises_and_best_effort_violation_degrades():
     with pytest.raises(StructuredOutputValidationError):
         process_llm_output(None, '{"b": 1}', _requirement(OBJECT_SCHEMA))
 
-    _, visible, _, _ = process_llm_output(
-        None, '{"b": 1}', _requirement(OBJECT_SCHEMA, strict=False)
-    )
+    _, visible, _ = process_llm_output(None, '{"b": 1}', _requirement(OBJECT_SCHEMA, strict=False))
     assert visible == '{"b": 1}'
 
 
 @pytest.mark.parametrize("raw_text", ["", "   \n  "])
 def test_a_reply_with_no_text_is_not_a_schema_violation(raw_text):
     """An image-only or empty turn has nothing to validate; failing it would invent an error."""
-    _, visible, storage, _ = process_llm_output(None, raw_text, _requirement(OBJECT_SCHEMA))
-    assert visible == storage == ""
+    _, visible, _ = process_llm_output(None, raw_text, _requirement(OBJECT_SCHEMA))
+    assert visible == ""
 
 
 def test_text_alongside_a_tool_call_is_still_canonicalized():
     raw = f'```json\n{{"a": "x"}}\n```\n{TOOL_CALL_OUTPUT}'
-    _, visible, _, tool_calls = process_llm_output(None, raw, _requirement(OBJECT_SCHEMA))
+    _, visible, tool_calls = process_llm_output(None, raw, _requirement(OBJECT_SCHEMA))
     assert [call.function.name for call in tool_calls] == ["get_weather"]
     assert visible == '{"a":"x"}'
 
 
 def test_conforming_output_is_canonicalized():
-    _, visible, storage, _ = process_llm_output(
+    _, visible, _ = process_llm_output(
         None, '```json\n{"a": "x"}\n```', _requirement(OBJECT_SCHEMA)
     )
-    assert visible == storage == '{"a":"x"}'
+    assert visible == '{"a":"x"}'
 
 
 @pytest.mark.parametrize(
@@ -222,7 +218,7 @@ def test_unusable_schemas_leave_the_reply_unverified_rather_than_failing_it(sche
     """Failing to run the check is our problem, not the model's, so it cannot be a violation."""
     assert canonicalize_structured_output('{"a": 1}', _requirement(schema)) == '{"a":1}'
     # And it must not reach the caller as an error, even under strict.
-    _, visible, _, _ = process_llm_output(None, '{"a": 1}', _requirement(schema))
+    _, visible, _ = process_llm_output(None, '{"a": 1}', _requirement(schema))
     assert visible == '{"a":1}'
 
 
@@ -523,7 +519,7 @@ def test_the_gemini_surface_asks_for_the_schema_without_enforcing_it():
     assert STRICT_SCHEMA_ADHERENCE_PROMPT not in requirement.instruction
 
     # A violation therefore comes back as text rather than costing the caller the reply.
-    _, visible, _, _ = process_llm_output(None, '{"b": 1}', requirement)
+    _, visible, _ = process_llm_output(None, '{"b": 1}', requirement)
     assert visible == '{"b": 1}'
 
 

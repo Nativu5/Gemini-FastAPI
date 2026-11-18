@@ -92,7 +92,7 @@ from app.utils.helper import (
     validate_json_schema,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(verify_gemini_api_key)])
 
 
 _GRPC_STATUS = {
@@ -402,9 +402,6 @@ def _validate_gemini_request(request: GeminiGenerateContentRequest) -> str | Non
 
 def _gemini_response_schema(gen_cfg: GeminiGenerationConfig) -> dict[str, Any] | None:
     """Return the requested response schema as JSON Schema, or None if it cannot be used."""
-    if gen_cfg.responseMimeType != "application/json":
-        return None
-
     if gen_cfg.responseJsonSchema is not None:
         return gen_cfg.responseJsonSchema
 
@@ -458,7 +455,7 @@ def _model_info(model_id: str) -> GeminiModelInfo:
 
 
 @router.get("/v1beta/models")
-async def gemini_list_models(api_key: str = Depends(verify_gemini_api_key)):
+async def gemini_list_models():
     """List available models (Gemini API format)."""
     models = available_models(GeminiClientPool())
 
@@ -470,7 +467,7 @@ async def gemini_list_models(api_key: str = Depends(verify_gemini_api_key)):
 
 
 @router.get("/v1beta/models/{model:path}")
-async def gemini_get_model(model: str, api_key: str = Depends(verify_gemini_api_key)):
+async def gemini_get_model(model: str):
     """Get one model's info (Gemini API format)."""
     model_name = model.removeprefix("models/")
     try:
@@ -581,7 +578,6 @@ async def gemini_generate_content(
     model: str,
     request: GeminiGenerateContentRequest,
     raw_request: Request,
-    api_key: str = Depends(verify_gemini_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
 ):
     """Non-streaming content generation (Gemini API format)."""
@@ -590,7 +586,7 @@ async def gemini_generate_content(
     assert isinstance(resp, ModelOutput)
 
     try:
-        thoughts, visible_output, storage_output, tool_calls = process_llm_output(
+        thoughts, visible_output, tool_calls = process_llm_output(
             normalize_llm_text(resp.thoughts or ""),
             normalize_llm_text(resp.text or ""),
             sent.structured_requirement,
@@ -612,7 +608,7 @@ async def gemini_generate_content(
         sent.client,
         sent.session.metadata,
         sent.prepared,
-        _stored_reply(storage_output + media_markdown, images),
+        _stored_reply(visible_output, images),
         tool_calls,
     )
 
@@ -639,7 +635,6 @@ async def gemini_stream_generate_content(
     model: str,
     request: GeminiGenerateContentRequest,
     raw_request: Request,
-    api_key: str = Depends(verify_gemini_api_key),
     tmp_dir: Path = Depends(get_temp_dir),
 ):
     """Streaming content generation (Gemini API format, SSE)."""
@@ -709,7 +704,7 @@ async def _reply_frames(
     # non-streaming route; only unexpected errors fall through to the catch-all below, which
     # cannot say anything more useful than that something broke.
     try:
-        thoughts, visible_output, storage_output, tool_calls = process_llm_output(
+        thoughts, visible_output, tool_calls = process_llm_output(
             normalize_llm_text(full_thoughts),
             normalize_llm_text(full_text),
             sent.structured_requirement,
@@ -733,7 +728,6 @@ async def _reply_frames(
         if media_markdown:
             yield _part_frame(GeminiPart(text=media_markdown))
             visible_output += media_markdown
-            storage_output += media_markdown
         for image in images:
             yield _part_frame(GeminiPart(inlineData=image))
 
@@ -760,7 +754,7 @@ async def _reply_frames(
             sent.client,
             sent.session.metadata,
             sent.prepared,
-            _stored_reply(storage_output, images),
+            _stored_reply(visible_output, images),
             tool_calls,
         )
     except Exception as exc:

@@ -140,8 +140,6 @@ class GeminiCandidate(BaseModel):
     content: GeminiContent | None = None
     finishReason: str | None = None
     index: int = 0
-    tokenCount: int | None = None
-    avgLogprobs: float | None = None
 
 
 class GeminiUsageMetadata(BaseModel):
@@ -151,8 +149,6 @@ class GeminiUsageMetadata(BaseModel):
     candidatesTokenCount: int = 0
     totalTokenCount: int = 0
     thoughtsTokenCount: int | None = None
-    cachedContentTokenCount: int | None = None
-    toolUsePromptTokenCount: int | None = None
 
 
 class GeminiGenerateContentResponse(BaseModel):
