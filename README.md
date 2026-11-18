@@ -133,7 +133,7 @@ Gemini Web offers fewer controls than the APIs this server imitates. A valid req
 - **Ignored options.** `temperature`, `top_p`, output-token limits, `parallel_tool_calls`, Gemini `generationConfig` fields and safety settings are accepted and have no effect.
 - **Rejected input.** Malformed requests, and content the server cannot resolve at all, such as a Files API `file_id` or a `cachedContent` handle.
 - **Errors use the envelope of the API that was called**: `{"error": {"message", "type", "param", "code"}}` on the OpenAI endpoints, `{"error": {"code", "message", "status"}}` on `/v1beta`. A malformed request is a `400` on both.
-- **Generated videos and audio are returned as links** in the reply text on every endpoint. Images are also returned as `image_generation_call` items by `/v1/responses` and as `inlineData` parts by `/v1beta`.
+- **Generated videos and audio are returned as links** in the reply text on every endpoint. Images are links too on the OpenAI endpoints, where `/v1/responses` adds an `image_generation_call` item for each; `/v1beta` returns them as `inlineData` parts instead.
 - **Structured output is requested in the prompt** and checked by the server afterwards, because Gemini Web has no constrained decoding.
   - With `strict: true`, a reply that does not match the schema is an error: `502`, or an error event when streaming.
   - With `strict: false` (the default on both OpenAI surfaces) or JSON mode, the reply is returned as it is.
