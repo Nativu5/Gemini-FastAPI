@@ -15,6 +15,7 @@ from gemini_webapi.types import Candidate, ModelOutput, WebImage
 from app.models.core import AppMessage
 from app.models.models import ResponseCreateRequest, StructuredOutputRequirement
 from app.server.chat import (
+    StreamingOutputFilter,
     _create_real_streaming_response,
     _create_responses_real_streaming_response,
 )
@@ -423,3 +424,25 @@ def test_responses_disconnect_cancels_pending_media_tasks(db, monkeypatch):
     cancelled = asyncio.run(abort_early())
     assert started
     assert all(cancelled)
+
+
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        ("Let me check. " + TOOL_CALL_OUTPUT + " Done.", "Let me check. Done."),
+        ("<|im_start|>assistant\nHello there.<|im_end|>", "Hello there."),
+        ("See [1], a <b>tag</b> and a \\ backslash.", "See [1], a <b>tag</b> and a \\ backslash."),
+        ("Cost: [not a marker", "Cost: "),
+    ],
+    ids=["tool-call", "chatml", "ordinary-brackets", "unfinished-bracket"],
+)
+def test_the_stream_filter_shows_the_same_text_however_the_reply_is_chunked(raw, shown):
+    """Gemini cuts its stream anywhere, including in the middle of a marker."""
+
+    def filtered(*pieces: str) -> str:
+        output_filter = StreamingOutputFilter()
+        return "".join(output_filter.process(piece) for piece in pieces) + output_filter.flush()
+
+    assert filtered(raw) == shown
+    assert {filtered(raw[:cut], raw[cut:]) for cut in range(1, len(raw))} == {shown}
+    assert filtered(*raw) == shown

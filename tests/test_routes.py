@@ -6,7 +6,10 @@ import re
 
 import pytest
 from conftest import MODEL, reply
+from gemini_webapi.exceptions import ModelInvalidError
 from gemini_webapi.types import GeneratedVideo, WebImage
+
+from app.utils import g_config
 
 WEATHER_TOOL = {
     "type": "function",
@@ -365,3 +368,200 @@ def test_a_chat_completion_message_carries_what_openai_sends_and_nothing_else(ap
         "prompt_tokens",
         "total_tokens",
     ]
+
+
+AUTH = {"Authorization": "Bearer secret"}
+
+
+@pytest.fixture
+def locked(api, monkeypatch):
+    """The scripted app with an API key configured."""
+    monkeypatch.setattr(g_config.server, "api_key", "secret")
+    return api
+
+
+@pytest.mark.parametrize(
+    ("headers", "status"),
+    [
+        ({}, 401),
+        ({"Authorization": "Bearer wrong"}, 403),
+        ({"Authorization": "Basic secret"}, 401),
+        (AUTH, 200),
+    ],
+)
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses"])
+def test_openai_routes_serve_only_a_request_that_carries_the_api_key(locked, path, headers, status):
+    body = CHAT if "chat" in path else {"model": MODEL, "input": "First question"}
+
+    assert locked.post(path, json=body, headers=headers).status_code == status
+    assert len(locked.upstream.sent) == (status == 200)  # nothing reaches Gemini without it
+
+
+@pytest.mark.parametrize(
+    ("headers", "query", "status"),
+    [
+        ({}, "", 401),
+        ({"x-goog-api-key": "secret"}, "", 200),
+        ({}, "?key=secret", 200),
+        (AUTH, "", 200),
+        (
+            {"x-goog-api-key": "wrong"},
+            "?key=secret",
+            403,
+        ),  # a wrong key is not rescued by a right one
+        (AUTH, "?key=wrong", 403),
+    ],
+)
+def test_the_native_route_takes_the_key_each_way_google_clients_send_it(
+    locked, headers, query, status
+):
+    url = f"/v1beta/models/{MODEL}:generateContent{query}"
+
+    assert locked.post(url, json={"contents": USER_TURN}, headers=headers).status_code == status
+    assert len(locked.upstream.sent) == (status == 200)
+
+
+def test_a_generated_file_is_served_only_through_the_signed_link_in_the_reply(locked):
+    locked.upstream.replies.append(
+        reply("Here.", web_images=[WebImage(url="http://img/a", title="A")])
+    )
+    text = locked.post("/v1/chat/completions", json=CHAT, headers=AUTH).json()["choices"][0][
+        "message"
+    ]["content"]
+    link = re.search(r"\(http://testserver(/media/img_[0-9a-f]{32}\.png\?token=[0-9a-f]+)\)", text)
+    assert link, text
+    url = link.group(1)
+
+    assert locked.get(url).content == b"http://img/a"  # no API key needed: the token is the grant
+    assert locked.get(url.partition("?")[0]).status_code == 403
+    assert locked.get(url[:-1] + ("0" if url[-1] != "0" else "1")).status_code == 403
+    other_file = re.sub(r"img_[0-9a-f]{32}", "img_" + "0" * 32, url)
+    assert locked.get(other_file).status_code == 403  # a token does not open another file
+
+
+def test_a_chat_google_no_longer_has_is_replayed_in_full_in_a_new_one(api):
+    api.post("/v1/chat/completions", json=CHAT)
+    history = [
+        *CHAT["messages"],
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "Second question"},
+    ]
+    api.upstream.replies += [ModelInvalidError("chat is gone"), reply("Again.")]
+
+    recovered = api.post("/v1/chat/completions", json={**CHAT, "messages": history})
+
+    assert recovered.json()["choices"][0]["message"]["content"] == "Again."
+    assert [sent.continues for sent in api.upstream.sent] == [None, "c_1", None]
+    assert "First question" in api.upstream.sent[2].text
+
+    # The new chat is remembered: the next turn continues it.
+    next_turn = [
+        *history,
+        {"role": "assistant", "content": "Again."},
+        {"role": "user", "content": "Third question"},
+    ]
+    api.post("/v1/chat/completions", json={**CHAT, "messages": next_turn})
+    assert api.upstream.sent[3].continues not in (None, "c_1")
+    assert "Second question" not in api.upstream.sent[3].text
+
+    # The dead chat is forgotten: repeating the request that hit it does not try it again.
+    api.post("/v1/chat/completions", json={**CHAT, "messages": history})
+    assert [sent.continues for sent in api.upstream.sent[4:]] == [None]
+
+
+def test_a_history_that_matches_no_stored_chat_is_sent_whole_to_a_new_one(api):
+    api.post("/v1/chat/completions", json=CHAT)
+    edited = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "something the server never said"},
+        {"role": "user", "content": "Second question"},
+    ]
+
+    api.post("/v1/chat/completions", json={**CHAT, "messages": edited})
+
+    assert api.upstream.sent[1].continues is None
+    assert "something the server never said" in api.upstream.sent[1].text
+
+
+def test_a_request_with_nothing_new_to_send_is_refused(api):
+    api.post("/v1/chat/completions", json=CHAT)
+    replayed = [*CHAT["messages"], {"role": "assistant", "content": "ok"}]
+
+    refused = api.post("/v1/chat/completions", json={**CHAT, "messages": replayed})
+
+    assert refused.status_code == 400
+    assert len(api.upstream.sent) == 1
+
+
+def _events(response) -> list[dict]:
+    """The events of a Responses stream, checked for framing as they are read."""
+    assert response.status_code == 200, response.text
+    *frames, done = response.text.strip().split("\n\n")
+    assert done == "data: [DONE]"
+    events = []
+    for frame in frames:
+        name, data = frame.split("\n")
+        events.append(json.loads(data.removeprefix("data: ")))
+        assert name == f"event: {events[-1]['type']}"
+    return events
+
+
+@pytest.mark.parametrize(
+    ("answer", "item_types"),
+    [
+        (reply("Hel", "lo."), ["message"]),
+        (reply("Answer.", thoughts="Hm.", thoughts_delta="Hm."), ["reasoning", "message"]),
+        (reply("Checking. " + TOOL_CALL), ["message", "function_call"]),
+    ],
+    ids=["text", "reasoning", "tool-call"],
+)
+def test_a_responses_stream_can_be_reassembled_into_its_final_response(api, answer, item_types):
+    """What an SDK does with the stream: follow the items as they open and close, add up the
+    text deltas, and end up with exactly the response the last event carries."""
+    api.upstream.replies.append(answer)
+    events = _events(
+        api.post(
+            "/v1/responses",
+            json={"model": MODEL, "input": "Hi", "stream": True, "tools": [WEATHER_TOOL]},
+        )
+    )
+
+    assert [e["type"] for e in events[:2]] == ["response.created", "response.in_progress"]
+    assert [e["sequence_number"] for e in events] == list(range(len(events)))
+    final = events[-1]
+    assert final["type"] == "response.completed"
+
+    opened = [e for e in events if e["type"] == "response.output_item.added"]
+    closed = [e for e in events if e["type"] == "response.output_item.done"]
+    assert [e["output_index"] for e in opened] == list(range(len(item_types)))
+    assert [e["item"]["type"] for e in opened] == item_types
+    for index in range(len(item_types)):
+        about_item = [events.index(e) for e in events if e.get("output_index") == index]
+        assert events[about_item[0]] is opened[index]  # nothing refers to an item before it opens
+        assert events[about_item[-1]]["type"] == "response.output_item.done"
+    assert sorted(closed, key=lambda e: e["output_index"]) == closed
+    assert [e["item"] for e in closed] == final["response"]["output"]
+
+    streamed_text = "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta")
+    message = next(item for item in final["response"]["output"] if item["type"] == "message")
+    # Text before a tool call keeps its trailing space in the deltas and loses it in the final.
+    assert streamed_text.rstrip() == message["content"][0]["text"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_gemini_native_ends_a_reply_with_a_finish_reason_and_its_usage(api, stream):
+    api.upstream.replies.append(reply("Hello ", "there.", thoughts="Hm.", thoughts_delta="Hm."))
+    method = "streamGenerateContent" if stream else "generateContent"
+    response = api.post(f"/v1beta/models/{MODEL}:{method}", json={"contents": USER_TURN})
+    chunks = _sse(response) if stream else [response.json()]
+
+    assert [c["candidates"][0].get("finishReason") for c in chunks] == [None] * (
+        len(chunks) - 1
+    ) + ["STOP"]
+    usage = chunks[-1]["usageMetadata"]
+    assert usage["candidatesTokenCount"] > 0
+    assert usage["thoughtsTokenCount"] > 0
+    assert usage["totalTokenCount"] == (
+        usage["promptTokenCount"] + usage["candidatesTokenCount"] + usage["thoughtsTokenCount"]
+    )
+    assert chunks[-1]["modelVersion"] == MODEL
