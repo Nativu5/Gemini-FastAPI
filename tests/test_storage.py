@@ -14,14 +14,16 @@ from conftest import CLIENT_ID
 
 from app.models.core import AppContentItem, AppMessage
 from app.services.lmdb import LMDBConversationStore
+from app.utils import g_config
 from app.utils.config import ChatMode
 
 MODEL = "gemini-3-pro"
 
 
 @pytest.fixture
-def store(tmp_path):
-    opened = LMDBConversationStore.open_isolated(db_path=str(tmp_path / "lmdb"))
+def store(tmp_path, monkeypatch):
+    monkeypatch.setattr(g_config.gemini, "auto_delete_ttl", 86400)
+    opened = LMDBConversationStore.open_isolated(db_path=str(tmp_path / "lmdb"), retention_days=14)
     try:
         yield opened
     finally:
@@ -195,7 +197,7 @@ def test_normal_conversation_is_not_collected_for_remote_deletion(store):
     with store._get_transaction(write=True) as txn:
         txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
 
-    removed, remote_deletions = store.cleanup_expired(retention_days=14)
+    removed, remote_deletions = store.cleanup_expired()
     assert removed == 1
     assert remote_deletions == []
     assert store.find(MODEL, messages) is None
@@ -224,7 +226,7 @@ def test_multi_turn_auto_delete_does_not_remotely_delete_cid_if_newer_turn_is_ac
         txn.put(key1.encode("utf-8"), orjson.dumps(conv1.model_dump(mode="json")), overwrite=True)
 
     # First cleanup: turn 1 expires, but turn 2 is active with the same cid
-    removed, remote_deletions = store.cleanup_expired(auto_delete_ttl=86400)
+    removed, remote_deletions = store.cleanup_expired()
     assert removed == 1
     assert remote_deletions == []  # cid must NOT be deleted yet because turn 2 is active!
     assert store.find(MODEL, turn1) is None
@@ -239,7 +241,7 @@ def test_multi_turn_auto_delete_does_not_remotely_delete_cid_if_newer_turn_is_ac
         txn.put(key2.encode("utf-8"), orjson.dumps(conv2.model_dump(mode="json")), overwrite=True)
 
     # Second cleanup: turn 2 expires, no active conversations remain for cid
-    removed2, remote_deletions2 = store.cleanup_expired(auto_delete_ttl=86400)
+    removed2, remote_deletions2 = store.cleanup_expired()
     assert removed2 == 1
     assert remote_deletions2 == [(CLIENT_ID, cid)]
     assert store.find(MODEL, turn2) is None
@@ -264,14 +266,14 @@ def test_pending_deletions_persisted_and_acknowledged(store):
         txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
 
     # First cleanup removes it locally and stages its remote deletion
-    removed, remote_deletions = store.cleanup_expired(auto_delete_ttl=86400)
+    removed, remote_deletions = store.cleanup_expired()
     assert removed == 1
     assert store.find(MODEL, messages) is None
     assert remote_deletions == [(CLIENT_ID, cid)]
     assert store.get_pending_deletions() == [(CLIENT_ID, cid)]
 
     # Subsequent cleanup without acknowledgment retries the pending deletion
-    removed_retry, remote_deletions_retry = store.cleanup_expired(auto_delete_ttl=86400)
+    removed_retry, remote_deletions_retry = store.cleanup_expired()
     assert removed_retry == 0
     assert remote_deletions_retry == [(CLIENT_ID, cid)]
 
@@ -280,7 +282,7 @@ def test_pending_deletions_persisted_and_acknowledged(store):
     assert store.get_pending_deletions() == []
 
     # Following cleanup has nothing to delete
-    removed_after, remote_deletions_after = store.cleanup_expired(auto_delete_ttl=86400)
+    removed_after, remote_deletions_after = store.cleanup_expired()
     assert removed_after == 0
     assert remote_deletions_after == []
 
@@ -312,7 +314,7 @@ def test_legacy_conversation_without_chat_mode_is_not_remotely_deleted(store):
         with store._get_transaction(write=True) as txn:
             txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
 
-        removed, remote_deletions = store.cleanup_expired(retention_days=14, auto_delete_ttl=86400)
+        removed, remote_deletions = store.cleanup_expired()
         assert removed == 0
         assert remote_deletions == []
         assert store.find(MODEL, messages) is not None
@@ -343,7 +345,7 @@ def test_ephemeral_guest_conversation_is_not_staged_for_remote_deletion(store):
     with store._get_transaction(write=True) as txn:
         txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
 
-    removed, remote_deletions = store.cleanup_expired(auto_delete_ttl=86400)
+    removed, remote_deletions = store.cleanup_expired()
     # The record should be removed from LMDB, but NOT staged for Google remote deletion
     assert removed == 1
     assert remote_deletions == []
@@ -351,26 +353,16 @@ def test_ephemeral_guest_conversation_is_not_staged_for_remote_deletion(store):
     assert store.find(MODEL, messages) is None
 
 
-def test_pending_deletion_failure_retries_and_eviction(store):
+def test_a_remote_deletion_that_keeps_failing_is_given_up(store):
     cid = "c_retry_fail"
     with store._get_transaction(write=True) as txn:
         txn.put(f"{store.PENDING_DELETE_PREFIX}{cid}".encode(), CLIENT_ID.encode())
 
-    assert store.get_pending_deletions() == [(CLIENT_ID, cid)]
+    for _ in range(store.MAX_REMOTE_DELETION_ATTEMPTS - 1):
+        store.record_pending_deletion_failure(cid)
+        assert store.get_pending_deletions() == [(CLIENT_ID, cid)]
 
-    # Attempt 1: retry increments, not evicted
-    evicted = store.record_pending_deletion_failure(cid, max_retries=3)
-    assert evicted is False
-    assert store.get_pending_deletions() == [(CLIENT_ID, cid)]
-
-    # Attempt 2: retry increments, not evicted
-    evicted = store.record_pending_deletion_failure(cid, max_retries=3)
-    assert evicted is False
-    assert store.get_pending_deletions() == [(CLIENT_ID, cid)]
-
-    # Attempt 3: reached max_retries=3, evicted!
-    evicted = store.record_pending_deletion_failure(cid, max_retries=3)
-    assert evicted is True
+    store.record_pending_deletion_failure(cid)
     assert store.get_pending_deletions() == []
 
 
