@@ -12,25 +12,17 @@
 
 ## 功能特性
 
-- **无需 Google API Key**：只需网页 Cookie，即可免费通过 API 调用 Gemini 模型。
-- **内置 Google 搜索**：API 已内置 Gemini 网页端的搜索能力，模型响应更加准确。
-- **会话持久化**：基于 LMDB 存储，支持多轮对话历史记录。
-- **多模态支持**：可处理文本、图片及文件上传。
-- **多账户负载均衡**：支持多账户分发请求，可为每个账户单独配置代理。
+- **无需 Google API Key**：使用已登录的 Gemini 网页会话的 Cookie 进行认证。
+- **三套 API 接口**：OpenAI Chat Completions、OpenAI Responses，以及 Gemini 原生的 `generateContent`。
+- **流式输出、工具调用与结构化输出**：三套接口均支持。
+- **多模态**：支持图片与文件输入，以及图片生成。
+- **内置 Google 搜索**：回答可以使用 Gemini 网页端自带的搜索能力。
+- **会话复用**：后续请求会接着同一个 Google 会话继续，而不是重新发送全部历史。
+- **多账号**：请求在多个账号之间分发，每个账号可单独配置代理。
 
 ## 快速开始
 
-**如需 Docker 部署，请参见下方 [Docker 部署](#docker-部署) 部分。**
-
-### 前置条件
-
-- Python >= 3.13
-- 拥有网页版 Gemini 访问权限的 Google 账号 (开启 **[Gemini Apps 应用活动](https://myactivity.google.com/product/gemini)** 以获得最佳会话持久化体验)
-- 从 Gemini 网页获取的 `secure_1psid` 和 `secure_1psidts` Cookie
-
-### 安装
-
-#### 使用 uv (推荐)
+需要 Python 3.13+、[uv](https://docs.astral.sh/uv/)，以及一个可以使用 [Gemini](https://gemini.google.com/) 的 Google 账号。如需在容器中运行，请参见 [Docker](#docker)。
 
 ```bash
 git clone https://github.com/Nativu5/Gemini-FastAPI.git
@@ -38,17 +30,7 @@ cd Gemini-FastAPI
 uv sync
 ```
 
-#### 使用 pip
-
-```bash
-git clone https://github.com/Nativu5/Gemini-FastAPI.git
-cd Gemini-FastAPI
-pip install -e .
-```
-
-### 配置
-
-编辑 `config/config.yaml` 并提供至少一组凭证：
+把 Cookie（[获取方法](#获取-cookie)）填入 `config/config.yaml`：
 
 ```yaml
 gemini:
@@ -56,87 +38,41 @@ gemini:
     - id: "client-a"
       secure_1psid: "YOUR_SECURE_1PSID_HERE"
       secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
-      proxy: null # 可选代理 URL (null/空值则保持直连)
-      impersonate: null # 可选浏览器指纹模拟 (null 则使用库的默认值)
 ```
 
-> [!NOTE]
-> 详细说明请参见下方 [配置](#配置说明) 部分。
-
-### 启动服务
+启动服务，默认监听 `http://localhost:8000`：
 
 ```bash
-# 使用 uv
 uv run python run.py
-
-# 直接用 Python
-python run.py
 ```
 
-服务默认启动在 `http://localhost:8000`。
+模型名称由 Google 返回，不同账号看到的并不相同，所以先列出模型，再选一个发起请求：
 
-## API 接口
+```bash
+curl http://localhost:8000/v1/models
+```
 
-本服务器提供了一系列接口，重点支持 OpenAI 兼容协议。
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "MODEL_FROM_THE_LIST", "messages": [{"role": "user", "content": "Hello"}]}'
+```
 
-### OpenAI 兼容接口
+### 获取 Cookie
 
-这些接口使用 OpenAI 兼容的传输格式，并将请求转换后发送给 Gemini 网页端。兼容范围有意
-覆盖 Gemini 网页端客户端实际暴露的控制项：对于客户端无法转发但请求模型已识别的有效选项，
-服务会正常接受并忽略，同时在调试日志中记录选项名称，避免其阻止其他可表示的请求内容执行。
+1. 在无痕窗口中打开 [Gemini](https://gemini.google.com/) 并登录。
+2. 打开开发者工具（F12），进入 **Application** → **Storage** → **Cookies**。
+3. 复制 `__Secure-1PSID` 和 `__Secure-1PSIDTS` 的值。
 
-- **`GET /v1/models`**: 列出所有可用的 Gemini 模型。
-- **`POST /v1/chat/completions`**: 统一聊天对话接口。
-  - **流式传输**: 设置 `stream: true` 即可实时接收增量响应 (Stream Delta)。
-  - **多模态支持**: 支持在消息中包含文本、图片以及文件上传。
-  - **工具调用**: 支持通过 `tools` 参数进行函数调用 (Function Calling)。
-  - **结构化输出**: 支持 `response_format` 的全部模式。`json_schema` 会在服务器端按所给
-    Schema 验证；`json_object`（JSON 模式）只要求回复能解析为 JSON；`text` 为默认值，不作限制。
+更多细节见 [Gemini-API 认证指南](https://github.com/HanaokaYuzu/Gemini-API?tab=readme-ov-file#authentication)。
 
-### 高级接口
+> [!WARNING]
+> 这些 Cookie 可以访问你的 Google 账号，请勿提交到版本控制。
 
-- **`POST /v1/responses`**: 支持当前的 `text.format` 结构化输出（`text`、`json_object`
-  与 `json_schema`）、外部或内联文件输入、图片生成及工具调用。由于本项目没有实现
-  OpenAI Files API，因此会拒绝 `file_id` 引用。
+- **如果 Cookie 几小时内就失效，请改用 Firefox。** 基于 Chromium 的浏览器会把会话绑定到设备，从中复制出来的 Cookie 无法续期。
+- **请开启 [Gemini Apps 应用活动](https://myactivity.google.com/product/gemini)。** 未开启时 Google 随时可能丢弃会话，多轮对话会因此丢失上下文。
 
-Schema 的强制程度与 OpenAI 自身的承诺保持一致：`strict: true` 时，回复不符合 Schema 即视为
-错误；`strict: false` 或 JSON 模式仅承诺尽力而为，因此不符合的回复会以文本形式返回而不会让
-请求失败。返回工具调用的轮次不受 Schema 约束——Schema 只约束最终答案。
-
-`strict` 在两个 OpenAI 接口上均默认为 `false`，与 OpenAI 自身一致，因此同一个 Schema 在任一
-接口上的行为相同。该开关在本项目中比上游更关键：Gemini 网页端没有受约束解码，Schema 只能
-通过提示词表达，因此一旦启用严格模式，模型的细微偏差就会让调用方彻底失去这次回复。出于同样
-的原因，Gemini 原生接口的 `generationConfig.responseSchema` / `responseJsonSchema` 始终按尽力
-而为处理——它没有可供关闭的 `strict` 开关。
-
-只有模型自身的失败才会被追究。本服务无法求值的 Schema（不是合法的 JSON Schema，或 `$ref`
-无法解析）仍会展示给模型，但不会用于判定回复；正则关键字耗尽
-`server.schema_validation_budget_seconds` 时，回复将保持未校验状态。即使在 `strict` 下，这些
-情况都不会让请求失败——它们是本服务的能力缺口，而非模型的违规。
-
-由于 JSON 文档只有在完整后才能校验，带结构化要求的流式响应会在校验完成后作为单个分块返回，
-而非逐步下发。Gemini 原生接口的 `responseMimeType: application/json` 同样适用。
-
-Gemini 网页端未暴露的生成控制项，例如 `temperature`、`top_p`、最大输出 Token 数、
-`parallel_tool_calls`、Gemini `generationConfig` 字段及安全设置，仍会被接受，但无法影响上游生成。
-服务会忽略这些已识别选项并写入调试日志。只有格式错误的输入，或本服务完全无法解析的内容
-（例如无法解析的 Files API ID、`cachedContent` 句柄）才会被拒绝——静默丢弃这类内容会改变
-模型实际回答的问题。未知字段遵循 Pydantic 的默认忽略行为。
-
-在 Gemini 接口上，`generationConfig.responseSchema` 属于 OpenAPI 3.0 子集（大写类型名、
-`nullable`），使用前会转换为 JSON Schema；`responseJsonSchema` 本身就是 JSON Schema，按其
-标准验证。`toolConfig.functionCallingConfig.allowedFunctionNames` 仅在真正生效的 `ANY` 与
-`VALIDATED` 模式下才会收窄工具列表。
-
-### 实用工具接口
-
-- **`GET /health`**: 就绪状态接口。对话存储不可用时始终返回 HTTP 503。客户端故障则遵循
-  `gemini.guest_mode` 健康策略；默认的 `adaptive` 策略仅在所有 Gemini 客户端均不健康时返回 503。
-- **`GET /media/{filename}`**: 用于分发生成的媒体内容的内部接口。需要有效的 Token（API 返回的图片 URL 中已自动包含该 Token）。
-
-## Docker 部署
-
-### 直接运行
+## Docker
 
 ```bash
 docker run -p 8000:8000 \
@@ -150,14 +86,7 @@ docker run -p 8000:8000 \
   ghcr.io/nativu5/gemini-fastapi
 ```
 
-> [!TIP]
-> 需要代理时可添加 `CONFIG_GEMINI__CLIENTS__0__PROXY`；省略该变量将保持直连。
->
-> `GEMINI_COOKIE_PATH` 指定容器内保存刷新后 Cookie 的目录。将其挂载（例如 `-v $(pwd)/cache:/app/cache`）可以在容器重建或重启后保留这些 Cookie，避免频繁重新认证。
-
-### 使用 Docker Compose
-
-创建 `docker-compose.yml` 文件：
+或者使用 Docker Compose：
 
 ```yaml
 services:
@@ -166,229 +95,146 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # - ./config:/app/config  # Uncomment to use a custom config file
-      # - ./certs:/app/certs    # Uncomment to enable HTTPS with your certs
+      # - ./config:/app/config      # 取消注释以使用自定义配置文件
+      # - ./certs:/app/certs        # 取消注释以使用自己的证书启用 HTTPS
       - ./data:/app/data
       - ./cache:/app/cache
     environment:
-      - CONFIG_SERVER__HOST=0.0.0.0
-      - CONFIG_SERVER__PORT=8000
       - CONFIG_SERVER__API_KEY=${API_KEY}
       - CONFIG_GEMINI__CLIENTS__0__ID=client-a
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID=${SECURE_1PSID}
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS=${SECURE_1PSIDTS}
-      - GEMINI_COOKIE_PATH=/app/cache # must match the cache volume mount above
-    restart: on-failure:3 # Avoid retrying too many times
-```
-
-然后运行：
-
-```bash
-docker compose up -d
+      - GEMINI_COOKIE_PATH=/app/cache # 必须与上面的 cache 卷一致
+    restart: on-failure:3
 ```
 
 > [!IMPORTANT]
-> 请务必挂载 `/app/data` 卷以保证对话数据在容器重启后持久化。
-> 同时挂载 `/app/cache`（或与 `GEMINI_COOKIE_PATH` 对应的目录）以保存刷新后的 Cookie，这样在容器重建/重启后无需频繁重新认证。
+> 两个卷都要挂载。`/app/data` 保存会话记录和生成的媒体文件。`/app/cache` 保存服务刷新后的 Cookie，这样重建容器后无需重新登录。
+
+## API 接口
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /v1/models` | 已配置账号可以使用的模型。 |
+| `POST /v1/chat/completions` | OpenAI Chat Completions：流式输出、工具调用、图片与文件输入、`response_format`。 |
+| `POST /v1/responses` | OpenAI Responses：流式输出、工具调用、图片与文件输入、图片生成、`text.format`。 |
+| `GET /v1beta/models`、`GET /v1beta/models/{model}` | Gemini 原生的模型列表。 |
+| `POST /v1beta/models/{model}:generateContent` | Gemini 原生的生成接口。 |
+| `POST /v1beta/models/{model}:streamGenerateContent` | Gemini 原生的流式生成接口。 |
+| `GET /health` | 就绪检查：存储状态和每个账号的状态。 |
+| `GET /media/{filename}` | 生成的图片和媒体文件。响应中的链接带有签名令牌。 |
+
+设置了 `server.api_key` 时，请通过 `Authorization: Bearer <key>` 传入。`/v1beta` 接口还接受 `x-goog-api-key` 请求头和 `key` 查询参数。未设置 Key 时，任何能访问到服务的人都可以调用 API 和打开媒体链接。
+
+### 兼容性
+
+Gemini 网页端提供的控制项比本服务所模拟的 API 少。合法的请求不会因为某个无法转发的选项而被拒绝。
+
+- **会被忽略的选项。** `temperature`、`top_p`、输出 token 上限、`parallel_tool_calls`、Gemini 的 `generationConfig` 字段和安全设置都会被接受，但不产生任何效果。
+- **会被拒绝的输入。** 格式错误的请求，以及服务完全无法解析的内容，例如 Files API 的 `file_id` 或 `cachedContent` 句柄。
+- **结构化输出是在提示词中提出要求**，再由服务在事后校验，因为 Gemini 网页端没有约束解码。
+  - `strict: true` 时，回复不符合 Schema 即为错误：返回 `502`，流式响应中则是一个错误事件。
+  - `strict: false`（两套 OpenAI 接口的默认值）或 JSON 模式下，回复按原样返回。
+  - Gemini 原生的 `responseSchema` 和 `responseJsonSchema` 始终是尽力而为。
+  - 返回工具调用的那一轮不做校验。
+- **服务无法求值的 Schema 不会被强制执行**，也不会导致请求失败。包括非法的 JSON Schema、无法解析的 `$ref`（远程引用一律不会去抓取），以及正则关键字超出 `server.schema_validation_budget_seconds` 的情况。
+- **带 Schema 的流式响应**会在校验后作为单个分块返回，因为 JSON 只有完整后才能校验。
 
 ## 配置说明
 
-服务器读取 `config/config.yaml` 配置文件。
-
-各项配置说明请参见 [`config/config.yaml`](https://github.com/Nativu5/Gemini-FastAPI/blob/main/config/config.yaml) 文件中的注释。
-
-### 环境变量覆盖
-
-> [!TIP]
-> 该功能适用于 Docker 部署和生产环境，可将敏感信息与配置文件分离。
-
-你可以通过带有 `CONFIG_` 前缀的环境变量覆盖任意配置项，嵌套键用双下划线（`__`）分隔，例如：
+每个配置项的说明都在 [`config/config.yaml`](config/config.yaml) 中。任何配置项都可以用环境变量覆盖：变量名为 `CONFIG_` 加上配置项的路径，层级之间用 `__` 分隔：
 
 ```bash
-# 覆盖服务器设置
 export CONFIG_SERVER__API_KEY="your-secure-api-key"
-
-# 覆盖 Client 0 的用户凭据
-export CONFIG_GEMINI__CLIENTS__0__ID="client-a"
 export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid"
-export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts"
-
-# 覆盖 Client 0 的代理设置
 export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
-
-# 覆盖 Client 0 的浏览器指纹模拟
-export CONFIG_GEMINI__CLIENTS__0__IMPERSONATE="chrome"
-
-
-# 覆盖对话存储大小限制
-export CONFIG_STORAGE__MAX_SIZE=268435456  # 256 MB
-
-# 覆盖本地 HTTP 请求体资源保护上限（设为 0 可禁用）
-export CONFIG_SERVER__MAX_REQUEST_BODY_BYTES=268435456
-
-# 覆盖 JSON Schema 正则求值预算（单位：秒）
-export CONFIG_SERVER__SCHEMA_VALIDATION_BUDGET_SECONDS=1.0
+export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 ```
 
-`max_request_body_bytes` 仅是封装层用于保护内存和本地资源的可配置上限，并非 OpenAI 或
-Gemini API 的兼容性限制，也不代表 Gemini 网页端的容量。通过本地检查后，请求最终是否可被
-接受仍由 Gemini 网页端决定。
+另有两个变量是直接读取的：`CONFIG_PATH` 指定另一个配置文件，`GEMINI_COOKIE_PATH` 指定刷新后的 Cookie 的缓存目录。
 
-### 客户端 ID 与会话重用
+### 账号
 
-会话在保存时会绑定创建它的客户端 ID。请在配置中保持这些 `id` 值稳定，
-这样在更新 Cookie 列表时依然可以复用旧会话。
+`gemini.clients` 下的每一项对应一个 Google 账号。
 
-### Gemini 凭据
-
-> [!WARNING]
-> 请妥善保管这些凭据，切勿提交到版本控制。这些 Cookie 可访问你的 Google 账号。
-
-<!-- 使用注释将凭据警告分隔为独立的引用块（markdownlint MD028）。 -->
-
-> [!WARNING]
-> **会话稳定性**：如果 Cookie 频繁过期，请使用 Firefox 提取 Cookie。较新的 Chromium 内核浏览器版本使用“设备绑定会话凭据”（Device Bound Session Credentials），虽然提高了安全性，但会使 Cookie 仅在几小时内有效且无法续期。
-
-使用 Gemini-FastAPI 需提取 Gemini 会话 Cookie：
-
-1. 在无痕/隐私窗口打开 [Gemini](https://gemini.google.com/) 并登录
-2. 打开开发者工具（F12）
-3. 进入 **Application** → **Storage** → **Cookies**
-4. 查找并复制以下值：
-   - `__Secure-1PSID`
-   - `__Secure-1PSIDTS`
-
-> [!IMPORTANT]
-> **请开启 [Gemini Apps 应用活动](https://myactivity.google.com/product/gemini)** 以确保稳定的会话持久化。
->
-> 虽然在没有开启该设置的情况下，连续的聊天过程可能暂时正常，但任何瞬时错误、TLS 会话重启或服务器重启都可能导致 Google 端过期的会话元数据。如果该设置被禁用，模型将 **完全丢失多轮对话的上下文**，导致即使本地 LMDB 中存有历史记录，旧对话也将无法继续。
-
-### 代理设置
-
-每个客户端条目可以配置不同的代理，从而规避速率限制。省略 `proxy` 字段或将其设置为 `null` 或空字符串以保持直连。
-
-### 浏览器指纹模拟
-
-每个客户端可以通过 `impersonate` 参数设置 `curl_cffi` 使用的 TLS/HTTP 指纹。
-
-- 设置为 `null`（默认）则使用库的默认值。
-- 可设为 [`curl_cffi` 的 `BrowserTypeLiteral`](https://github.com/lexiforest/curl_cffi) 支持的任意值。
-- 启动时会校验该值；无效值会阻止服务启动。
-
-```yaml
-gemini:
-  clients:
-    - id: "client-a"
-      impersonate: "chrome" # 使用 Chrome 指纹
-    - id: "client-b"
-      impersonate: null # 使用库默认值
-```
+- `id`：该账号开启的每个会话都会记录这个值。更新 Cookie 时请保持不变，否则已保存的会话将无法继续。
+- `proxy`：仅用于该账号的代理 URL，可选。
+- `impersonate`：供 [`curl_cffi`](https://github.com/lexiforest/curl_cffi) 使用的浏览器指纹，例如 `chrome`，可选。填入不支持的值会导致服务无法启动。
 
 ### 会话模式
 
-你可以控制请求使用普通的 Google 会话，还是 Google 的临时会话模式：
+`gemini.chat_mode` 决定服务在你的 Google 账号中开启的会话如何处置。
 
-```yaml
-gemini:
-  chat_mode: "normal" # "normal"（普通）或 "temporary"（临时）
-  guest_mode: "adaptive" # "strict"（严格）、"adaptive"（自适应）或 "permissive"（宽松）
-  max_chars_per_request: 1000000
-```
+| 模式 | 是否保留在 Google 账号中 | 多轮上下文 |
+| --- | --- | --- |
+| `normal`（默认） | 保留，直到你手动删除 | 可靠 |
+| `temporary` | 从不保存 | 尽力而为 |
+| `auto_delete` | 保留，闲置后删除 | 可靠 |
 
-设置为 `temporary` 时，对话不会保存到 Google 账号中。只要 Google 尚未关闭该临时窗口，
-临时会话仍然可以继续对话，因此会话重用与会话存储的行为与普通模式完全一致。
+**`temporary`** 使用 Google 的临时会话。Google 为每个账号只保留一个打开的临时会话，并且可能随时将其关闭而不报错，此时回复可能不带之前的上下文。服务只会继续最近的那个临时会话，其他情况下会把完整历史重放到一个新会话中。输入长度上限也更低。长对话请选用其他模式。
 
-当已存储的会话无法再被延续时——例如切换了 `chat_mode`，或 Google 已关闭该临时窗口——
-服务会回退到将完整对话历史重放到一个全新的会话中，从而重建上下文，而不是丢失上下文。
+**`auto_delete`** 使用普通会话，并在连续 `gemini.auto_delete_ttl` 秒没有请求后（默认 `86400`，最小 `60`），把它从 Google 账号和本地存储中一并删除。
 
-每个账号在 Google 侧最多只保留一个处于开启状态的临时窗口：一旦创建新的会话，上一个临时
-会话就会被关闭。因此只有最近一次开启的临时会话仍可继续对话。服务会按客户端记录该会话，
-并且**只**重用它；任何更早的临时会话都会以完整历史重放到全新会话中。这里没有需要调节的
-超时时间——该规则直接依据 Google 的实际行为，而不是靠猜测过期时长。
+- 只会删除服务在该模式下开启的会话。其他模式下的会话，以及账号里的其他任何内容，都不会被触碰。
+- 删除由周期性的清理任务执行，间隔为 TTL 的一半（最短一分钟，最长六小时），因此会话的实际存活时间可能比 TTL 多出一个间隔。
+- 删除失败时（例如账号处于未登录状态），会在之后的清理中重试，连续五次失败后放弃并在日志中记录错误。
+- 生成的媒体文件按相同的 TTL 过期。
 
-该记录刻意只保存在内存中，因此只要客户端会话被重新初始化——例如因闲置触发 `auto_close`、
-服务重启或重新部署——它同样会被清空。发生上述情况后，服务无法再确认任何窗口仍然有效，
-所有已存储的临时会话都会改为重放，而不是重用。
+修改 `chat_mode` 之后，位于 `auto_delete` 边界另一侧的已保存会话不会被继续使用，其历史会重放到一个新会话中；在 `auto_delete` 下开启的会话仍会按期删除。
 
-同一规则也适用于以访客身份运行的客户端，且与 `chat_mode` 无关。当所有 Cookie 分组都失败，
-或已认证的会话因 Cookie 过期而在使用过程中被拒绝时，客户端仍会以无账号状态继续处理纯文本
-请求——而访客会话的对话不会写入任何历史记录，因此其行为与临时会话完全一致。每条已存储的
-对话都会记录其所属的会话窗口，因此已认证状态下开启的会话不会被重放到访客会话中，访客状态
-下开启的会话也不会在 Cookie 恢复后被重放；无论哪个方向的跨越，都会回退为在全新会话中重放
-完整历史。
+### 访客会话
 
-访客会话会维持服务不中断，而不是让服务失效；相关请求会降级处理，而不是直接失败：
+当某个账号的 Cookie 被拒绝时，该客户端会以访客身份继续运行，而不是直接失败。访客只能回答文本请求：不能上传文件，不能选择模型，也不保留历史。
 
-- 客户端池优先选择已认证的客户端，被降级为访客的客户端只有在没有任何已认证客户端可用时才会
-  承接流量。
-- 需要上传文件的请求——包括附件，以及需要以 `message.txt` 形式发送的超长输入——会被路由到
-  已认证的客户端，即使已存储的会话原本会将其绑定到访客客户端。若没有可用的已认证客户端，
-  请求会返回明确的错误说明，而不是 Google 的 `Permission denied`。
-- Google 不为访客提供模型选择，因此所请求的模型会被替换为访客被允许使用的默认模型，并记录
-  一条警告。`/v1/models` 只会公布客户端确实能够提供服务的模型。
+- 优先使用已登录的客户端。只有在没有已登录的客户端时，访客才会收到请求。
+- 如果只剩访客，需要上传的请求会失败并给出明确的提示。
+- `/health` 会把访客报告为不健康。`gemini.guest_mode` 决定何时因此返回 HTTP 503：
 
-`/health` 会将访客客户端报告为不健康——请刷新其 Cookie 以恢复完整能力。
-`guest_mode` 设置决定这些不健康客户端如何影响就绪状态响应：
+| `guest_mode` | `/health` 返回 503 的条件 |
+| --- | --- |
+| `strict` | 任一客户端不健康 |
+| `adaptive`（默认） | 所有客户端都不健康 |
+| `permissive` | 不会因客户端状态而返回 503 |
 
-- `strict`（严格）：任一客户端不健康时返回 HTTP 503。
-- `adaptive`（自适应，默认）：仅当所有客户端均不健康时返回 HTTP 503；若仍有健康客户端，
-  则只记录警告并保持就绪。
-- `permissive`（宽松）：只记录警告，不改变就绪状态，即使所有客户端均不健康也是如此。
-
-三种模式都会记录不健康客户端。无论 `guest_mode` 为何，对话存储不可用时仍会返回 HTTP 503。
-
-除此之外，以上规则**仅**在临时模式下生效：由已认证客户端开启的普通会话在用户手动删除之前
-会一直由 Google 保留，因此其元数据可以长期重用，并且不受重启影响。
-
-> [!WARNING]
-> Google 可能在任意时刻、且不作任何提示地关闭临时会话窗口，包括在对话进行到一半时。
-> 此时模型可能直接返回不含既有上下文的回复，而不会抛出错误，因此上下文丢失可能是静默的。
-> 只要服务能够识别出该会话已失效，就会将完整历史重放到新会话中，但这种识别并非总能成功。
-> 对于较长或对上下文较敏感的对话，建议使用 `normal`；`temporary` 的连续性应视为尽力而为。
-
-由于临时会话可接受的负载更小，服务会在标准安全余量的基础上再收紧 10%，
-因此有效输入上限为 `max_chars_per_request` 的 81%（而非 90%）。
-两种模式下，超出有效上限的输入仍会以 `message.txt` 附件的形式发送。
-
-环境变量等价写法：
-
-```bash
-export CONFIG_GEMINI__CHAT_MODE="temporary"
-export CONFIG_GEMINI__GUEST_MODE="adaptive"
-```
+存储故障始终返回 503。
 
 ### 模型
 
-模型在启动时从 Google 动态获取，无需任何配置。每个客户端会读取自己账号可用的模型，并在运行时
-构建对应的请求头，因此只要 Google 提供了新发布的模型，服务就能立即使用。`GET /v1/models`
-列出的是运行中的客户端确实能够提供服务的模型。
+模型在启动时从各个账号自动发现，无需配置。能用哪些模型、它们叫什么名字，取决于账号的订阅档位。
 
-请求可以使用模型的规范名称（当前为 `gemini-pro`、`gemini-flash`、`gemini-flash-lite`）、别名或
-显示名称（`pro`、`Flash Lite`），也可以使用其内部 id；所有写法都会解析到同一份会话历史。模型
-名称来自 Google 而非本项目，可通过 `GET /v1/models` 查看你自己账号实际可用的列表。服务只提供
-动态获取到的模型——若没有任何客户端提供该模型，则返回 `400`，而不会悄悄改用其他模型作答。
+- 请求可以使用列表中的名称，也可以使用显示名称。
+- 匹配是宽松的。版本号会被忽略，并且只要匹配到列表名称中的一个词即可，因此 `gemini-2.5-pro` 和 `pro` 都会解析为 `gemini-pro`。
+- 匹配不到任何模型的名称会以 `400` 拒绝。服务不会改用其他模型。
 
-> [!NOTE]
-> `models` 与 `model_strategy` 配置项已移除，底层库中基于静态 `Model` 枚举的名称查找也已删除。
-> 它们的作用是在库尚未跟上新模型发布时手写模型请求头，而动态获取已让这一需求不再存在——如今
-> 硬编码的请求头反而有把请求固定在过时模型上的风险。若配置文件或环境变量中仍保留这两个键，
-> 将被直接忽略。
+### Gem
 
-### 策略 Gem
+默认关闭。启用需要设置 `gemini.gems.enabled: true` 并选择 `gemini.gems.policy`。启用后，`/v1/chat/completions` 或 `/v1/responses` 请求开头的系统提示词会作为一个 Gem（Gemini 中保存的自定义指令）在 Google 账号里保存一次，之后的请求只引用它，而不再把提示词放进消息正文。系统提示词相同的会话共用一个 Gem。
 
-托管 Gem 功能（`gemini.gems`）**默认关闭**（`enabled: false`、`policy: "off"`）。
-在已认证的客户端上启用后，服务端可以同步内置策略 Gem，并将前置系统提示词映射为去重的
-服务端托管 Gem，从而避免每次新建对话都重复发送完整系统指令：
-
-- `off`：不在启动时同步 Gem，也不在请求时附加 Gem。
-- `fetch_only`：仅读取已有的带前缀托管 Gem（`fastapi_policy_...`），不会在 Google 账号中创建、更新或删除 Gem。
-- `create_on_demand`：在 `create_rate_limit_per_minute` 与 `managed_gems_max_total` 限制内按需创建或更新托管 Gem；启用 `cleanup.enabled: true` 时可自动清理长期未使用的托管 Gem。
+| `policy` | 系统提示词 |
+| --- | --- |
+| `off`（默认） | 放在消息正文中发送 |
+| `fetch_only` | 使用账号里已有的对应 Gem；不会创建 |
+| `create_on_demand` | 首次出现时创建一个 Gem |
 
 > [!WARNING]
-> 启用 `create_on_demand` 或 `cleanup.enabled: true` 会在关联的 Google 账号中创建、更新或删除自定义 Gem。
-> 访客会话（`is_guest()`）不支持 Gem，会自动跳过 Gem 同步并回退为内联系统提示词。
+> `create_on_demand` 会在 Google 账号中创建名为 `fastapi_policy_...` 的 Gem。
 
-完整配置项请参阅 [`config/config.yaml`](config/config.yaml) 中的 `gemini.gems` 部分。
+- 每个不同的提示词对应一个 Gem，因此只适用于稳定的提示词。如果提示词每次请求都变化（例如包含当前时间），每次都会创建一个新的 Gem。
+- 创建受 `create_rate_limit_per_minute`（默认 `4`）和 `managed_gems_max_total`（默认 `200`）限制。超出限制或 Gem 无法使用时，提示词会放在消息正文中发送。
+- Gem 会一直保留在账号中，直到你删除。设置 `cleanup.enabled: true` 后，无论使用哪种策略，超过 `cleanup.unused_days`（默认 `7`）未使用的 Gem 会在客户端启动时被删除，并且每个 Gem 的描述会被更新以记录最近使用时间。
+- 访客会话和 `/v1beta` 请求始终把提示词放在消息正文中发送。
+
+### 输入长度
+
+输入超过 `gemini.max_chars_per_request` 的 90%（`temporary` 模式下为 81%）时，会作为 `message.txt` 附件发送给 Gemini。`server.max_request_body_bytes` 是另一项针对 HTTP 请求体的本地保护，与 Gemini 实际接受的长度无关。
+
+### 已移除的配置项
+
+`gemini.models`、`gemini.model_strategy`、`gemini.oversized_context_strategy` 和 `storage.images_path` 已不存在，即使出现在配置中也会被忽略。生成的媒体文件保存在 `storage.media_path` 下。
+
+## 维护
+
+导出和清理会话存储的脚本见 [`scripts/USAGE.md`](scripts/USAGE.md)。
 
 ## 鸣谢
 

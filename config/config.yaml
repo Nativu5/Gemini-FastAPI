@@ -39,16 +39,14 @@ gemini:
   max_chars_per_request: 1000000 # Maximum characters Gemini Web accepts per request. Non-pro users might have a lower limit
   allow_private_url_fetch: false # Allow server-side fetching of private/loopback image URLs (SSRF risk; default blocks them)
   url_fetch_timeout: 15 # Timeout in seconds for server-side URL image fetches
-  # "normal" uses standard Google chats; "temporary" uses Google's temporary mode (not saved to account) with tighter input limit;
-  # "auto_delete" uses standard Google chats for reliability and full context, but automatically deletes them from Google and LMDB when expired.
-  # WARNING: Google may close a temporary window at any time mid-conversation. The reply can then come back without the earlier
-  # context instead of erroring, so the loss may be silent. Prefer "normal" or "auto_delete" for long or context-sensitive conversations.
+  # What happens to the chats this server opens in the Google account:
+  #   "normal"      - kept until you delete them.
+  #   "temporary"   - never saved. Google may close a temporary chat at any time without an error, so a
+  #                   reply can come back without the earlier context. The input limit is also lower.
+  #   "auto_delete" - kept like "normal", then deleted from Google and from local storage once idle
+  #                   for auto_delete_ttl. Only chats opened in this mode are ever deleted.
   chat_mode: "normal"
-  # Inactivity TTL in seconds applicable ONLY to conversations created with chat_mode: "auto_delete".
-  # After this period of inactivity, conversations are deleted from BOTH Google account history and local LMDB.
-  # Note: Standard ("normal") conversations do NOT use this; they are retained locally according to storage.retention_days
-  # and are never deleted from Google.
-  auto_delete_ttl: 86400 # (default: 86400s / 24h)
+  auto_delete_ttl: 86400 # Idle seconds before an "auto_delete" chat is deleted (Not less than 60s)
   # Guest client health policy: "strict" fails if any client is unhealthy; "adaptive" fails only if all are unhealthy; "permissive" only logs a warning.
   guest_mode: "adaptive"
   # Managed gem support (custom 'gems' in your Gemini account, e.g. system prompt deduplication).
@@ -85,9 +83,8 @@ storage:
   path: "data/lmdb" # Database storage path
   media_path: "data/media" # Media storage path
   max_size: 268435456 # Maximum database size (256 MB)
-  # Number of days to retain standard conversations in local LMDB before cleanup (0 disables cleanup).
-  # Purges local database and media storage only; does not delete conversations from Google accounts.
-  # (For remote Google conversation cleanup, see gemini.chat_mode: "auto_delete" and gemini.auto_delete_ttl).
+  # Days to keep conversations and media in local storage (0 keeps them forever). Local only: nothing is
+  # deleted from the Google account. "auto_delete" chats follow gemini.auto_delete_ttl instead.
   retention_days: 14
 
 logging:

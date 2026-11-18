@@ -42,3 +42,8 @@ Delete all entries:
 ```bash
 python scripts/rotate_lmdb.py /path/to/lmdb all
 ```
+
+With `gemini.chat_mode: "auto_delete"`, the chats behind the removed records are handled differently by the two forms:
+
+- A duration queues them for deletion from the Google account. The running server carries that out on its next cleanup pass.
+- `all` also discards that queue, so those chats stay in the Google account.

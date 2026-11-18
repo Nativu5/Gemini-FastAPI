@@ -12,25 +12,17 @@ Web-based Gemini models wrapped into an OpenAI-compatible API. Powered by [Hanao
 
 ## Features
 
-- **No Google API Key Required**: Use web cookies to freely access Gemini's models via API.
-- **Google Search Included**: Get up-to-date answers using web-based Gemini's search capabilities.
-- **Conversation Persistence**: LMDB-based storage supporting multi-turn conversations.
-- **Multi-modal Support**: Support for handling text, images, and file uploads.
-- **Multi-account Load Balancing**: Distribute requests across multiple accounts with per-account proxy settings.
+- **No Google API key**: authenticates with the cookies of a signed-in Gemini web session.
+- **Three API surfaces**: OpenAI Chat Completions, OpenAI Responses, and Gemini-native `generateContent`.
+- **Streaming, tool calling and structured output** on every surface.
+- **Multi-modal**: image and file input, and image generation.
+- **Google Search included**: answers can draw on Gemini's built-in web search.
+- **Conversation reuse**: a follow-up request continues the same Google chat instead of resending the history.
+- **Multiple accounts**: requests are spread across accounts, each with its own proxy.
 
 ## Quick Start
 
-**For Docker deployment, see the [Docker Deployment](#docker-deployment) section below.**
-
-### Prerequisites
-
-- Python >= 3.13
-- Google account with Gemini access on web (Enable **[Gemini Apps activity](https://myactivity.google.com/product/gemini)** for best conversation persistence)
-- `secure_1psid` and `secure_1psidts` cookies from Gemini web interface
-
-### Installation
-
-#### Using uv (Recommended)
+You need Python 3.13+, [uv](https://docs.astral.sh/uv/), and a Google account that can use [Gemini](https://gemini.google.com/). To run in a container instead, see [Docker](#docker).
 
 ```bash
 git clone https://github.com/Nativu5/Gemini-FastAPI.git
@@ -38,17 +30,7 @@ cd Gemini-FastAPI
 uv sync
 ```
 
-#### Using pip
-
-```bash
-git clone https://github.com/Nativu5/Gemini-FastAPI.git
-cd Gemini-FastAPI
-pip install -e .
-```
-
-### Basic Configuration
-
-Edit `config/config.yaml` and provide at least one credential pair:
+Put your cookies ([how to get them](#getting-your-cookies)) in `config/config.yaml`:
 
 ```yaml
 gemini:
@@ -56,95 +38,41 @@ gemini:
     - id: "client-a"
       secure_1psid: "YOUR_SECURE_1PSID_HERE"
       secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
-      proxy: null # Optional proxy URL (null/empty keeps direct connection)
-      impersonate: null # Optional browser impersonation target (null uses library default)
 ```
 
-> [!NOTE]
-> For details, refer to the [Configuration](#configuration) section below.
-
-### Running the Server
+Start the server, which listens on `http://localhost:8000`:
 
 ```bash
-# Using uv
 uv run python run.py
-
-# Using Python directly
-python run.py
 ```
 
-The server will start on `http://localhost:8000` by default.
+Model names come from Google and differ between accounts, so list them first and use one in a request:
 
-## API Endpoints
+```bash
+curl http://localhost:8000/v1/models
+```
 
-The server provides several endpoints, including OpenAI-compatible ones.
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "MODEL_FROM_THE_LIST", "messages": [{"role": "user", "content": "Hello"}]}'
+```
 
-### OpenAI-Compatible Endpoints
+### Getting your cookies
 
-These endpoints use OpenAI-compatible wire formats while translating requests to Gemini Web.
-Compatibility is intentionally broader than the controls exposed by the Gemini Web client. Valid
-but unforwardable options are accepted for client compatibility, ignored, and recorded at debug
-level so they do not prevent an otherwise representable request from running.
+1. Open [Gemini](https://gemini.google.com/) in a private window and sign in.
+2. Open Developer Tools (F12) and go to **Application** → **Storage** → **Cookies**.
+3. Copy the values of `__Secure-1PSID` and `__Secure-1PSIDTS`.
 
-- **`GET /v1/models`**: Lists all supported Gemini models.
-- **`POST /v1/chat/completions`**: Unified chat interface.
-  - **Streaming**: Set `stream: true` to receive real-time delta chunks.
-  - **Multi-modal**: Supports text, images, and file uploads.
-  - **Tool Calling**: Supports function calling via the `tools` parameter.
-  - **Structured Output**: Supports every `response_format` mode. `json_schema` is validated
-    server-side against the supplied schema; `json_object` (JSON mode) only requires that the
-    reply parses as JSON; `text` is the default and imposes nothing.
+The [Gemini-API authentication guide](https://github.com/HanaokaYuzu/Gemini-API?tab=readme-ov-file#authentication) has more detail.
 
-### Advanced Endpoints
+> [!WARNING]
+> These cookies give access to your Google account. Keep them out of version control.
 
-- **`POST /v1/responses`**: Supports current `text.format` structured output (`text`,
-  `json_object` and `json_schema`), external/inline file inputs, generated images, and tool
-  calls. Files API `file_id` references are rejected because this wrapper does not expose an
-  OpenAI Files API.
+- **Use Firefox if cookies expire within hours.** Chromium-based browsers bind sessions to the device, so cookies copied from them cannot be renewed.
+- **Turn on [Gemini Apps activity](https://myactivity.google.com/product/gemini).** Without it Google can drop a chat at any time, and a multi-turn conversation loses its context.
 
-Schema enforcement follows OpenAI's own guarantee. With `strict: true`, a reply that does not
-match the schema is an error. With `strict: false` or JSON mode, only a best effort is promised,
-so a non-conforming reply is returned as text instead of failing the request. A turn that returns
-a tool call is never judged against the schema, which constrains the final answer only.
-
-`strict` defaults to `false` on both OpenAI surfaces, matching OpenAI itself, so one schema
-behaves the same whichever endpoint it is sent to. The flag matters more here than upstream,
-because Gemini Web has no constrained decoding — the schema is asked for in the prompt, so a
-strict requirement the model narrowly misses costs the caller the whole reply. The Gemini-native
-`generationConfig.responseSchema` / `responseJsonSchema` is always best-effort for the same
-reason: it has no `strict` flag to turn off.
-
-Only the model's own failures are enforced. A schema this wrapper cannot evaluate — one that is
-not valid JSON Schema, or whose `$ref`s do not resolve — is still shown to the model but is not
-used to judge the reply, and a schema whose regex keywords exhaust
-`server.schema_validation_budget_seconds` leaves the reply unverified. None of these fail the
-request, even under `strict`: they are gaps on this side, not violations by the model.
-
-Because a JSON document can only be validated once it is complete, a streamed response carrying
-a structured requirement is delivered as a single chunk after validation rather than
-incrementally. This applies to Gemini-native `responseMimeType: application/json` as well.
-
-Generation controls that Gemini Web does not expose—such as `temperature`, `top_p`, maximum
-output-token limits, `parallel_tool_calls`, Gemini `generationConfig` fields, and safety settings—are
-accepted but cannot affect upstream generation. They are ignored with a debug log. Only malformed
-input, or content this wrapper cannot resolve at all (an unresolved Files API ID, a `cachedContent`
-handle), is rejected—dropping those silently would change what the model is answering.
-
-On the Gemini surface, `generationConfig.responseSchema` is the OpenAPI 3.0 subset (uppercase
-type names, `nullable`) and is translated to JSON Schema before use; `responseJsonSchema` is
-already JSON Schema and is validated as such. `toolConfig.functionCallingConfig.allowedFunctionNames`
-narrows the tool list only in the `ANY` and `VALIDATED` modes that act on it.
-
-### Utility Endpoints
-
-- **`GET /health`**: Readiness endpoint. Conversation storage failures always return HTTP 503.
-  Client failures follow the configured `gemini.guest_mode` health policy; the default
-  `adaptive` policy returns 503 only when every Gemini client is unhealthy.
-- **`GET /media/{filename}`**: Internal endpoint to serve generated media. Requires a valid token (automatically included in image URLs returned by the API).
-
-## Docker Deployment
-
-### Run with Options
+## Docker
 
 ```bash
 docker run -p 8000:8000 \
@@ -158,14 +86,7 @@ docker run -p 8000:8000 \
   ghcr.io/nativu5/gemini-fastapi
 ```
 
-> [!TIP]
-> Add `CONFIG_GEMINI__CLIENTS__N__PROXY` only if you need a proxy; omit the variable to keep direct connections.
->
-> `GEMINI_COOKIE_PATH` points to the directory inside the container where refreshed cookies are stored. Bind-mounting it (e.g. `-v $(pwd)/cache:/app/cache`) preserves those cookies across container rebuilds/recreations so you rarely need to re-authenticate.
-
-### Run with Docker Compose
-
-Create a `docker-compose.yml` file:
+Or with Docker Compose:
 
 ```yaml
 services:
@@ -179,248 +100,141 @@ services:
       - ./data:/app/data
       - ./cache:/app/cache
     environment:
-      - CONFIG_SERVER__HOST=0.0.0.0
-      - CONFIG_SERVER__PORT=8000
       - CONFIG_SERVER__API_KEY=${API_KEY}
       - CONFIG_GEMINI__CLIENTS__0__ID=client-a
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID=${SECURE_1PSID}
       - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS=${SECURE_1PSIDTS}
-      - GEMINI_COOKIE_PATH=/app/cache # must match the cache volume mount above
-    restart: on-failure:3 # Avoid retrying too many times
-```
-
-Then run:
-
-```bash
-docker compose up -d
+      - GEMINI_COOKIE_PATH=/app/cache # Must match the cache volume above
+    restart: on-failure:3
 ```
 
 > [!IMPORTANT]
-> Make sure to mount the `/app/data` volume to persist conversation data between container restarts.
-> Also mount `/app/cache` so refreshed cookies (including rotated 1PSIDTS values) survive container rebuilds/recreates without re-auth.
+> Mount both volumes. `/app/data` holds stored conversations and generated media. `/app/cache` holds the cookies the server refreshes, so you do not have to sign in again after recreating the container.
+
+## API
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /v1/models` | Models the configured accounts can serve. |
+| `POST /v1/chat/completions` | OpenAI Chat Completions: streaming, tools, image and file input, `response_format`. |
+| `POST /v1/responses` | OpenAI Responses: streaming, tools, image and file input, image generation, `text.format`. |
+| `GET /v1beta/models`, `GET /v1beta/models/{model}` | Gemini-native model listing. |
+| `POST /v1beta/models/{model}:generateContent` | Gemini-native generation. |
+| `POST /v1beta/models/{model}:streamGenerateContent` | Gemini-native streaming generation. |
+| `GET /health` | Readiness: storage and per-account status. |
+| `GET /media/{filename}` | Generated images and media. Responses link here with a signed token. |
+
+If `server.api_key` is set, send it as `Authorization: Bearer <key>`. The `/v1beta` endpoints also accept the `x-goog-api-key` header and the `key` query parameter. With no key set, the API and the media links are open to anyone who can reach the server.
+
+### Compatibility
+
+Gemini Web offers fewer controls than the APIs this server imitates. A valid request is not rejected because of an option that cannot be forwarded.
+
+- **Ignored options.** `temperature`, `top_p`, output-token limits, `parallel_tool_calls`, Gemini `generationConfig` fields and safety settings are accepted and have no effect.
+- **Rejected input.** Malformed requests, and content the server cannot resolve at all, such as a Files API `file_id` or a `cachedContent` handle.
+- **Structured output is requested in the prompt** and checked by the server afterwards, because Gemini Web has no constrained decoding.
+  - With `strict: true`, a reply that does not match the schema is an error: `502`, or an error event when streaming.
+  - With `strict: false` (the default on both OpenAI surfaces) or JSON mode, the reply is returned as it is.
+  - Gemini-native `responseSchema` and `responseJsonSchema` are always best effort.
+  - A turn that returns a tool call is not checked.
+- **Schemas the server cannot evaluate are not enforced** and never fail a request. That covers invalid JSON Schema, a `$ref` that does not resolve (remote references are never fetched), and regex keywords that exceed `server.schema_validation_budget_seconds`.
+- **Streaming with a schema** delivers the answer as one chunk, since JSON can only be validated once it is complete.
 
 ## Configuration
 
-The server reads a YAML configuration file located at `config/config.yaml`.
-
-For details on each configuration option, refer to the comments in the [`config/config.yaml`](https://github.com/Nativu5/Gemini-FastAPI/blob/main/config/config.yaml) file.
-
-### Environment Variable Overrides
-
-> [!TIP]
-> This feature is particularly useful for Docker deployments and production environments where you want to keep sensitive credentials separate from configuration files.
-
-You can override any configuration option using environment variables with the `CONFIG_` prefix. Use double underscores (`__`) to represent nested keys, for example:
+Every option is described in [`config/config.yaml`](config/config.yaml). Any of them can be overridden by an environment variable named `CONFIG_` plus the path to the key, with `__` between levels:
 
 ```bash
-# Override server settings
 export CONFIG_SERVER__API_KEY="your-secure-api-key"
-
-# Override Gemini credentials for client 0
-export CONFIG_GEMINI__CLIENTS__0__ID="client-a"
 export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid"
-export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts"
-
-# Override optional proxy settings for client 0
 export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
-
-# Override browser impersonation for client 0
-export CONFIG_GEMINI__CLIENTS__0__IMPERSONATE="chrome"
-
-
-# Override conversation storage size limit
-export CONFIG_STORAGE__MAX_SIZE=268435456  # 256 MB
-
-# Override the local HTTP-body resource guard (0 disables it)
-export CONFIG_SERVER__MAX_REQUEST_BODY_BYTES=268435456
-
-# Override the JSON Schema regex evaluation budget, in seconds
-export CONFIG_SERVER__SCHEMA_VALIDATION_BUDGET_SECONDS=1.0
+export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 ```
 
-`max_request_body_bytes` is only a wrapper-side memory/resource safety ceiling. It is not an
-OpenAI or Gemini API compatibility limit and does not claim to describe Gemini Web capacity.
-Gemini Web remains authoritative for whether a request that passes this local guard is accepted.
+Two more variables are read directly: `CONFIG_PATH` selects a different config file, and `GEMINI_COOKIE_PATH` sets the directory where refreshed cookies are cached.
 
-### Client IDs and Conversation Reuse
+### Accounts
 
-Conversations are stored with the ID of the client that generated them.
-Keep these identifiers stable in your configuration so that sessions remain valid
-when you update the cookie list.
+Each entry under `gemini.clients` is one Google account.
 
-### Gemini Credentials
+- `id`: stored with every conversation the account opens. Keep it stable when you update cookies, or stored conversations can no longer be continued.
+- `proxy`: an optional proxy URL for this account only.
+- `impersonate`: an optional browser fingerprint for [`curl_cffi`](https://github.com/lexiforest/curl_cffi), such as `chrome`. An unsupported value stops the server at startup.
 
-> [!WARNING]
-> Keep these credentials secure and never commit them to version control. These cookies provide access to your Google account.
+### Chat modes
 
-<!-- Keeps the credential warnings as separate blockquotes (markdownlint MD028). -->
+`gemini.chat_mode` decides what happens to the chats the server opens in your Google account.
 
-> [!WARNING]
-> **Session Stability**: If cookies expire frequently, use Firefox to extract cookies. Recent versions of Chromium-based browsers use "Device Bound Session Credentials", which improves security but causes cookies to remain valid for only a few hours and prevents them from being renewed.
+| Mode | Kept in the Google account | Context across turns |
+| --- | --- | --- |
+| `normal` (default) | Yes, until you delete it | Reliable |
+| `temporary` | Never saved | Best effort |
+| `auto_delete` | Yes, then deleted once idle | Reliable |
 
-To use Gemini-FastAPI, you need to extract your Gemini session cookies:
+**`temporary`** uses Google's temporary chats. Google keeps one temporary chat open per account and may close it at any time without an error, so the reply can come back without the earlier context. The server continues only the most recent temporary chat and replays the full history into a new one otherwise. The input limit is also lower. Prefer another mode for long conversations.
 
-1. Open [Gemini](https://gemini.google.com/) in a private/incognito browser window and sign in
-2. Open Developer Tools (F12)
-3. Navigate to **Application** → **Storage** → **Cookies**
-4. Find and copy the values for:
-   - `__Secure-1PSID`
-   - `__Secure-1PSIDTS`
+**`auto_delete`** uses normal chats and removes them from both the Google account and the local store after `gemini.auto_delete_ttl` seconds without a request (default `86400`, minimum `60`).
 
-> [!IMPORTANT]
-> **Enable [Gemini Apps activity](https://myactivity.google.com/product/gemini)** to ensure stable conversation persistence.
->
-> While active chat turns may work temporarily without it, any transient error, TLS session restart, or server reboot can cause Google to expire the conversation metadata. If this setting is disabled, the model will **completely lose the context of your multi-turn conversation**, making old threads unreachable even if they are stored in your local LMDB.
+- Only chats the server opened in this mode are deleted. Chats from other modes, and everything else in the account, are left alone.
+- Deletion runs on a periodic pass, every half TTL (between one minute and six hours), so a chat can outlive its TTL by up to one interval.
+- A deletion that fails, for example while the account is signed out, is retried on later passes and abandoned with an error in the log after five attempts.
+- Generated media expires on the same TTL.
 
-<!-- Keeps the two callouts as separate blockquotes (markdownlint MD028). -->
+After `chat_mode` changes, stored chats from the other side of the `auto_delete` boundary are not continued. Their history is replayed into a new chat, and chats opened under `auto_delete` are still deleted on schedule.
 
-> [!TIP]
-> For detailed instructions, refer to the [HanaokaYuzu/Gemini-API authentication guide](https://github.com/HanaokaYuzu/Gemini-API?tab=readme-ov-file#authentication).
+### Guest sessions
 
-### Proxy Settings
+When an account's cookies are rejected, that client keeps running as a guest instead of failing. A guest can answer text prompts only: it cannot upload files, cannot choose a model, and keeps no history.
 
-Each client entry can be configured with a different proxy to work around rate limits. Omit the `proxy` field or set it to `null` or an empty string to keep a direct connection.
+- Authenticated clients are preferred. A guest receives requests only when no authenticated client is left.
+- A request that needs an upload fails with a clear message if only guests remain.
+- `/health` reports a guest as unhealthy. `gemini.guest_mode` sets when that turns into HTTP 503:
 
-### Browser Impersonation
+| `guest_mode` | `/health` returns 503 when |
+| --- | --- |
+| `strict` | any client is unhealthy |
+| `adaptive` (default) | every client is unhealthy |
+| `permissive` | never because of clients |
 
-Each client can optionally set an `impersonate` value to control the TLS/HTTP fingerprint used by `curl_cffi`.
-
-- Set to `null` (default) to use the library's default.
-- Set to any value supported by [`curl_cffi`'s `BrowserTypeLiteral`](https://github.com/lexiforest/curl_cffi).
-- The value is validated at startup; an invalid value will prevent the server from starting.
-
-```yaml
-gemini:
-  clients:
-    - id: "client-a"
-      impersonate: "chrome" # Use Chrome fingerprint
-    - id: "client-b"
-      impersonate: null # Use library default
-```
-
-### Chat Session Mode
-
-You can control whether requests use normal Google chats or Google's temporary chat mode:
-
-```yaml
-gemini:
-  chat_mode: "normal" # "normal" or "temporary"
-  guest_mode: "adaptive" # "strict", "adaptive", or "permissive"
-  max_chars_per_request: 1000000
-```
-
-With `temporary`, conversations are not saved to the Google account. A temporary chat is still
-continuable for as long as Google keeps the window open, so session reuse and conversation
-storage work exactly as they do in normal mode.
-
-When a stored chat can no longer be continued - after changing `chat_mode`, or once Google has
-closed a temporary window - the server falls back to replaying the full conversation history
-into a fresh chat, so the context is rebuilt rather than lost.
-
-Google keeps at most one temporary window open per account and closes the previous one as soon
-as a new conversation is created, so only the most recently opened temporary chat is still
-continuable. The server tracks that chat per client and reuses **only** it; any older temporary
-conversation is replayed in full into a fresh chat instead. There is no timeout to tune - the
-rule follows Google's actual behaviour rather than guessing at an expiry.
-
-That tracking is deliberately in-memory, so it is also cleared whenever the client session
-restarts - an `auto_close` after inactivity, a server restart, or a redeploy. After any of
-those, no window can be vouched for and every stored temporary conversation is replayed rather
-than reused.
-
-The same rule applies to a client running as a guest, regardless of `chat_mode`. When every
-cookie group fails, or an authenticated session is rejected mid-flight because its cookies
-expired, the client keeps serving text prompts without an account - and a guest chat is never
-written to any history, so it behaves exactly like a temporary one. Each stored conversation
-records the session window it belongs to, so chats opened while authenticated are never replayed
-into a guest session and chats opened as a guest are never replayed once cookies are restored;
-either crossing falls back to a full history replay in a fresh chat.
-
-A guest session keeps the service up rather than taking it down, and requests degrade instead of
-failing:
-
-- The pool prefers authenticated clients, so a downgraded one only receives traffic when no
-  authenticated client is left.
-- Requests that need a file upload - attachments, or input long enough to be sent as
-  `message.txt` - are routed to an authenticated client, including when a stored session would
-  otherwise pin them to a guest one. If none exists, the request fails with an explicit message
-  instead of Google's `Permission denied`.
-- Google gives a guest no model choice, so the requested model is replaced by the default one it
-  is allowed to use, logged as a warning. `/v1/models` advertises only models a client can
-  actually serve.
-
-`/health` reports a guest client as unhealthy - refresh its cookies to restore full capability.
-The `guest_mode` setting controls how those unhealthy clients affect the readiness response:
-
-- `strict`: return HTTP 503 when any client is unhealthy.
-- `adaptive` (default): return HTTP 503 only when all clients are unhealthy; otherwise log a
-  warning and remain ready.
-- `permissive`: log a warning but do not change readiness, even when all clients are unhealthy.
-
-All three modes log unhealthy clients. Conversation storage failures still return HTTP 503
-regardless of `guest_mode`.
-
-Otherwise this applies **only** in temporary mode. A normal chat opened by an authenticated
-client is kept by Google until you delete it, so its metadata stays reusable indefinitely and
-across restarts.
-
-> [!WARNING]
-> Google can close a temporary chat window at any time, without notice and mid-conversation.
-> When that happens the reply may come back without the earlier context instead of raising an
-> error, so the loss can be silent. The server replays the full history into a fresh chat when
-> it can detect the chat is gone, but detection is not guaranteed. Prefer `normal` for long or
-> context-sensitive conversations, and treat `temporary` as best-effort continuity.
-
-Because temporary chats accept a smaller payload, the server applies an additional 10% reduction
-on top of the standard safety margin, so the effective input limit becomes 81% of
-`max_chars_per_request` instead of 90%. Input exceeding the effective limit is still sent as a
-`message.txt` attachment in both modes.
-
-Environment variable equivalent:
-
-```bash
-export CONFIG_GEMINI__CHAT_MODE="temporary"
-export CONFIG_GEMINI__GUEST_MODE="adaptive"
-```
+A storage failure always returns 503.
 
 ### Models
 
-Models are discovered from Google at startup - there is nothing to configure. Each client reads
-the models its own account may use and builds the request headers for them at runtime, so a newly
-launched model is served as soon as Google offers it. `GET /v1/models` lists what the running
-clients can actually serve.
+Models are discovered from each account at startup, so there is nothing to configure. Which models you get, and what they are called, depends on the account's plan.
 
-Requests may name a model by its canonical name (currently `gemini-pro`, `gemini-flash` and
-`gemini-flash-lite`), by an alias or display name (`pro`, `Flash Lite`) or by its internal id;
-all forms resolve to the same conversation history. Call `GET /v1/models` for the list your own
-accounts see - the names come from Google, not from this project. Only discovered models are
-served: a name no client offers is rejected with `400` rather than quietly answered by a
-different model.
+- A request can name a model by its listed name or its display name.
+- Matching is loose. Version numbers are ignored and one word of a listed name is enough, so `gemini-2.5-pro` and `pro` both resolve to `gemini-pro`.
+- A name that matches nothing is rejected with `400`. The server never falls back to another model.
 
-> [!NOTE]
-> The `models` and `model_strategy` settings are gone, as is any use of the library's removed
-> static `Model` name lookups. They existed to hand-write model headers while the library lagged behind
-> new releases, which dynamic discovery has made unnecessary - and hardcoded headers now risk
-> pinning requests to a stale model. Both keys are simply ignored if left in a config file or
-> environment.
+### Gems
 
-### Policy Gems
+Off by default. To use it, set `gemini.gems.enabled: true` and choose a `gemini.gems.policy`. The system prompt at the start of a `/v1/chat/completions` or `/v1/responses` request is then stored once as a gem (Gemini's saved custom instructions) in the Google account and referenced from then on, instead of being sent inside the message. Conversations with the same system prompt share one gem.
 
-Managed gem support (`gemini.gems`) is **disabled by default** (`enabled: false`, `policy: "off"`).
-When enabled on an authenticated client, the server can synchronize built-in policy gems and map
-leading system prompts to deduplicated server-managed gems so repeated system instructions do not
-have to be re-sent in full on every new conversation:
-
-- `off`: No startup gem sync or request-time gem attachment.
-- `fetch_only`: Reads existing prefixed gems (`fastapi_policy_...`) without creating, updating, or deleting gems in the Google account.
-- `create_on_demand`: Creates/updates missing managed gems up to `create_rate_limit_per_minute` and `managed_gems_max_total`, and optionally cleans up unused managed gems when `cleanup.enabled: true`.
+| `policy` | System prompt |
+| --- | --- |
+| `off` (default) | Sent inline |
+| `fetch_only` | Uses a gem that already exists for it; never creates one |
+| `create_on_demand` | Creates a gem the first time it is seen |
 
 > [!WARNING]
-> Enabling `create_on_demand` or `cleanup.enabled: true` creates, updates, or deletes custom gems
-> in the associated Google account. Guest sessions (`is_guest()`) cannot use gems and automatically
-> skip gem sync and fall back to inline system prompts.
+> `create_on_demand` creates gems named `fastapi_policy_...` in the Google account.
 
-See the `gemini.gems` block in [`config/config.yaml`](config/config.yaml) for all options.
+- There is one gem per distinct prompt, so use this for stable prompts. A prompt that changes with every request, for example one that contains the time, creates a new gem each time.
+- Creation is limited by `create_rate_limit_per_minute` (default `4`) and `managed_gems_max_total` (default `200`). Past a limit, or whenever a gem cannot be used, the prompt is sent inline.
+- Gems stay in the account until you delete them. With `cleanup.enabled: true`, under either policy, gems unused for `cleanup.unused_days` (default `7`) are deleted when a client starts, and each gem's description is updated to record when it was last used.
+- Guest sessions and `/v1beta` requests always send the prompt inline.
+
+### Input size
+
+Input longer than 90% of `gemini.max_chars_per_request` (81% in `temporary` mode) is sent to Gemini as a `message.txt` attachment. `server.max_request_body_bytes` is a separate local guard on the HTTP body and says nothing about what Gemini accepts.
+
+### Removed settings
+
+`gemini.models`, `gemini.model_strategy`, `gemini.oversized_context_strategy` and `storage.images_path` no longer exist and are ignored if present. Generated media is stored under `storage.media_path`.
+
+## Maintenance
+
+[`scripts/USAGE.md`](scripts/USAGE.md) covers the scripts for dumping and pruning the conversation store.
 
 ## Acknowledgments
 
