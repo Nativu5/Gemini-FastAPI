@@ -1266,14 +1266,10 @@ class StreamingOutputFilter:
         return strip_system_hints(res)
 
 
-# --- Media Processing Helpers ---
-
-
 async def _process_image_item(image: Image) -> ProcessedImageResult | None:
-    """Process an image item by converting it to base64 and returning a typed image result tuple."""
+    """Download one generated image into the media store; None if that fails."""
     try:
-        media_store = get_media_store_dir()
-        return "image", image, await _image_to_base64(image, media_store)
+        return "image", image, await _image_to_base64(image, get_media_store_dir())
     except Exception as exc:
         logger.warning(f"Background image processing failed: {exc}")
         return None
@@ -1282,13 +1278,89 @@ async def _process_image_item(image: Image) -> ProcessedImageResult | None:
 async def _process_media_item(
     media_item: GeneratedVideo | GeneratedMedia,
 ) -> ProcessedMediaResult | None:
-    """Process a media item by saving it to local files and returning a typed media result tuple."""
+    """Download one generated video or audio item into the media store; None if that fails."""
     try:
-        media_store = get_media_store_dir()
-        return "media", media_item, await _media_to_local_file(media_item, media_store)
+        return "media", media_item, await _media_to_local_file(media_item, get_media_store_dir())
     except Exception as exc:
         logger.warning(f"Background media processing failed: {exc}")
         return None
+
+
+class _Downloads:
+    """The images, videos and audio generated for one reply, downloaded in the background.
+
+    A download starts as soon as a chunk mentions the file, so most are finished by the time the
+    text has been sent. Gemini can list one file under several urls; it is used once.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: list[asyncio.Task[ProcessedImageResult | ProcessedMediaResult | None]] = []
+        self._seen_urls: set[str] = set()
+        self._image_hashes: set[str] = set()
+        self.kept_media: dict[
+            str, str
+        ] = {}  # content hash -> file kept for it, for `_media_markdown`
+
+    def add(self, output: ModelOutput) -> None:
+        """Start downloading what this chunk mentions for the first time."""
+        for image in output.images or []:
+            if image.url and image.url not in self._seen_urls:
+                self._seen_urls.add(image.url)
+                self._tasks.append(asyncio.create_task(_process_image_item(image)))
+        for item in (output.videos or []) + (output.media or []):
+            url = getattr(item, "url", None) or getattr(item, "mp3_url", None)
+            if url and url not in self._seen_urls:
+                self._seen_urls.add(url)
+                self._tasks.append(asyncio.create_task(_process_media_item(item)))
+
+    async def cancel(self) -> None:
+        """Stop the downloads still running, on a path that will not use their results.
+
+        Left alone they keep writing files nothing refers to and, if they fail, raise
+        `Task exception was never retrieved` once they are garbage collected.
+        """
+        tasks, self._tasks = self._tasks, []
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def as_completed(
+        self,
+    ) -> AsyncGenerator[ProcessedImageResult | ProcessedMediaResult | None]:
+        """Each download as it finishes, and None after every 5 seconds without one, so that a
+        stream can send a keep-alive. Failed downloads are skipped."""
+        while self._tasks:
+            done, _ = await asyncio.wait(
+                self._tasks, timeout=5.0, return_when=asyncio.FIRST_COMPLETED
+            )
+            if not done:
+                yield None
+                continue
+            finished = [task for task in self._tasks if task in done]
+            self._tasks = [task for task in self._tasks if task not in done]
+            for task in finished:
+                if result := task.result():
+                    yield result
+
+    async def all(self) -> list[ProcessedImageResult | ProcessedMediaResult]:
+        """Every download that succeeded, in the order the files were listed."""
+        tasks, self._tasks = self._tasks, []
+        return [result for result in await asyncio.gather(*tasks) if result]
+
+    def new_image(self, data: ProcessedImageData) -> str | None:
+        """File name of a downloaded image, or None for a second copy of a picture this reply
+        already has; the copy is deleted."""
+        *_, name, content_hash = data
+        if content_hash in self._image_hashes:
+            (get_media_store_dir() / name).unlink(missing_ok=True)
+            return None
+        self._image_hashes.add(content_hash)
+        return name
+
+
+def _media_url(name: str, base_url: str) -> str:
+    """The signed link under which a file in the media store is served."""
+    return f"{base_url}media/{name}?token={get_media_token(name)}"
 
 
 def _media_markdown(
@@ -1311,7 +1383,7 @@ def _media_markdown(
             (media_store / name).unlink(missing_ok=True)
             if kind in ("video", "audio"):
                 continue
-        urls[kind] = f"{base_url}media/{kept}?token={get_media_token(kept)}"
+        urls[kind] = _media_url(kept, base_url)
 
     title = getattr(item, "title", "Media")
     thumbnail = urls.get("video_thumbnail") or urls.get("audio_thumbnail")
@@ -1320,6 +1392,30 @@ def _media_markdown(
         if url := urls.get(kind):
             links.append(f"[![{label}]({thumbnail})]({url})" if thumbnail else f"[{label}]({url})")
     return "\n\n".join(links)
+
+
+def _chat_markdown(
+    result: ProcessedImageResult | ProcessedMediaResult, downloads: _Downloads, base_url: str
+) -> str:
+    """Markdown that shows one downloaded file in a Chat Completions reply; "" for a repeat."""
+    kind, item, data = result
+    if kind == "media":
+        files = cast(ProcessedMediaData, data)
+        return _media_markdown(item, files, downloads.kept_media, base_url)
+    if name := downloads.new_image(cast(ProcessedImageData, data)):
+        return f"![{getattr(item, 'title', 'Image')}]({_media_url(name, base_url)})"
+    return ""
+
+
+def _image_generation_call(data: ProcessedImageData) -> ImageGenerationCall:
+    """A downloaded image as a Responses output item."""
+    b64, width, height, name, _ = data
+    return ImageGenerationCall(
+        id=Path(name).stem,
+        result=b64,
+        output_format=Path(name).suffix.lstrip("."),
+        size=f"{width}x{height}" if width and height else None,
+    )
 
 
 # --- Response Builders & Streaming ---
@@ -1364,23 +1460,7 @@ def _create_real_streaming_response(
         last_output: ModelOutput | None = None
         suppressor = StreamingOutputFilter()
 
-        media_tasks = []
-        seen_media_urls = set()
-        seen_image_urls = set()
-
-        async def discard_media_tasks() -> None:
-            """Cancel and reap media downloads on a path that will never publish their results.
-
-            These tasks are spawned eagerly while chunks arrive. Abandoning them on an early
-            return leaves them writing files nothing references and, on failure, raises
-            `Task exception was never retrieved` once they are garbage collected.
-            """
-            if not media_tasks:
-                return
-            for task in media_tasks:
-                task.cancel()
-            await asyncio.gather(*media_tasks, return_exceptions=True)
-            media_tasks.clear()
+        downloads = _Downloads()
 
         def make_chunk(delta_content: dict) -> str:
             data = {
@@ -1417,20 +1497,9 @@ def _create_real_streaming_response(
                                 {"delta": {"content": visible_delta}, "finish_reason": None}
                             )
 
-                    for img in chunk.images or []:
-                        if img.url and img.url not in seen_image_urls:
-                            seen_image_urls.add(img.url)
-                            media_tasks.append(asyncio.create_task(_process_image_item(img)))
-
-                    m_list = (chunk.videos or []) + (chunk.media or [])
-                    for m in m_list:
-                        p_url = getattr(m, "url", None) or getattr(m, "mp3_url", None)
-                        if p_url and p_url not in seen_media_urls:
-                            seen_media_urls.add(p_url)
-                            media_tasks.append(asyncio.create_task(_process_media_item(m)))
+                    downloads.add(chunk)
             except Exception as e:
                 logger.error(f"Error during streaming: {e}")
-                await discard_media_tasks()
                 yield _sse_error(f"Streaming error occurred: {e}", "server_error")
                 return
 
@@ -1469,7 +1538,6 @@ def _create_real_streaming_response(
                     structured_requirement,
                 )
             except StructuredOutputValidationError as exc:
-                await discard_media_tasks()
                 yield _sse_error(
                     str(exc), "invalid_model_output", "response_format", "schema_validation_failed"
                 )
@@ -1477,7 +1545,6 @@ def _create_real_streaming_response(
             # No `has_images` escape hatch here: Chat Completions has no image-generation tool, so an
             # image Gemini volunteers on its own cannot stand in for a function call that was forced.
             if choice_error := _tool_choice_failure(tool_choice, detected_tool_calls):
-                await discard_media_tasks()
                 yield _sse_error(
                     choice_error, "invalid_model_output", "tool_choice", "required_tool_missing"
                 )
@@ -1485,57 +1552,12 @@ def _create_real_streaming_response(
             if structured_requirement and visible_output:
                 yield make_chunk({"delta": {"content": visible_output}, "finish_reason": None})
 
-            seen_hashes = {}
-            seen_media_hashes = {}
-            media_store = get_media_store_dir()
-
-            if media_tasks:
-                logger.debug(
-                    f"Waiting for {len(media_tasks)} background media tasks with heartbeat..."
-                )
-                while media_tasks:
-                    done, pending = await asyncio.wait(
-                        media_tasks, timeout=5.0, return_when=asyncio.FIRST_COMPLETED
-                    )
-                    media_tasks = list(pending)
-
-                    if not done:
-                        yield ": ping\n\n"
-                        continue
-
-                    for task in done:
-                        res = task.result()
-                        if not res:
-                            continue
-
-                        rtype, original_item, media_data = res
-                        if rtype == "image":
-                            _, _, _, fname, fhash = media_data
-                            if fhash in seen_hashes:
-                                # The same image under a second url: shown once.
-                                (media_store / fname).unlink(missing_ok=True)
-                                continue
-                            seen_hashes[fhash] = fname
-
-                            img_url = f"{base_url}media/{fname}?token={get_media_token(fname)}"
-                            title = getattr(original_item, "title", "Image")
-                            md = f"![{title}]({img_url})"
-                            storage_output += f"\n\n{md}"
-                            yield make_chunk(
-                                {"delta": {"content": f"\n\n{md}"}, "finish_reason": None}
-                            )
-
-                        elif rtype == "media":
-                            if md := _media_markdown(
-                                original_item,
-                                cast(ProcessedMediaData, media_data),
-                                seen_media_hashes,
-                                base_url,
-                            ):
-                                storage_output += f"\n\n{md}"
-                                yield make_chunk(
-                                    {"delta": {"content": f"\n\n{md}"}, "finish_reason": None}
-                                )
+            async for result in downloads.as_completed():
+                if result is None:
+                    yield ": ping\n\n"
+                elif md := _chat_markdown(result, downloads, base_url):
+                    storage_output += f"\n\n{md}"
+                    yield make_chunk({"delta": {"content": f"\n\n{md}"}, "finish_reason": None})
 
             if detected_tool_calls:
                 for idx, call in enumerate(detected_tool_calls):
@@ -1585,7 +1607,7 @@ def _create_real_streaming_response(
             )
             yield "data: [DONE]\n\n"
         finally:
-            await discard_media_tasks()
+            await downloads.cancel()
 
     return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
@@ -1626,18 +1648,7 @@ def _create_responses_real_streaming_response(
             seq += 1
             return f"event: {etype}\ndata: {orjson.dumps(data).decode()}\n\n"
 
-        media_tasks = []
-        seen_media_urls = set()
-        seen_image_urls = set()
-
-        async def discard_media_tasks() -> None:
-            """Cancel downloads whose results cannot be published after a stream failure."""
-            if not media_tasks:
-                return
-            for task in media_tasks:
-                task.cancel()
-            await asyncio.gather(*media_tasks, return_exceptions=True)
-            media_tasks.clear()
+        downloads = _Downloads()
 
         try:
             yield make_event(
@@ -1842,21 +1853,10 @@ def _create_responses_real_streaming_response(
                             if visible := suppressor.process(chunk.text_delta):
                                 yield text_delta(visible)
 
-                    for img in chunk.images or []:
-                        if img.url and img.url not in seen_image_urls:
-                            seen_image_urls.add(img.url)
-                            media_tasks.append(asyncio.create_task(_process_image_item(img)))
-
-                    m_list = (chunk.videos or []) + (chunk.media or [])
-                    for m in m_list:
-                        p_url = getattr(m, "url", None) or getattr(m, "mp3_url", None)
-                        if p_url and p_url not in seen_media_urls:
-                            seen_media_urls.add(p_url)
-                            media_tasks.append(asyncio.create_task(_process_media_item(m)))
+                    downloads.add(chunk)
 
             except Exception as e:
                 logger.error(f"Error during streaming: {e}")
-                await discard_media_tasks()
                 yield make_event(
                     "error",
                     {
@@ -1906,7 +1906,6 @@ def _create_responses_real_streaming_response(
                     structured_requirement,
                 )
             except StructuredOutputValidationError as exc:
-                await discard_media_tasks()
                 yield make_event(
                     "error",
                     {
@@ -1926,92 +1925,32 @@ def _create_responses_real_streaming_response(
                 yield text_delta(assistant_text)
 
             image_items = []
-            seen_hashes = {}
-            seen_media_hashes = {}
-            media_store = get_media_store_dir()
-
-            if media_tasks:
-                logger.debug(
-                    f"Waiting for {len(media_tasks)} background media tasks in Responses with heartbeat..."
-                )
-                while media_tasks:
-                    done, pending = await asyncio.wait(
-                        media_tasks, timeout=5.0, return_when=asyncio.FIRST_COMPLETED
-                    )
-                    media_tasks = list(pending)
-
-                    if not done:
-                        yield ": ping\n\n"
-                        continue
-
-                    for task in done:
-                        res = task.result()
-                        if not res:
-                            continue
-
-                        rtype, original_item, media_data = res
-                        if rtype == "image":
-                            b64, w, h, fname, fhash = media_data
-                            if fhash in seen_hashes:
-                                # The same image under a second url: shown once.
-                                (media_store / fname).unlink(missing_ok=True)
-                                continue
-                            seen_hashes[fhash] = fname
-
-                            parts = fname.rsplit(".", 1)
-                            img_id = parts[0]
-                            fmt = parts[1] if len(parts) > 1 else "png"
-
-                            img_item = ImageGenerationCall(
-                                id=img_id,
-                                result=b64,
-                                output_format=fmt,
-                                size=f"{w}x{h}" if w and h else None,
-                            )
-
-                            img_link = f"![{fname}]({base_url}media/{fname}?token={get_media_token(fname)})"
-                            md_to_add = f"\n\n{img_link}"
-
-                            img_index = next_output_index
-                            next_output_index += 1
-                            yield make_event(
-                                "response.output_item.added",
-                                {
-                                    "output_index": img_index,
-                                    "item": dump_model(img_item),
-                                },
-                            )
-                            yield make_event(
-                                "response.output_item.done",
-                                {
-                                    "output_index": img_index,
-                                    "item": dump_model(img_item),
-                                },
-                            )
-
-                            for event in open_message():
-                                yield event
-
-                            yield text_delta(md_to_add)
-                            assistant_text += md_to_add
-                            storage_output += md_to_add
-                            image_items.append(img_item)
-
-                        elif rtype == "media":
-                            if media_md := _media_markdown(
-                                original_item,
-                                cast(ProcessedMediaData, media_data),
-                                seen_media_hashes,
-                                base_url,
-                            ):
-                                md_to_add = f"\n\n{media_md}"
-
-                                for event in open_message():
-                                    yield event
-
-                                yield text_delta(md_to_add)
-                                assistant_text += md_to_add
-                                storage_output += md_to_add
+            async for result in downloads.as_completed():
+                if result is None:
+                    yield ": ping\n\n"
+                    continue
+                kind, item, data = result
+                if kind == "media":
+                    files = cast(ProcessedMediaData, data)
+                    link = _media_markdown(item, files, downloads.kept_media, base_url)
+                elif name := downloads.new_image(cast(ProcessedImageData, data)):
+                    img_item = _image_generation_call(cast(ProcessedImageData, data))
+                    img_index = next_output_index
+                    next_output_index += 1
+                    for etype in ("response.output_item.added", "response.output_item.done"):
+                        yield make_event(
+                            etype, {"output_index": img_index, "item": dump_model(img_item)}
+                        )
+                    image_items.append(img_item)
+                    link = f"![{name}]({_media_url(name, base_url)})"
+                else:
+                    continue
+                if link:
+                    for event in open_message():
+                        yield event
+                    yield text_delta(f"\n\n{link}")
+                    assistant_text += f"\n\n{link}"
+                    storage_output += f"\n\n{link}"
 
             final_response_contents: list[ResponseOutputContent] = []
             if choice_error := _tool_choice_failure(
@@ -2143,7 +2082,7 @@ def _create_responses_real_streaming_response(
 
             yield "data: [DONE]\n\n"
         finally:
-            await discard_media_tasks()
+            await downloads.cancel()
 
     return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
@@ -2234,65 +2173,17 @@ async def create_chat_completion(
     except StructuredOutputValidationError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
-    images = resp_or_stream.images or []
     # No `has_images` escape hatch here: Chat Completions has no image-generation tool, so an
     # image Gemini volunteers on its own cannot stand in for a function call that was forced.
     if choice_error := _tool_choice_failure(request.tool_choice, tool_calls):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=choice_error)
 
-    media_items: list[GeneratedVideo | GeneratedMedia] = (resp_or_stream.videos or []) + (
-        resp_or_stream.media or []
-    )
-    unique_media = []
-    seen_urls = set()
-    for m in media_items:
-        v_url = getattr(m, "url", None)
-        a_url = getattr(m, "mp3_url", None)
-        primary_url = v_url or a_url
-        if primary_url and primary_url not in seen_urls:
-            unique_media.append(m)
-            seen_urls.add(primary_url)
-
-    tasks = [_process_image_item(img) for img in images] + [
-        _process_media_item(m) for m in unique_media
-    ]
-    results = await asyncio.gather(*tasks)
-
-    image_markdown = ""
-    media_markdown = ""
-    seen_hashes = {}
-    seen_media_hashes = {}
-    media_store = get_media_store_dir()
-
-    for res in results:
-        if not res:
-            continue
-
-        if res[0] == "image":
-            original_item = res[1]
-            media_data = res[2]
-            _, _, _, fname, fhash = media_data
-            if fhash in seen_hashes:
-                # The same image under a second url: shown once.
-                (media_store / fname).unlink(missing_ok=True)
-                continue
-            seen_hashes[fhash] = fname
-
-            img_url = f"{base_url}media/{fname}?token={get_media_token(fname)}"
-            title = getattr(original_item, "title", "Image")
-            image_markdown += f"\n\n![{title}]({img_url})"
-
-        elif res[0] == "media":
-            if md := _media_markdown(res[1], res[2], seen_media_hashes, base_url):
-                media_markdown += f"\n\n{md}"
-
-    if image_markdown:
-        visible_output += image_markdown
-        storage_output += image_markdown
-
-    if media_markdown:
-        visible_output += media_markdown
-        storage_output += media_markdown
+    downloads = _Downloads()
+    downloads.add(resp_or_stream)
+    for result in await downloads.all():
+        if md := _chat_markdown(result, downloads, base_url):
+            visible_output += f"\n\n{md}"
+            storage_output += f"\n\n{md}"
 
     p_tok, c_tok, t_tok, r_tok = calculate_usage(app_messages, storage_output, tool_calls, thoughts)
     payload = ChatCompletionResponse(
@@ -2442,78 +2333,34 @@ async def create_response(
         )
     except StructuredOutputValidationError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    images = resp_or_stream.images or []
     if choice_error := _tool_choice_failure(
         request.tool_choice,
         tool_calls,
-        has_images=bool(images),
+        has_images=bool(resp_or_stream.images),
         has_image_tool=bool(image_tools),
     ):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=choice_error)
 
-    unique_media = []
-    seen_urls = set()
-    for m in (resp_or_stream.videos or []) + (resp_or_stream.media or []):
-        p_url = getattr(m, "url", None) or getattr(m, "mp3_url", None)
-        if p_url and p_url not in seen_urls:
-            unique_media.append(m)
-            seen_urls.add(p_url)
-
-    tasks = [_process_image_item(img) for img in images] + [
-        _process_media_item(m) for m in unique_media
-    ]
-    results = await asyncio.gather(*tasks)
-
-    contents, img_calls = [], []
-    seen_hashes = {}
-    seen_media_hashes = {}
-    media_markdown = ""
-    media_store = get_media_store_dir()
-
-    for res in results:
-        if not res:
-            continue
-
-        if res[0] == "image":
-            media_data = res[2]
-            b64, w, h, fname, fhash = media_data
-            if fhash in seen_hashes:
-                # The same image under a second url: shown once.
-                (media_store / fname).unlink(missing_ok=True)
-                continue
-            seen_hashes[fhash] = fname
-
-            parts = fname.rsplit(".", 1)
-            img_id = parts[0]
-            fmt = parts[1] if len(parts) > 1 else "png"
-            img_calls.append(
-                ImageGenerationCall(
-                    id=img_id, result=b64, output_format=fmt, size=f"{w}x{h}" if w and h else None
-                )
-            )
-
-        elif res[0] == "media":
-            if md := _media_markdown(res[1], res[2], seen_media_hashes, base_url):
+    downloads = _Downloads()
+    downloads.add(resp_or_stream)
+    img_calls: list[ImageGenerationCall] = []
+    image_markdown = media_markdown = ""
+    for kind, item, data in await downloads.all():
+        if kind == "media":
+            files = cast(ProcessedMediaData, data)
+            if md := _media_markdown(item, files, downloads.kept_media, base_url):
                 media_markdown += f"\n\n{md}"
+        elif name := downloads.new_image(cast(ProcessedImageData, data)):
+            img_calls.append(_image_generation_call(cast(ProcessedImageData, data)))
+            image_markdown += f"\n\n![{img_calls[-1].id}]({_media_url(name, base_url)})"
 
-    if assistant_text:
-        contents.append(ResponseOutputText(type="output_text", text=assistant_text))
-
-    image_markdown = ""
-    for ic in img_calls:
-        img_url = f"{base_url}media/{ic.id}.{ic.output_format}?token={get_media_token(f'{ic.id}.{ic.output_format}')}"
-        image_markdown += f"\n\n![{ic.id}]({img_url})"
-
-    if image_markdown:
-        storage_output += image_markdown
-        contents.append(ResponseOutputText(type="output_text", text=image_markdown))
-
-    if media_markdown:
-        storage_output += media_markdown
-        contents.append(ResponseOutputText(type="output_text", text=media_markdown))
-
-    if not contents:
-        contents.append(ResponseOutputText(type="output_text", text=""))
+    # Text, image links and media links are three parts here, and one in a stream.
+    contents: list[ResponseOutputContent] = [
+        ResponseOutputText(type="output_text", text=text)
+        for text in (assistant_text, image_markdown, media_markdown)
+        if text
+    ] or [ResponseOutputText(type="output_text", text="")]
+    storage_output += image_markdown + media_markdown
 
     p_tok, c_tok, t_tok, r_tok = calculate_usage(messages, storage_output, tool_calls, thoughts)
     usage = ResponseUsage(

@@ -1,5 +1,6 @@
 """Shared fixtures: one configured account, and the real app in front of a scripted Gemini."""
 
+import asyncio
 import itertools
 import uuid
 from collections.abc import Iterator
@@ -77,6 +78,7 @@ class _Session:
         turn = self._begin(text, kwargs)
         for chunk in turn:
             yield chunk
+            await asyncio.sleep(0)  # as a network read would: lets background downloads start
         self.metadata = turn[-1].metadata
 
 
@@ -111,10 +113,13 @@ def api(tmp_path, monkeypatch) -> Iterator[SimpleNamespace]:
     """The real app with Gemini replaced by a script.
 
     `api.upstream.replies` queues what Gemini answers (a `reply(...)` or an exception to raise;
-    "ok" once the queue is empty), `api.upstream.sent` records what it was asked, and
+    "ok" once the queue is empty), `api.upstream.sent` records what it was asked,
+    `api.upstream.downloaded` the urls of the generated files that were fetched, and
     `api.post(path, json=...)` sends a request. Conversations go to a store under `tmp_path`.
     """
-    upstream = SimpleNamespace(replies=[], sent=[], gems={}, turn_numbers=itertools.count(1))
+    upstream = SimpleNamespace(
+        replies=[], sent=[], gems={}, downloaded=[], turn_numbers=itertools.count(1)
+    )
     client = _Client(upstream)
 
     class _Pool:
@@ -131,6 +136,7 @@ def api(tmp_path, monkeypatch) -> Iterator[SimpleNamespace]:
     def download(item: Image | GeneratedVideo, path: str, suffix: str) -> str:
         """Stands in for a download: a file's bytes are its url without the fragment, so two
         urls that differ only there are two copies of one file."""
+        upstream.downloaded.append(item.url)
         target = Path(path) / f"download-{uuid.uuid4().hex}{suffix}"
         target.write_bytes(item.url.partition("#")[0].encode())
         return str(target)

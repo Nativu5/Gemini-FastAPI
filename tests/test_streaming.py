@@ -20,6 +20,7 @@ from app.server.chat import (
     _create_real_streaming_response,
     _create_responses_real_streaming_response,
 )
+from app.server.gemini import _SentRequest, _stream_reply
 from app.services.lmdb import LMDBConversationStore
 
 MODEL = "gemini-3-pro"
@@ -432,3 +433,40 @@ def test_the_stream_filter_shows_the_same_text_however_the_reply_is_chunked(raw,
     assert filtered(raw) == shown
     assert {filtered(raw[:cut], raw[cut:]) for cut in range(1, len(raw))} == {shown}
     assert filtered(*raw) == shown
+
+
+def test_native_stream_failure_cancels_pending_media_tasks(monkeypatch):
+    started: list[asyncio.Task] = []
+
+    async def slow_download(_img):
+        started.append(cast(asyncio.Task, asyncio.current_task()))
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr("app.server.chat._process_image_item", slow_download)
+    first = _output("just prose")
+    first.candidates[0].web_images = [WebImage(url="http://127.0.0.1:1/x.png")]
+
+    async def stream_with_a_scheduling_gap():
+        yield first
+        await asyncio.sleep(0)
+
+    sent = _SentRequest(
+        output=stream_with_a_scheduling_gap(),
+        session=cast(Any, None),
+        client=cast(Any, None),
+        db=cast(Any, None),
+        model_name=MODEL,
+        resolved_model=MODEL,
+        messages=[AppMessage(role="user", content="hi")],
+        prepared=[AppMessage(role="user", content="hi")],
+        tool_choice="required",  # unmet by prose, so the stream ends with an error
+        structured_requirement=None,
+    )
+
+    async def drain():
+        frames = [frame async for frame in _stream_reply(sent, "http://testserver/")]
+        return frames, [task.cancelled() for task in started]
+
+    frames, cancelled = asyncio.run(drain())
+    assert '"error"' in frames[-1]
+    assert cancelled == [True]

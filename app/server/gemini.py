@@ -61,20 +61,20 @@ from app.models.gemini_models import (
 
 # The request pipeline is the one the OpenAI routes use; this module adds the Gemini wire format.
 from app.server.chat import (
+    ProcessedImageData,
+    ProcessedMediaData,
     StreamingOutputFilter,
     _build_structured_requirement,
-    _image_to_base64,
+    _Downloads,
     _media_markdown,
     _persist_conversation,
     _prepare_messages_for_model,
-    _process_media_item,
     _resolve_model_name,
     _send_request,
     _tool_choice_failure,
     available_models,
 )
 from app.server.middleware import (
-    get_media_store_dir,
     get_temp_dir,
     openai_error,
     verify_gemini_api_key,
@@ -545,34 +545,25 @@ async def _send_gemini_request(
     )
 
 
-async def _media_links(items: list[Any], base_url: str) -> str:
-    """Markdown links to the generated videos and audio of a reply, each led by a blank line."""
-    markdown = ""
-    seen_urls: set[str] = set()
-    seen_hashes: dict[str, str] = {}
-    for item in items:
-        url = getattr(item, "url", None) or getattr(item, "mp3_url", None)
-        if not url or url in seen_urls:
-            continue
-        seen_urls.add(url)
-        # ponytail: downloaded one after another and, when streaming, without a keep-alive;
-        # share the background downloads of the OpenAI streams if videos get large.
-        if (result := await _process_media_item(item)) and (
-            links := _media_markdown(item, result[2], seen_hashes, f"{base_url}/")
-        ):
-            markdown += f"\n\n{links}"
-    return markdown
+async def _generated_files(
+    downloads: _Downloads, base_url: str
+) -> tuple[list[GeminiInlineData], str]:
+    """The reply's generated images as inline data, and markdown links to its videos and audio.
 
-
-async def _inline_image(image: Any, seen_hashes: set[str]) -> GeminiInlineData | None:
-    """One generated image as inline data, or None for a copy of one this reply already has."""
-    image_store = get_media_store_dir()
-    b64_str, _w, _h, fname, file_hash = await _image_to_base64(image, image_store)
-    if file_hash in seen_hashes:
-        (image_store / fname).unlink(missing_ok=True)
-        return None
-    seen_hashes.add(file_hash)
-    return GeminiInlineData(mimeType=mimetypes.guess_type(fname)[0] or "image/png", data=b64_str)
+    Videos and audio are linked from the text, as on the OpenAI routes: the native format has no
+    part for them, and inlining a video would make the response enormous.
+    """
+    images: list[GeminiInlineData] = []
+    media_markdown = ""
+    for kind, item, data in await downloads.all():
+        if kind == "media":
+            files = cast(ProcessedMediaData, data)
+            if links := _media_markdown(item, files, downloads.kept_media, base_url):
+                media_markdown += f"\n\n{links}"
+        elif name := downloads.new_image(image := cast(ProcessedImageData, data)):
+            mime_type = mimetypes.guess_type(name)[0] or "image/png"
+            images.append(GeminiInlineData(mimeType=mime_type, data=image[0]))
+    return images, media_markdown
 
 
 def _stored_reply(text: str, images: list[GeminiInlineData]) -> str | list[AppContentItem]:
@@ -608,19 +599,9 @@ async def gemini_generate_content(
     if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
         return _error_response(502, choice_error)
 
-    images: list[GeminiInlineData] = []
-    seen_hashes: set[str] = set()
-    for image in resp.images or []:
-        try:
-            if inline := await _inline_image(image, seen_hashes):
-                images.append(inline)
-        except Exception as exc:
-            logger.warning(f"[Gemini API] Failed to process image: {exc}")
-
-    # Videos and audio are linked from the text, as on the OpenAI routes; the native format has
-    # no part for them, and inlining a video would make the response enormous.
-    base_url = str(raw_request.base_url).rstrip("/")
-    media_markdown = await _media_links((resp.videos or []) + (resp.media or []), base_url)
+    downloads = _Downloads()
+    downloads.add(resp)
+    images, media_markdown = await _generated_files(downloads, str(raw_request.base_url))
     visible_output += media_markdown
 
     usage = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
@@ -663,7 +644,7 @@ async def gemini_stream_generate_content(
     """Streaming content generation (Gemini API format, SSE)."""
     sent = await _send_gemini_request(model, request, tmp_dir, stream=True)
     return StreamingResponse(
-        _stream_reply(sent, str(raw_request.base_url).rstrip("/")),
+        _stream_reply(sent, str(raw_request.base_url)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -675,13 +656,22 @@ async def gemini_stream_generate_content(
 
 async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str]:
     """The SSE frames of a streamed reply; the conversation is stored once it is complete."""
+    downloads = _Downloads()
+    try:
+        async for frame in _reply_frames(sent, base_url, downloads):
+            yield frame
+    finally:
+        # Whatever ended the stream early - an error, or the client going away.
+        await downloads.cancel()
+
+
+async def _reply_frames(
+    sent: _SentRequest, base_url: str, downloads: _Downloads
+) -> AsyncGenerator[str]:
     generator = sent.output
     assert not isinstance(generator, ModelOutput)
     full_thoughts, full_text = "", ""
     last_chunk: ModelOutput | None = None
-    all_images: list[Any] = []
-    seen_image_urls: set[str] = set()
-    all_media: list[Any] = []
     suppressor = StreamingOutputFilter()
     # Structured output is withheld until it has been validated.
     forward_text = not sent.structured_requirement
@@ -689,11 +679,7 @@ async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str
     try:
         async for chunk in generator:
             last_chunk = chunk
-            for image in chunk.images or []:
-                if image.url not in seen_image_urls:
-                    all_images.append(image)
-                    seen_image_urls.add(image.url)
-            all_media += (chunk.videos or []) + (chunk.media or [])
+            downloads.add(chunk)
 
             if chunk.thoughts_delta:
                 full_thoughts += chunk.thoughts_delta
@@ -743,20 +729,15 @@ async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str
         if not forward_text and visible_output:
             yield _part_frame(GeminiPart(text=visible_output))
 
-        if media_markdown := await _media_links(all_media, base_url):
+        # ponytail: no keep-alive is sent while the downloads finish; the OpenAI streams send
+        # a comment line every 5 s, which Google's clients are not known to accept.
+        images, media_markdown = await _generated_files(downloads, base_url)
+        if media_markdown:
             yield _part_frame(GeminiPart(text=media_markdown))
             visible_output += media_markdown
             storage_output += media_markdown
-
-        images: list[GeminiInlineData] = []
-        seen_hashes: set[str] = set()
-        for image in all_images:
-            try:
-                if inline := await _inline_image(image, seen_hashes):
-                    yield _part_frame(GeminiPart(inlineData=inline))
-                    images.append(inline)
-            except Exception as exc:
-                logger.warning(f"[Gemini API] Failed to process streaming image: {exc}")
+        for image in images:
+            yield _part_frame(GeminiPart(inlineData=image))
 
         usage = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
         call_parts = _function_call_parts(tool_calls)
