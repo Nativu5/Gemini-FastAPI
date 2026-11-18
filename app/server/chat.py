@@ -1421,6 +1421,17 @@ def _image_generation_call(data: ProcessedImageData) -> ImageGenerationCall:
 # --- Response Builders & Streaming ---
 
 
+def _unsent_tail(final: str | None, sent: str) -> str:
+    """What the final chunk carries beyond the deltas added up so far.
+
+    The rest is sent on, so that what gets validated and stored is what the client received.
+    "" when there is nothing more, or when the final text does not continue what was sent.
+    """
+    if final and len(final) > len(sent) and final.startswith(sent):
+        return final[len(sent) :]
+    return ""
+
+
 def _sse_error(
     message: str, error_type: str, param: str | None = None, code: str | None = None
 ) -> str:
@@ -1504,29 +1515,15 @@ def _create_real_streaming_response(
                 return
 
             if last_output is not None:
-                final_chunk = last_output
-                if final_chunk.thoughts:
-                    f_thoughts = final_chunk.thoughts
-                    ft_len, ct_len = len(f_thoughts), len(full_thoughts)
-                    if ft_len > ct_len and f_thoughts.startswith(full_thoughts):
-                        drift_t = f_thoughts[ct_len:]
-                        full_thoughts = f_thoughts
+                if tail := _unsent_tail(last_output.thoughts, full_thoughts):
+                    full_thoughts += tail
+                    yield make_chunk({"delta": {"reasoning_content": tail}, "finish_reason": None})
+                if tail := _unsent_tail(last_output.text, full_text):
+                    full_text += tail
+                    if not structured_requirement and (visible_tail := suppressor.process(tail)):
                         yield make_chunk(
-                            {"delta": {"reasoning_content": drift_t}, "finish_reason": None}
+                            {"delta": {"content": visible_tail}, "finish_reason": None}
                         )
-
-                if final_chunk.text:
-                    f_text = final_chunk.text
-                    f_len, c_len = len(f_text), len(full_text)
-                    if f_len > c_len and f_text.startswith(full_text):
-                        drift = f_text[c_len:]
-                        full_text = f_text
-                        if not structured_requirement and (
-                            visible_drift := suppressor.process(drift)
-                        ):
-                            yield make_chunk(
-                                {"delta": {"content": visible_drift}, "finish_reason": None}
-                            )
 
             if not structured_requirement and (remaining_text := suppressor.flush()):
                 yield make_chunk({"delta": {"content": remaining_text}, "finish_reason": None})
@@ -1655,10 +1652,7 @@ def _create_responses_real_streaming_response(
                 "response.created",
                 {
                     "response": {
-                        "id": response_id,
-                        "object": "response",
-                        "created_at": created_time,
-                        "model": model_name,
+                        **base_event,
                         "status": "in_progress",
                         "metadata": request.metadata or {},
                         "input": None,
@@ -1673,10 +1667,7 @@ def _create_responses_real_streaming_response(
                 "response.in_progress",
                 {
                     "response": {
-                        "id": response_id,
-                        "object": "response",
-                        "created_at": created_time,
-                        "model": model_name,
+                        **base_event,
                         "status": "in_progress",
                         "metadata": request.metadata or {},
                         "output": [],
@@ -1866,29 +1857,17 @@ def _create_responses_real_streaming_response(
                 return
 
             if last_output is not None:
-                last = last_output
-                if last.thoughts:
-                    l_thoughts = last.thoughts
-                    lt_len, ct_len = len(l_thoughts), len(full_thoughts)
-                    if lt_len > ct_len and l_thoughts.startswith(full_thoughts):
-                        drift_t = l_thoughts[ct_len:]
-                        full_thoughts = l_thoughts
-                        for event in open_thought():
+                if tail := _unsent_tail(last_output.thoughts, full_thoughts):
+                    full_thoughts += tail
+                    for event in open_thought():
+                        yield event
+                    yield thought_delta(tail)
+                if tail := _unsent_tail(last_output.text, full_text):
+                    full_text += tail
+                    if not structured_requirement and (visible := suppressor.process(tail)):
+                        for event in open_message():
                             yield event
-
-                        yield thought_delta(drift_t)
-
-                if last.text:
-                    l_text = last.text
-                    l_len, c_len = len(l_text), len(full_text)
-                    if l_len > c_len and l_text.startswith(full_text):
-                        drift = l_text[c_len:]
-                        full_text = l_text
-                        if not structured_requirement and (visible := suppressor.process(drift)):
-                            for event in open_message():
-                                yield event
-
-                            yield text_delta(visible)
+                        yield text_delta(visible)
 
             if not structured_requirement and (remaining := suppressor.flush()):
                 # Text that arrived only with the final chunk can still be held back here.
@@ -1972,12 +1951,8 @@ def _create_responses_real_streaming_response(
                 )
                 return
             if message_open:
-                if assistant_text:
-                    final_response_contents = [
-                        ResponseOutputText(type="output_text", text=assistant_text)
-                    ]
-                else:
-                    final_response_contents = [ResponseOutputText(type="output_text", text="")]
+                text_part = ResponseOutputText(type="output_text", text=assistant_text)
+                final_response_contents = [text_part]
 
                 yield make_event(
                     "response.output_text.done",
@@ -1993,9 +1968,7 @@ def _create_responses_real_streaming_response(
                         "item_id": message_item_id,
                         "output_index": message_index,
                         "content_index": 0,
-                        "part": dump_model(
-                            ResponseOutputText(type="output_text", text=assistant_text)
-                        ),
+                        "part": dump_model(text_part),
                     },
                 )
 

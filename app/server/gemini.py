@@ -72,6 +72,7 @@ from app.server.chat import (
     _resolve_model_name,
     _send_request,
     _tool_choice_failure,
+    _unsent_tail,
     available_models,
 )
 from app.server.middleware import (
@@ -693,15 +694,12 @@ async def _reply_frames(
         yield _sse(_gemini_error(500, "Streaming error occurred."))
         return
 
-    # The final chunk can carry more than its deltas added up to. The rest is sent on, so that
-    # what gets validated and stored is what the client received.
     if last_chunk is not None:
-        final_thoughts, final_text = last_chunk.thoughts or "", last_chunk.text or ""
-        if len(final_thoughts) > len(full_thoughts) and final_thoughts.startswith(full_thoughts):
-            yield _part_frame(GeminiPart(text=final_thoughts[len(full_thoughts) :], thought=True))
-            full_thoughts = final_thoughts
-        if len(final_text) > len(full_text) and final_text.startswith(full_text):
-            tail, full_text = final_text[len(full_text) :], final_text
+        if tail := _unsent_tail(last_chunk.thoughts, full_thoughts):
+            full_thoughts += tail
+            yield _part_frame(GeminiPart(text=tail, thought=True))
+        if tail := _unsent_tail(last_chunk.text, full_text):
+            full_text += tail
             if forward_text and (visible := suppressor.process(tail)):
                 yield _part_frame(GeminiPart(text=visible))
     if forward_text and (held_back := suppressor.flush()):
