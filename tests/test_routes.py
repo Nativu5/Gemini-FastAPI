@@ -302,3 +302,66 @@ def test_gemini_native_continues_the_chat_after_a_generated_image(api, stream):
 
     assert _continued(api)
     assert api.upstream.sent[-1].files == []
+
+
+CHAT = {"model": MODEL, "messages": [{"role": "user", "content": "First question"}]}
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/chat/completions", CHAT),
+        ("/v1/responses", {"model": MODEL, "input": "First question"}),
+    ],
+)
+def test_openai_routes_report_an_error_in_the_envelope_openai_clients_read(api, path, body):
+    api.upstream.replies.append(RuntimeError("upstream refused"))
+    failed = api.post(path, json=body)
+    assert failed.status_code == 502
+    assert failed.json() == {
+        "error": {
+            "message": "upstream refused",
+            "type": "server_error",
+            "param": None,
+            "code": None,
+        }
+    }
+
+    invalid = api.post(path, json={"model": MODEL})
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["type"] == "invalid_request_error"
+    assert ("messages" if "chat" in path else "input") in invalid.json()["error"]["message"]
+
+
+def test_the_native_route_reports_an_error_in_googles_envelope(api):
+    api.upstream.replies.append(RuntimeError("upstream refused"))
+    failed = api.post(f"/v1beta/models/{MODEL}:generateContent", json={"contents": USER_TURN})
+    assert failed.json() == {
+        "error": {"code": 502, "message": "upstream refused", "status": "INTERNAL", "details": []}
+    }
+
+
+def test_a_chat_completion_message_carries_what_openai_sends_and_nothing_else(api):
+    api.upstream.replies += [reply("Hello."), reply(TOOL_CALL)]
+    tools = [
+        {"type": "function", "function": {k: v for k, v in WEATHER_TOOL.items() if k != "type"}}
+    ]
+
+    text = api.post("/v1/chat/completions", json=CHAT).json()
+    call = api.post("/v1/chat/completions", json={**CHAT, "tools": tools}).json()
+
+    assert text["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": "Hello.",
+        "refusal": None,
+        "annotations": [],
+    }
+    message = call["choices"][0]["message"]
+    assert message["content"] is None  # present and null, as clients index it without checking
+    assert [c["function"]["name"] for c in message["tool_calls"]] == ["get_weather"]
+    assert sorted(text["usage"]) == [
+        "completion_tokens",
+        "completion_tokens_details",
+        "prompt_tokens",
+        "total_tokens",
+    ]

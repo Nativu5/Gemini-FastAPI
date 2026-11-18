@@ -4,7 +4,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, StrictBool, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    model_serializer,
+    model_validator,
+)
 
 
 @dataclass
@@ -136,15 +143,35 @@ class CompletionUsage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
-    prompt_tokens_details: dict[str, int] | None = Field(default=None)
     completion_tokens_details: dict[str, int] | None = Field(default=None)
+
+
+class ChatCompletionResponseMessage(BaseModel):
+    """The assistant message of a Chat Completions response."""
+
+    role: Literal["assistant"] = "assistant"
+    content: str | None
+    refusal: str | None = None
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
+    tool_calls: list[ChatCompletionMessageToolCall] | None = None
+    reasoning_content: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_optionals(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """`content` and `refusal` are null when absent, as OpenAI sends them and as clients
+        index them; `tool_calls` and `reasoning_content` are left out instead."""
+        return {
+            key: value
+            for key, value in handler(self).items()
+            if value is not None or key in ("content", "refusal")
+        }
 
 
 class ChatCompletionChoice(BaseModel):
     """A single completion choice."""
 
     index: int
-    message: ChatCompletionMessage
+    message: ChatCompletionResponseMessage
     finish_reason: Literal["stop", "length", "tool_calls", "content_filter"]
     logprobs: dict[str, Any] | None = Field(default=None)
 

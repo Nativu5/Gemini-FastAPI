@@ -101,7 +101,7 @@ class RequestBodyLimitMiddleware:
                 }
             }
         else:
-            content = {"error": {"message": detail}}
+            content = _openai_error_body(status.HTTP_413_CONTENT_TOO_LARGE, detail)
         response = JSONResponse(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             content=content,
@@ -163,17 +163,24 @@ def cleanup_expired_media(retention_days: int = 14, ttl_seconds: int | None = No
     return count
 
 
-def global_exception_handler(request: Request, exc: Exception):
-    if isinstance(exc, HTTPException):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"error": {"message": exc.detail}},
-        )
+_OPENAI_ERROR_TYPES = {
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    429: "rate_limit_error",
+}
 
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"error": {"message": str(exc)}},
+
+def _openai_error_body(status_code: int, message: str) -> dict[str, Any]:
+    error_type = _OPENAI_ERROR_TYPES.get(
+        status_code, "invalid_request_error" if status_code < 500 else "server_error"
     )
+    return {"error": {"message": message, "type": error_type, "param": None, "code": None}}
+
+
+def openai_error(status_code: int, message: str) -> JSONResponse:
+    """An HTTP error in the envelope the OpenAI clients read."""
+    return JSONResponse(status_code=status_code, content=_openai_error_body(status_code, message))
 
 
 def get_temp_dir():
@@ -226,10 +233,6 @@ def verify_api_key(
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Wrong API key")
 
     return api_key
-
-
-def add_exception_handler(app: FastAPI):
-    app.add_exception_handler(Exception, global_exception_handler)
 
 
 def add_request_size_limit_middleware(app: FastAPI) -> None:

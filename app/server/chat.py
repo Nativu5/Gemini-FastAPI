@@ -25,11 +25,11 @@ from app.models import (
     AppToolCall,
     AppToolCallFunction,
     ChatCompletionChoice,
-    ChatCompletionMessage,
     ChatCompletionMessageToolCall,
     ChatCompletionNamedToolChoice,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionResponseMessage,
     CompletionUsage,
     ConversationInStore,
     FunctionCall,
@@ -313,8 +313,7 @@ def _create_chat_completion_standard_payload(
             for tc in tool_calls
         ]
 
-    message = ChatCompletionMessage(
-        role="assistant",
+    message = ChatCompletionResponseMessage(
         content=visible_output or None,
         tool_calls=tc_converted,
         reasoning_content=reasoning_content or None,
@@ -2405,7 +2404,7 @@ async def list_models(api_key: str = Depends(verify_api_key)):
     return ModelListResponse(data=models)
 
 
-@router.post("/v1/chat/completions", response_model_exclude_none=True)
+@router.post("/v1/chat/completions")
 async def create_chat_completion(
     request: ChatCompletionRequest,
     raw_request: Request,
@@ -2581,7 +2580,7 @@ async def create_chat_completion(
     return payload
 
 
-@router.post("/v1/responses", response_model_exclude_none=True)
+@router.post("/v1/responses")
 async def create_response(
     request: ResponseCreateRequest,
     raw_request: Request,
