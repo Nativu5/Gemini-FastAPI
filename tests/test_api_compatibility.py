@@ -225,6 +225,39 @@ def test_unusable_schemas_leave_the_reply_unverified_rather_than_failing_it(sche
     assert visible == '{"a":1}'
 
 
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "http://169.254.169.254/latest/meta-data"},
+        {"type": "object", "properties": {"a": {"$ref": "http://internal.invalid/schema.json"}}},
+        {"$schema": "http://internal.invalid/meta.json", "$ref": "http://internal.invalid/s.json"},
+    ],
+)
+@pytest.mark.filterwarnings("ignore:The metaschema specified by:DeprecationWarning")
+def test_a_client_schema_never_makes_the_server_fetch_a_url(schema, monkeypatch):
+    """The schema is client input, so resolving a remote reference in it would be SSRF."""
+    fetched: list[str] = []
+
+    def record_fetch(request, *args, **kwargs):
+        fetched.append(getattr(request, "full_url", str(request)))
+        raise OSError("network access is not expected here")
+
+    monkeypatch.setattr("urllib.request.urlopen", record_fetch)
+
+    assert canonicalize_structured_output('{"a": 1}', _requirement(schema)) == '{"a":1}'
+    assert fetched == []
+
+
+def test_local_references_are_still_resolved_and_enforced():
+    schema = {
+        "$defs": {"count": {"type": "integer"}},
+        "type": "object",
+        "properties": {"a": {"$ref": "#/$defs/count"}},
+    }
+    assert canonicalize_structured_output('{"a": 1}', _requirement(schema)) == '{"a":1}'
+    assert canonicalize_structured_output('{"a": "x"}', _requirement(schema)) is None
+
+
 def test_json_mode_requires_only_that_the_payload_parses():
     requirement = _requirement({}, strict=False)
     assert canonicalize_structured_output('{"anything": [1]}', requirement) == '{"anything":[1]}'
