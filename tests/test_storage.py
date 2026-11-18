@@ -1,7 +1,8 @@
 """Conversation-store behaviour: lookup, retention, and index versioning.
 
-Every test opens its own store under `tmp_path` via `open_isolated`, so nothing touches the
-singleton or the configured data directory.
+The store tests open their own store under `tmp_path` via `open_isolated`. The last two cover
+what the same cleanup pass does outside the store: expired media files, and the pool's answer for
+a chat whose client is no longer configured.
 """
 
 from datetime import datetime, timedelta
@@ -9,13 +10,12 @@ from datetime import datetime, timedelta
 import lmdb
 import orjson
 import pytest
+from conftest import CLIENT_ID
 
 from app.models.core import AppContentItem, AppMessage
 from app.services.lmdb import LMDBConversationStore
 from app.utils.config import ChatMode
 
-# `find` only searches the configured clients, so a stored conversation has to claim one.
-CLIENT_ID = "client-id-1"
 MODEL = "gemini-3-pro"
 
 
@@ -170,17 +170,6 @@ def test_retention_removes_a_conversation_last_touched_before_the_cutoff(store):
     assert _raw_keys(store) == []
 
 
-def test_lookup_entries_are_written_under_the_current_index_version(store):
-    store.store(CLIENT_ID, MODEL, _exchange(), metadata=["c", "r", "rc"])
-
-    index_keys = [key for key in _raw_keys(store) if store._is_index_key(key)]
-    assert index_keys
-    assert all(
-        key.startswith((store.HASH_LOOKUP_PREFIX, store.FUZZY_LOOKUP_PREFIX)) for key in index_keys
-    )
-    assert LMDBConversationStore.INDEX_VERSION in store.HASH_LOOKUP_PREFIX
-
-
 def test_indexes_from_a_superseded_version_are_pruned(tmp_path):
     """A hash-shape change strands old entries that eviction can no longer find by hash."""
     db_path = tmp_path / "lmdb"
@@ -209,32 +198,6 @@ def test_pruning_leaves_current_version_entries_alone(store):
 
     assert store.prune_stale_indexes() == 0
     assert store.find(MODEL, messages) is not None
-
-
-def test_auto_delete_conversation_is_collected_for_remote_deletion(store):
-    messages = _exchange()
-    store.store(
-        CLIENT_ID,
-        MODEL,
-        messages,
-        metadata=["c_test123", "r", "rc"],
-        chat_mode=ChatMode.AUTO_DELETE,
-    )
-
-    conv = store.find(MODEL, messages)
-    assert conv is not None
-    assert conv.chat_mode == ChatMode.AUTO_DELETE
-
-    key = store.keys()[0]
-    conv.created_at = datetime.now() - timedelta(hours=25)
-    conv.updated_at = datetime.now() - timedelta(hours=25)
-    with store._get_transaction(write=True) as txn:
-        txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
-
-    removed, remote_deletions = store.cleanup_expired(auto_delete_ttl=86400)
-    assert removed == 1
-    assert remote_deletions == [(CLIENT_ID, "c_test123")]
-    assert store.find(MODEL, messages) is None
 
 
 def test_normal_conversation_is_not_collected_for_remote_deletion(store):
@@ -323,9 +286,10 @@ def test_pending_deletions_persisted_and_acknowledged(store):
     with store._get_transaction(write=True) as txn:
         txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
 
-    # First cleanup stages it in pending deletions
+    # First cleanup removes it locally and stages its remote deletion
     removed, remote_deletions = store.cleanup_expired(auto_delete_ttl=86400)
     assert removed == 1
+    assert store.find(MODEL, messages) is None
     assert remote_deletions == [(CLIENT_ID, cid)]
     assert store.get_pending_deletions() == [(CLIENT_ID, cid)]
 
@@ -410,35 +374,6 @@ def test_ephemeral_guest_conversation_is_not_staged_for_remote_deletion(store):
     assert store.find(MODEL, messages) is None
 
 
-def test_ephemeral_temporary_conversation_is_not_staged_for_remote_deletion(store):
-    messages = _exchange()
-    cid = "c_temp_123"
-    store.store(
-        CLIENT_ID,
-        MODEL,
-        messages,
-        metadata=[cid, "r", "rc"],
-        chat_scope="temporary:session_xyz",
-        chat_mode=ChatMode.AUTO_DELETE,
-    )
-
-    key = store.keys()[0]
-    conv = store.find(MODEL, messages)
-    assert conv is not None
-    assert conv.chat_mode == ChatMode.AUTO_DELETE
-    assert conv.chat_scope == "temporary:session_xyz"
-
-    conv.updated_at = datetime.now() - timedelta(hours=25)
-    with store._get_transaction(write=True) as txn:
-        txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
-
-    removed, remote_deletions = store.cleanup_expired(auto_delete_ttl=86400)
-    assert removed == 1
-    assert remote_deletions == []
-    assert store.get_pending_deletions() == []
-    assert store.find(MODEL, messages) is None
-
-
 def test_pending_deletion_failure_retries_and_eviction(store):
     cid = "c_retry_fail"
     with store._get_transaction(write=True) as txn:
@@ -462,7 +397,7 @@ def test_pending_deletion_failure_retries_and_eviction(store):
     assert store.get_pending_deletions() == []
 
 
-def test_has_auto_delete_records(store):
+def test_only_an_auto_delete_conversation_makes_the_store_report_auto_delete_work(store):
     assert store.has_auto_delete_records() is False
 
     messages = _exchange()

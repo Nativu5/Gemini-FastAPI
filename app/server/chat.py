@@ -419,7 +419,9 @@ def _build_structured_requirement(
         raise ValueError("json_schema must contain a schema object")
 
     schema_name = json_schema.get("name") or "response"
-    requested_strict = json_schema.get("strict", False)
+    requested_strict = json_schema.get("strict")
+    if requested_strict is None:  # absent or null: OpenAI's default
+        requested_strict = False
     if not isinstance(requested_strict, bool):
         raise ValueError("json_schema.strict must be a boolean")
 

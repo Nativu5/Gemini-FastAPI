@@ -1,4 +1,4 @@
-"""Chat Completions SSE assembly.
+"""Chat Completions and Responses SSE assembly.
 
 Drives the streaming generator directly over a fake upstream so the wire contract can be
 asserted without a network: what the client sees, in what order, and how the stream ends.
@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import orjson
 import pytest
+from conftest import CLIENT_ID
 from gemini_webapi.types import Candidate, ModelOutput, WebImage
 
 from app.models.core import AppMessage
@@ -21,7 +22,6 @@ from app.server.chat import (
 )
 from app.services.lmdb import LMDBConversationStore
 
-CLIENT_ID = "client-id-1"
 MODEL = "gemini-3-pro"
 TOOL_CALL_OUTPUT = (
     "[ToolCalls][Call:get_weather][CallParameter:city]Hanoi[/CallParameter][/Call][/ToolCalls]"
@@ -150,33 +150,19 @@ def test_a_tool_call_is_reported_and_finishes_as_tool_calls(db):
     assert "[ToolCalls]" not in "".join(frames)
 
 
-def test_structured_output_is_withheld_until_it_has_been_validated(db):
-    """Deltas are suppressed so a schema violation cannot arrive half-rendered."""
-    frames = _collect(
-        db,
-        _stream(_output('```json\n{"a": "x"}\n```')),
-        structured_requirement=_requirement(),
-    )
-    contents = [
-        payload["choices"][0]["delta"].get("content", "")
-        for payload in _payloads(frames)
-        if payload.get("choices")
-    ]
-    assert "".join(contents) == '{"a":"x"}'
-    assert frames[-1] == "data: [DONE]\n\n"
-
-
 def test_a_strict_schema_violation_ends_the_stream_with_an_error_and_a_terminator(db):
     frames = _collect(
         db,
-        _stream(_output('{"wrong": true}')),
+        _stream(_output('{"wrong": '), _output('{"wrong": true}', delta="true}")),
         structured_requirement=_requirement(),
     )
 
     assert frames[-1].endswith("data: [DONE]\n\n")
-    error = _payloads(frames)[-1]["error"]
-    assert error["type"] == "invalid_model_output"
-    assert error["code"] == "schema_validation_failed"
+    *before, last = _payloads(frames)
+    assert last["error"]["type"] == "invalid_model_output"
+    assert last["error"]["code"] == "schema_validation_failed"
+    # Structured output is withheld until validated, so none of the bad reply was sent first.
+    assert [p["choices"][0]["delta"].get("content") for p in before if p["choices"]] == [""]
 
 
 def test_an_unmet_forced_tool_choice_ends_the_stream_with_an_error(db):
