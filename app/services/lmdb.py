@@ -83,6 +83,11 @@ def _hash_message(message: AppMessage, fuzzy: bool = False) -> str:
     }
 
     content = message.content
+    if isinstance(content, list) and all(item.type == "text" for item in content):
+        # Text parts reach Gemini joined by newlines, the same prompt one string would give, so
+        # they hash like that string. A client that replays an assistant turn as parts, as the
+        # Responses API has it do, then still matches the turn stored as text.
+        content = "\n".join(item.text or "" for item in content)
     if content is None:
         core_data["content"] = None
     elif isinstance(content, str):
@@ -161,7 +166,7 @@ class LMDBConversationStore(metaclass=Singleton):
     # written under an older version stay unreachable after the sweep: a repeat of the same
     # conversation is replayed in full and stored again under a current key, and the superseded
     # record is left to expire on the normal retention schedule.
-    INDEX_VERSION = "v2"
+    INDEX_VERSION = "v3"
     HASH_LOOKUP_PREFIX = f"hash:{INDEX_VERSION}:"
     FUZZY_LOOKUP_PREFIX = f"fuzzy:{INDEX_VERSION}:"
     PENDING_DELETE_PREFIX = "pending_del:"

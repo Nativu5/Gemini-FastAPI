@@ -803,12 +803,8 @@ def _convert_responses_to_app_messages(
                 )
             )
         elif isinstance(item, ImageGenerationCall):
-            messages.append(
-                AppMessage(
-                    role="assistant",
-                    content=item.result or None,
-                )
-            )
+            # The reply text already links the image; its base64 is no use to the model as text.
+            continue
 
         else:
             if hasattr(item, "role"):
