@@ -419,9 +419,6 @@ def test_chat_completion_persists_canonical_history_and_isolates_changed_system_
             def is_guest(self) -> bool:
                 return False
 
-            def can_upload(self) -> bool:
-                return True
-
             def usable_model(self, model: Any) -> Any:
                 return model
 

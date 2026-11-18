@@ -31,7 +31,7 @@ OBJECT_SCHEMA = {"type": "object", "properties": {"a": {"type": "string"}}, "req
 
 def _requirement() -> StructuredOutputRequirement:
     return StructuredOutputRequirement(
-        schema_name="r", schema=OBJECT_SCHEMA, instruction="", raw_format={}, strict=True
+        schema_name="r", schema=OBJECT_SCHEMA, instruction="", strict=True
     )
 
 

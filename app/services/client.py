@@ -206,10 +206,6 @@ class GeminiClientWrapper(GeminiClient):
         """
         return self.account_status == AccountStatus.UNAUTHENTICATED
 
-    def can_upload(self) -> bool:
-        """Whether files may be attached; Google rejects uploads from a guest session."""
-        return not self.is_guest()
-
     def usable_model(self, model: ModelSpec) -> ModelSpec:
         """The requested model, or the only one a guest session may use.
 

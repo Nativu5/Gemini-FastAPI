@@ -67,7 +67,6 @@ class AppMessage(BaseModel):
     content: str | list[AppContentItem] | None = None
     tool_calls: list[AppToolCall] | None = None
     tool_call_id: str | None = None
-    reasoning_content: str | None = None
 
 
 class ConversationInStore(BaseModel):
