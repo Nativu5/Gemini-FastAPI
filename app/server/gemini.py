@@ -522,7 +522,6 @@ async def _send_gemini_request(
         tools=tools,
         tool_choice=tool_choice,
         instructions=instructions,
-        repeat_instructions=True,
         tmp_dir=tmp_dir,
         stream=stream,
     )

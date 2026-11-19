@@ -1083,7 +1083,6 @@ async def _send_request(
     | ToolChoiceTypes
     | None,
     instructions: list[str] | None,
-    repeat_instructions: bool,
     tmp_dir: Path,
     stream: bool,
 ) -> tuple[AsyncGenerator[ModelOutput] | ModelOutput, ChatSession, GeminiClientWrapper]:
@@ -1109,9 +1108,7 @@ async def _send_request(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
         if gem_id := await _resolve_system_prompt_gem(client, system_prompt):
             session.gem = gem_id
-        to_send = _prepare_messages_for_model(
-            remain, tools, tool_choice, instructions if repeat_instructions else None, False
-        )
+        to_send = _prepare_messages_for_model(remain, tools, tool_choice, instructions, False)
         m_input, files = await GeminiClientWrapper.process_conversation(to_send, tmp_dir)
         logger.debug(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(to_send)} prepared messages."
@@ -2087,7 +2084,6 @@ async def create_chat_completion(
         tools=request.tools,
         tool_choice=request.tool_choice,
         instructions=extra_instr,
-        repeat_instructions=True,
         tmp_dir=tmp_dir,
         stream=bool(request.stream),
     )
@@ -2242,8 +2238,6 @@ async def create_response(
         tools=standard_tools or None,
         tool_choice=model_tool_choice,
         instructions=extra_instr or None,
-        # Unlike Chat Completions, a continued chat is not sent the instructions again.
-        repeat_instructions=False,
         tmp_dir=tmp_dir,
         stream=bool(request.stream),
     )
