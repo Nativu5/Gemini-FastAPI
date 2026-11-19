@@ -124,7 +124,7 @@ services:
 | `GET /health` | Readiness: storage and per-account status. |
 | `GET /media/{filename}` | Generated images and media. Responses link here with a signed token. |
 
-If `server.api_key` is set, send it as `Authorization: Bearer <key>`. The `/v1beta` endpoints also accept the `x-goog-api-key` header and the `key` query parameter. With no key set, the API and the media links are open to anyone who can reach the server.
+If `server.api_key` is set, send it as `Authorization: Bearer <key>`. The Gemini-native endpoints also accept the `x-goog-api-key` header and the `key` query parameter. A request to `/v1/models…` that sends its key either of those two ways is served by them as if it were `/v1beta/models…`, because that is where Google's SDKs send requests unless told otherwise. With no key set, the API and the media links are open to anyone who can reach the server.
 
 ### Compatibility
 
@@ -132,8 +132,8 @@ Gemini Web offers fewer controls than the APIs this server imitates. A valid req
 
 - **Ignored options.** `temperature`, `top_p`, output-token limits, `parallel_tool_calls`, Gemini `generationConfig` fields and safety settings are accepted and have no effect.
 - **Rejected input.** Malformed requests, and anything the server cannot resolve at all: a Files API `file_id`, a `cachedContent` handle, or earlier turns referenced by `previous_response_id` or `conversation` on `/v1/responses`. Send those turns in `input` instead.
-- **Errors use the envelope of the API that was called**: `{"error": {"message", "type", "param", "code"}}` on the OpenAI endpoints, `{"error": {"code", "message", "status"}}` on `/v1beta`. A malformed request is a `400` on both.
-- **Generated videos and audio are returned as links** in the reply text on every endpoint. Images are links too on the OpenAI endpoints, where `/v1/responses` adds an `image_generation_call` item for each; `/v1beta` returns them as `inlineData` parts instead.
+- **Errors use the envelope of the API that was called**: `{"error": {"message", "type", "param", "code"}}` on the OpenAI endpoints, `{"error": {"code", "message", "status"}}` on the Gemini-native endpoints. A malformed request is a `400` on both.
+- **Generated videos and audio are returned as links** in the reply text on every endpoint. Images are links too on the OpenAI endpoints, where `/v1/responses` adds an `image_generation_call` item for each; the Gemini-native endpoints return them as `inlineData` parts instead.
 - **Structured output is requested in the prompt** and checked by the server afterwards, because Gemini Web has no constrained decoding.
   - With `strict: true`, a reply that does not match the schema is an error: `502`, or an error event when streaming.
   - With `strict: false` (the default on both OpenAI surfaces) or JSON mode, the reply is returned as it is.
@@ -141,9 +141,7 @@ Gemini Web offers fewer controls than the APIs this server imitates. A valid req
   - A turn that returns a tool call is not checked.
 - **Schemas the server cannot evaluate are still sent to the model, but not enforced**, and do not fail the request. The one exception is a `responseJsonSchema` that is not valid JSON Schema, which is a `400`. That covers invalid JSON Schema, a `responseSchema` that does not translate to JSON Schema, a `$ref` that does not resolve (remote references are never fetched), and regex keywords that exceed `server.schema_validation_budget_seconds`.
 - **Streaming with a schema** delivers the answer as one chunk, since JSON can only be validated once it is complete.
-- **Google's SDKs are supported in part on `/v1beta`.** Text chats work, streamed or not. Known limits:
-  - Set the API version to `v1beta`. The SDKs request `/v1` by default and get a `404`.
-  - Field names must be camelCase. The Python SDK writes some nested fields in snake_case, so its requests that carry an image or a file are rejected with a `400`. In a chat that includes every turn after a reply with a generated image, because the SDK sends the image back. The JavaScript SDK is not affected.
+- **Google's SDKs work with their default settings** for chats with text and images, streamed or not, and for `responseSchema`. Field names are accepted in camelCase or snake_case, as Google accepts them. Known limit: a function declared with `parametersJsonSchema`, which is what the Python SDK sends for a tool given as a Python function, reaches the model without its parameters.
 
 ## Configuration
 
@@ -230,7 +228,7 @@ Off by default; set `gemini.gems.policy` to turn it on. The system prompt at the
 - There is one gem per distinct prompt, so use this for stable prompts. A prompt that changes with every request, for example one that contains the time, creates a new gem each time.
 - Creation is limited by `create_rate_limit_per_minute` (default `4`) and `managed_gems_max_total` (default `200`). Past a limit, or whenever a gem cannot be used, the prompt is sent inline.
 - Gems stay in the account until you delete them. With `cleanup.enabled: true`, under either policy, gems unused for `cleanup.unused_days` (default `7`) are deleted by a cleanup that runs at startup and every 6 hours after that, and each gem's description is updated to record when it was last used.
-- Guest sessions and `/v1beta` requests always send the prompt inline.
+- Guest sessions and Gemini-native requests always send the prompt inline.
 
 ### Input size
 

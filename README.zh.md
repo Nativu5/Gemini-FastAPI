@@ -124,7 +124,7 @@ services:
 | `GET /health` | 就绪检查：存储状态和每个账号的状态。 |
 | `GET /media/{filename}` | 生成的图片和媒体文件。响应中的链接带有签名令牌。 |
 
-设置了 `server.api_key` 时，请通过 `Authorization: Bearer <key>` 传入。`/v1beta` 接口还接受 `x-goog-api-key` 请求头和 `key` 查询参数。未设置 Key 时，任何能访问到服务的人都可以调用 API 和打开媒体链接。
+设置了 `server.api_key` 时，请通过 `Authorization: Bearer <key>` 传入。Gemini 原生接口还接受 `x-goog-api-key` 请求头和 `key` 查询参数。发往 `/v1/models…` 的请求如果用这两种方式之一传 Key，会按 `/v1beta/models…` 由原生接口处理，因为 Google 的 SDK 在没有另行设置时就把请求发到这里。未设置 Key 时，任何能访问到服务的人都可以调用 API 和打开媒体链接。
 
 ### 兼容性
 
@@ -132,8 +132,8 @@ Gemini 网页端提供的控制项比本服务所模拟的 API 少。合法的�
 
 - **会被忽略的选项。** `temperature`、`top_p`、输出 token 上限、`parallel_tool_calls`、Gemini 的 `generationConfig` 字段和安全设置都会被接受，但不产生任何效果。
 - **会被拒绝的输入。** 格式错误的请求，以及服务完全无法解析的内容：Files API 的 `file_id`、`cachedContent` 句柄，以及 `/v1/responses` 上用 `previous_response_id` 或 `conversation` 引用的前几轮对话。请把这几轮放在 `input` 中发送。
-- **错误使用被调用 API 自己的格式**：OpenAI 接口为 `{"error": {"message", "type", "param", "code"}}`，`/v1beta` 为 `{"error": {"code", "message", "status"}}`。格式错误的请求在两者上都返回 `400`。
-- **生成的视频和音频以链接形式返回**，在所有接口上都放在回复文本中。图片在 OpenAI 接口上同样是链接，其中 `/v1/responses` 还会为每张图片附带一个 `image_generation_call` 项；`/v1beta` 则以 `inlineData` 分段返回图片。
+- **错误使用被调用 API 自己的格式**：OpenAI 接口为 `{"error": {"message", "type", "param", "code"}}`，Gemini 原生接口为 `{"error": {"code", "message", "status"}}`。格式错误的请求在两者上都返回 `400`。
+- **生成的视频和音频以链接形式返回**，在所有接口上都放在回复文本中。图片在 OpenAI 接口上同样是链接，其中 `/v1/responses` 还会为每张图片附带一个 `image_generation_call` 项；Gemini 原生接口则以 `inlineData` 分段返回图片。
 - **结构化输出是在提示词中提出要求**，再由服务在事后校验，因为 Gemini 网页端没有约束解码。
   - `strict: true` 时，回复不符合 Schema 即为错误：返回 `502`，流式响应中则是一个错误事件。
   - `strict: false`（两套 OpenAI 接口的默认值）或 JSON 模式下，回复按原样返回。
@@ -141,9 +141,7 @@ Gemini 网页端提供的控制项比本服务所模拟的 API 少。合法的�
   - 返回工具调用的那一轮不做校验。
 - **服务无法求值的 Schema 仍会发给模型，但不会被强制执行**，也不会导致请求失败。唯一的例外是不合法的 `responseJsonSchema`，会返回 `400`。包括非法的 JSON Schema、无法翻译成 JSON Schema 的 `responseSchema`、无法解析的 `$ref`（远程引用一律不会去抓取），以及正则关键字超出 `server.schema_validation_budget_seconds` 的情况。
 - **带 Schema 的流式响应**会在校验后作为单个分块返回，因为 JSON 只有完整后才能校验。
-- **`/v1beta` 对 Google 的 SDK 是部分支持。** 纯文字的对话可以正常使用，流式和非流式都可以。已知的限制：
-  - 需要把 API 版本设为 `v1beta`。SDK 默认请求 `/v1`，会得到 `404`。
-  - 字段名必须是驼峰形式。Python SDK 会把部分嵌套字段写成下划线形式，因此它发出的带图片或文件的请求会被拒绝并返回 `400`。在聊天中，这包括回复里出现生成图片之后的每一轮，因为 SDK 会把图片带回。JavaScript SDK 不受影响。
+- **Google 的 SDK 使用默认设置即可**，文字和图片的对话（流式和非流式）以及 `responseSchema` 都可以正常使用。字段名接受驼峰和下划线两种形式，与 Google 一致。已知的限制：用 `parametersJsonSchema` 声明的函数到达模型时没有参数，Python SDK 把 Python 函数作为工具传入时发送的就是这个字段。
 
 ## 配置说明
 
@@ -230,7 +228,7 @@ export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 - 每个不同的提示词对应一个 Gem，因此只适用于稳定的提示词。如果提示词每次请求都变化（例如包含当前时间），每次都会创建一个新的 Gem。
 - 创建受 `create_rate_limit_per_minute`（默认 `4`）和 `managed_gems_max_total`（默认 `200`）限制。超出限制或 Gem 无法使用时，提示词会放在消息正文中发送。
 - Gem 会一直保留在账号中，直到你删除。设置 `cleanup.enabled: true` 后，无论使用哪种策略，超过 `cleanup.unused_days`（默认 `7`）未使用的 Gem 会被清理任务删除（启动时运行一次，之后每 6 小时一次），并且每个 Gem 的描述会被更新以记录最近使用时间。
-- 访客会话和 `/v1beta` 请求始终把提示词放在消息正文中发送。
+- 访客会话和 Gemini 原生接口的请求始终把提示词放在消息正文中发送。
 
 ### 输入长度
 
