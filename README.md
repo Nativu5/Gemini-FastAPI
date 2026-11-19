@@ -139,7 +139,7 @@ Gemini Web offers fewer controls than the APIs this server imitates. A valid req
   - With `strict: false` (the default on both OpenAI surfaces) or JSON mode, the reply is returned as it is.
   - Gemini-native `responseSchema` and `responseJsonSchema` are always best effort.
   - A turn that returns a tool call is not checked.
-- **Schemas the server cannot evaluate are not enforced** and never fail a request. That covers invalid JSON Schema, a `$ref` that does not resolve (remote references are never fetched), and regex keywords that exceed `server.schema_validation_budget_seconds`.
+- **Schemas the server cannot evaluate are still sent to the model, but not enforced**, and do not fail the request. The one exception is a `responseJsonSchema` that is not valid JSON Schema, which is a `400`. That covers invalid JSON Schema, a `responseSchema` that does not translate to JSON Schema, a `$ref` that does not resolve (remote references are never fetched), and regex keywords that exceed `server.schema_validation_budget_seconds`.
 - **Streaming with a schema** delivers the answer as one chunk, since JSON can only be validated once it is complete.
 
 ## Configuration
