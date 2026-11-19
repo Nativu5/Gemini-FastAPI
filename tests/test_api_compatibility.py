@@ -491,17 +491,6 @@ def test_invalid_response_json_schema_is_rejected():
     assert "Invalid JSON Schema" in (_validate_gemini_request(request) or "")
 
 
-def test_untranslatable_response_schema_drops_enforcement_rather_than_failing():
-    request = _gemini_request(
-        generationConfig={
-            "responseMimeType": "application/json",
-            "responseSchema": {"type": "WHAT"},
-        }
-    )
-    assert _validate_gemini_request(request) is None
-    assert _gemini_response_schema(_generation_config(request)) is None
-
-
 def test_the_gemini_surface_asks_for_the_schema_without_enforcing_it():
     """Google guarantees conformance by constrained decoding; this wrapper can only ask.
 

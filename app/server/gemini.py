@@ -316,7 +316,7 @@ def _log_ignored_gemini_options(
     """Debug-log valid Gemini options that the Gemini Web client cannot forward.
 
     `response_schema` is the already-translated result of `_gemini_response_schema`, passed in
-    rather than recomputed so the OpenAPI translation and its validation run once per request.
+    rather than recomputed.
     """
     ignored: set[str] = set()
     if "safetySettings" in request.model_fields_set:
@@ -326,8 +326,7 @@ def _log_ignored_gemini_options(
         supported_structured_fields: set[str] = set()
         if gen_cfg.responseMimeType == "application/json":
             supported_structured_fields.add("responseMimeType")
-        # The schema fields count as honored only if one survived translation. An empty schema
-        # is valid and still counts; `None` alone means translation failed or none was supplied.
+        # An empty schema still counts; `None` means none was sent, or JSON was not asked for.
         if response_schema is not None:
             supported_structured_fields.update(("responseSchema", "responseJsonSchema"))
         ignored.update(
@@ -398,21 +397,16 @@ def _validate_gemini_request(request: GeminiGenerateContentRequest) -> str | Non
 
 
 def _gemini_response_schema(gen_cfg: GeminiGenerationConfig) -> dict[str, Any] | None:
-    """Return the requested response schema as JSON Schema, or None if it cannot be used."""
+    """The requested response schema as JSON Schema, or None if none was sent.
+
+    A `responseSchema` whose translation is not valid JSON Schema is returned all the same:
+    `_build_structured_requirement` shows it to the model without enforcing it.
+    """
     if gen_cfg.responseJsonSchema is not None:
         return gen_cfg.responseJsonSchema
-
     if gen_cfg.responseSchema is None:
         return None
-
-    schema = normalize_openapi_schema(gen_cfg.responseSchema)
-    try:
-        validate_json_schema(schema)
-    except ValueError as exc:
-        # Enforcing a schema we could not translate would reject good answers.
-        logger.debug(f"[Gemini API] Ignoring responseSchema that is not representable: {exc}")
-        return None
-    return schema
+    return normalize_openapi_schema(gen_cfg.responseSchema)
 
 
 def _gemini_structured_requirement(

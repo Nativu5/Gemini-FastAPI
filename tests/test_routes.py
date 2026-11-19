@@ -97,6 +97,19 @@ def test_responses_continues_the_chat_when_the_client_replays_the_output_items(
     assert _continued(api)
 
 
+def test_gemini_native_shows_the_model_a_response_schema_it_cannot_check(api):
+    """Google's API takes array and string bounds as strings, which JSON Schema does not. Such a
+    schema cannot be used to check the reply, but the model still has to be told what is wanted."""
+    api.upstream.replies.append(reply('```json\n["hiking"]\n```'))
+    schema = {"type": "ARRAY", "minItems": "1", "maxItems": "3", "items": {"type": "STRING"}}
+    config = {"responseMimeType": "application/json", "responseSchema": schema}
+
+    parts = _native(api, False, contents=USER_TURN, generationConfig=config)
+
+    assert '"maxItems":"3"' in api.upstream.sent[0].text
+    assert _text(parts) == '["hiking"]'
+
+
 CITY_SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
 
 
