@@ -252,12 +252,12 @@ def test_chat_completions_continues_the_chat_when_the_reply_comes_back_as_text_p
     assert _continued(api)
 
 
-def test_gemini_native_continues_the_chat_after_a_function_response(api):
+@pytest.mark.parametrize("stream", [False, True])
+def test_gemini_native_continues_the_chat_after_a_function_response(api, stream):
     """The native API has no call ids, so none may be invented that differ between requests."""
-    url = f"/v1beta/models/{MODEL}:generateContent"
     tools = [{"functionDeclarations": [{k: v for k, v in WEATHER_TOOL.items() if k != "type"}]}]
     history = [{"role": "user", "parts": [{"text": "First question"}]}]
-    api.upstream.replies += [reply(TOOL_CALL), reply("Sunny.")]
+    api.upstream.replies += [reply("Let me check. ", TOOL_CALL), reply("Sunny.")]
 
     for follow_up in (
         {
@@ -266,11 +266,9 @@ def test_gemini_native_continues_the_chat_after_a_function_response(api):
         },
         {"role": "user", "parts": [{"text": "And tomorrow?"}]},
     ):
-        response = api.post(url, json={"contents": history, "tools": tools})
-        assert response.status_code == 200, response.text
-        history = [*history, response.json()["candidates"][0]["content"], follow_up]
+        history = [*history, *_recorded(api, stream, contents=history, tools=tools), follow_up]
 
-    api.post(url, json={"contents": history, "tools": tools})
+    _native(api, stream, contents=history, tools=tools)
 
     assert [sent.continues for sent in api.upstream.sent] == [None, "c_1", "c_1"]
     assert "clear" not in api.upstream.sent[2].text
@@ -298,6 +296,14 @@ def _native(api, stream: bool, **body) -> list[dict]:
     ]
 
 
+def _recorded(api, stream: bool, **body) -> list[dict]:
+    """A /v1beta reply as Google's SDKs keep it in a chat: one content for each chunk."""
+    method = "streamGenerateContent" if stream else "generateContent"
+    response = api.post(f"/v1beta/models/{MODEL}:{method}", json=body)
+    chunks = _sse(response) if stream else [response.json()]
+    return [chunk["candidates"][0]["content"] for chunk in chunks]
+
+
 def _text(parts: list[dict]) -> str:
     return "".join(part["text"] for part in parts if "text" in part and not part.get("thought"))
 
@@ -320,6 +326,52 @@ def _reply_text(response, stream: bool) -> str:
 
 
 USER_TURN = [{"role": "user", "parts": [{"text": "First question"}]}]
+
+
+IMAGE = {"web_images": [WebImage(url="http://img/a", title="A")]}
+
+
+@pytest.mark.parametrize(
+    ("deltas", "extra"),
+    [
+        (("\n", "\n"), IMAGE),  # all the text Google sends with a generated image
+        (("Here it is.",), {"thoughts": "Thinking.", "thoughts_delta": "Thinking."}),
+        # The rest of the thoughts and of the text arrive with the last chunk: a thought is
+        # streamed between two pieces of the text.
+        (("Here ",), {"text": "Here it is.", "thoughts": "Thinking.", **IMAGE}),
+    ],
+)
+def test_gemini_native_continues_a_chat_replayed_the_way_googles_sdks_record_a_stream(
+    api, deltas, extra
+):
+    api.upstream.replies.append(reply(*deltas, **extra))
+    recorded = _recorded(api, True, contents=USER_TURN)
+    for content in recorded:
+        # The SDKs leave the whole turn out of the history they send unless every chunk has
+        # parts, and none of them empty.
+        assert content["parts"]
+        assert all(content["parts"])
+    again = {"role": "user", "parts": [{"text": "Second question"}]}
+
+    _native(api, True, contents=[*USER_TURN, *recorded, again])
+
+    assert _continued(api)
+
+
+def test_gemini_native_joins_only_the_contents_of_one_model_turn(api):
+    """What reaches the model when the history matches no stored chat and is sent whole."""
+    contents = [
+        {"role": "user", "parts": [{"text": "First"}]},
+        {"role": "user", "parts": [{"text": "question"}]},
+        {"role": "model", "parts": [{"text": "Here "}]},
+        {"role": "model", "parts": [{"text": "it is."}]},
+        {"role": "user", "parts": [{"text": "Second question"}]},
+    ]
+
+    _native(api, False, contents=contents)
+
+    assert "Here it is." in api.upstream.sent[0].text
+    assert "Firstquestion" not in api.upstream.sent[0].text
 
 
 def test_responses_stream_delivers_a_reply_that_was_held_back_until_the_end(api):

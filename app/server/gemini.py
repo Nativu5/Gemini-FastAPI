@@ -136,6 +136,30 @@ def _inline_data_item(inline: GeminiInlineData) -> AppContentItem:
     )
 
 
+def _join_streamed_chunks(contents: list[GeminiContent]) -> list[GeminiContent]:
+    """Join each run of consecutive `model` contents into one content.
+
+    Google's SDKs record a streamed reply as one content per chunk and send them all back. The
+    reply was stored as a single message, so it only matches the stored chat when read as one.
+    """
+    joined: list[GeminiContent] = []
+    for content in contents:
+        if not (joined and joined[-1].role == content.role == "model"):
+            joined.append(content)
+            continue
+        parts = list(joined[-1].parts)
+        for part in content.parts:
+            last = parts[-1]
+            if part.thought:  # or it would stand between two pieces of the same text
+                continue
+            if part.text is not None and last.text is not None and not last.thought:
+                parts[-1] = GeminiPart(text=last.text + part.text)
+            else:
+                parts.append(part)
+        joined[-1] = GeminiContent(role="model", parts=parts)
+    return joined
+
+
 def _gemini_contents_to_messages(
     contents: list[GeminiContent],
     system_instruction: GeminiSystemInstruction | None = None,
@@ -151,7 +175,7 @@ def _gemini_contents_to_messages(
         messages.append(AppMessage(role="system", content="\n".join(texts)))
 
     roles: dict[str | None, AppMessageRole] = {"model": "assistant", "function": "tool"}
-    for content in contents:
+    for content in _join_streamed_chunks(contents):
         role = roles.get(content.role, "user")
         texts = []
         items: list[AppContentItem] = []  # text and files, in order
@@ -163,7 +187,9 @@ def _gemini_contents_to_messages(
             if part.thought:
                 # A thought this server returned, replayed by the client: not part of the answer.
                 continue
-            if part.text is not None:
+            # The empty part that ends a streamed reply, and the blank lines that are all the text
+            # of a reply with a generated image, are not in the reply as it is stored.
+            if part.text and part.text.strip():
                 texts.append(part.text)
                 items.append(AppContentItem(type="text", text=part.text))
             if part.inlineData:
@@ -727,9 +753,11 @@ async def _reply_frames(
             GeminiGenerateContentResponse(
                 candidates=[
                     GeminiCandidate(
-                        content=GeminiContent(role="model", parts=call_parts)
-                        if call_parts
-                        else None,
+                        # Google's SDKs drop a whole turn from the chat history when any chunk
+                        # of it comes without content.
+                        content=GeminiContent(
+                            role="model", parts=call_parts or [GeminiPart(text="")]
+                        ),
                         finishReason="STOP",
                         index=0,
                     )
