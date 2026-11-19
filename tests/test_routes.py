@@ -455,13 +455,23 @@ def test_a_second_copy_of_a_generated_image_is_linked_once(api, path, stream):
     assert _reply_text(response, stream).count("/media/img_") == 1
 
 
+def _as_googles_python_sdk_sends_it(part: dict) -> dict:
+    """google-genai writes the fields inside `inlineData` under their proto names."""
+    if inline := part.get("inlineData"):
+        return {"inlineData": {"data": inline["data"], "mime_type": inline["mimeType"]}}
+    return part
+
+
+@pytest.mark.parametrize("python_sdk", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
-def test_gemini_native_continues_the_chat_after_a_generated_image(api, stream):
+def test_gemini_native_continues_the_chat_after_a_generated_image(api, stream, python_sdk):
     api.upstream.replies.append(
         reply("Here.", web_images=[WebImage(url="http://img/a", title="A")])
     )
     parts = _native(api, stream, contents=USER_TURN)
     assert any("inlineData" in part for part in parts)
+    if python_sdk:
+        parts = [_as_googles_python_sdk_sends_it(part) for part in parts]
     again = {"role": "user", "parts": [{"text": "Second question"}]}
 
     _native(api, stream, contents=[*USER_TURN, {"role": "model", "parts": parts}, again])

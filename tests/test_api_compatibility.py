@@ -572,6 +572,28 @@ def test_normalize_openapi_schema_treats_property_names_as_names():
     }
 
 
+def test_normalize_openapi_schema_reads_keywords_under_their_proto_names():
+    """Google's Python SDK writes some keywords that way, such as `max_items`."""
+    assert normalize_openapi_schema(
+        {
+            "type": "OBJECT",
+            "properties": {
+                "tags": {"type": "ARRAY", "items": {"type": "STRING"}, "max_items": 3},
+                "first_name": {"any_of": [{"$ref": "#/$defs/name"}]},
+            },
+            "property_ordering": ["tags", "first_name"],
+            "$defs": {"name": {"type": "STRING"}},
+        }
+    ) == {
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+            "first_name": {"anyOf": [{"$ref": "#/$defs/name"}]},
+        },
+        "$defs": {"name": {"type": "string"}},
+    }
+
+
 def test_normalize_openapi_schema_drops_nullable_false_without_widening():
     assert normalize_openapi_schema({"type": "STRING", "nullable": False}) == {"type": "string"}
 

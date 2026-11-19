@@ -5,38 +5,48 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, AliasGenerator, BaseModel, ConfigDict, Field
+from pydantic.alias_generators import to_snake
 
 
-class GeminiInlineData(BaseModel):
+class _GeminiModel(BaseModel):
+    # Google accepts every field under its proto name too, and the Python SDK sends some that way.
+    model_config = ConfigDict(
+        alias_generator=AliasGenerator(
+            validation_alias=lambda name: AliasChoices(name, to_snake(name))
+        )
+    )
+
+
+class GeminiInlineData(_GeminiModel):
     """Embedded binary data, such as an image."""
 
     mimeType: str
     data: str
 
 
-class GeminiFileData(BaseModel):
+class GeminiFileData(_GeminiModel):
     """Reference to a file uploaded through the Files API."""
 
     mimeType: str
     fileUri: str
 
 
-class GeminiFunctionCall(BaseModel):
+class GeminiFunctionCall(_GeminiModel):
     """Function call issued by the model."""
 
     name: str
     args: dict[str, Any] = Field(default_factory=dict)
 
 
-class GeminiFunctionResponse(BaseModel):
+class GeminiFunctionResponse(_GeminiModel):
     """Result of a function execution submitted by the user."""
 
     name: str
     response: dict[str, Any] = Field(default_factory=dict)
 
 
-class GeminiPart(BaseModel):
+class GeminiPart(_GeminiModel):
     """A content part containing text, thoughts, data, or a function call or response."""
 
     text: str | None = None
@@ -47,20 +57,20 @@ class GeminiPart(BaseModel):
     fileData: GeminiFileData | None = None
 
 
-class GeminiContent(BaseModel):
+class GeminiContent(_GeminiModel):
     """Message content for a user, model, or function role."""
 
     role: Literal["user", "model", "function"] | None = None
     parts: list[GeminiPart] = Field(default_factory=list)
 
 
-class GeminiSystemInstruction(BaseModel):
+class GeminiSystemInstruction(_GeminiModel):
     """Top-level system instruction, separate from contents."""
 
     parts: list[GeminiPart] = Field(default_factory=list)
 
 
-class GeminiFunctionDeclaration(BaseModel):
+class GeminiFunctionDeclaration(_GeminiModel):
     """Function declaration."""
 
     name: str
@@ -68,33 +78,33 @@ class GeminiFunctionDeclaration(BaseModel):
     parameters: dict[str, Any] | None = None
 
 
-class GeminiTool(BaseModel):
+class GeminiTool(_GeminiModel):
     """Collection of tools."""
 
     functionDeclarations: list[GeminiFunctionDeclaration] = Field(default_factory=list)
 
 
-class GeminiFunctionCallingConfig(BaseModel):
+class GeminiFunctionCallingConfig(_GeminiModel):
     """Function calling configuration."""
 
     mode: Literal["AUTO", "NONE", "ANY", "VALIDATED"] = "AUTO"
     allowedFunctionNames: list[str] | None = None
 
 
-class GeminiToolConfig(BaseModel):
+class GeminiToolConfig(_GeminiModel):
     """Tool configuration."""
 
     functionCallingConfig: GeminiFunctionCallingConfig | None = None
 
 
-class GeminiSafetySetting(BaseModel):
+class GeminiSafetySetting(_GeminiModel):
     """Safety setting."""
 
     category: str
     threshold: str
 
 
-class GeminiThinkingConfig(BaseModel):
+class GeminiThinkingConfig(_GeminiModel):
     """Thinking configuration controlling model reasoning behavior."""
 
     includeThoughts: bool | None = None
@@ -102,7 +112,7 @@ class GeminiThinkingConfig(BaseModel):
     thinkingLevel: str | None = None
 
 
-class GeminiGenerationConfig(BaseModel):
+class GeminiGenerationConfig(_GeminiModel):
     """Content generation parameters."""
 
     temperature: float | None = None
@@ -118,7 +128,7 @@ class GeminiGenerationConfig(BaseModel):
     responseFormat: dict[str, Any] | None = None
 
 
-class GeminiGenerateContentRequest(BaseModel):
+class GeminiGenerateContentRequest(_GeminiModel):
     """Request body for generateContent or streamGenerateContent."""
 
     contents: list[GeminiContent] = Field(default_factory=list)
@@ -130,7 +140,7 @@ class GeminiGenerateContentRequest(BaseModel):
     cachedContent: str | None = None
 
 
-class GeminiCandidate(BaseModel):
+class GeminiCandidate(_GeminiModel):
     """Generated candidate."""
 
     content: GeminiContent | None = None
@@ -138,7 +148,7 @@ class GeminiCandidate(BaseModel):
     index: int = 0
 
 
-class GeminiUsageMetadata(BaseModel):
+class GeminiUsageMetadata(_GeminiModel):
     """Token usage statistics."""
 
     promptTokenCount: int = 0
@@ -147,7 +157,7 @@ class GeminiUsageMetadata(BaseModel):
     thoughtsTokenCount: int | None = None
 
 
-class GeminiGenerateContentResponse(BaseModel):
+class GeminiGenerateContentResponse(_GeminiModel):
     """Response body for generateContent or streamGenerateContent."""
 
     candidates: list[GeminiCandidate] = Field(default_factory=list)
@@ -155,7 +165,7 @@ class GeminiGenerateContentResponse(BaseModel):
     modelVersion: str | None = None
 
 
-class GeminiModelInfo(BaseModel):
+class GeminiModelInfo(_GeminiModel):
     """Information about a single model."""
 
     name: str
@@ -167,14 +177,14 @@ class GeminiModelInfo(BaseModel):
     supportedGenerationMethods: list[str] = Field(default_factory=list)
 
 
-class GeminiModelListResponse(BaseModel):
+class GeminiModelListResponse(_GeminiModel):
     """Response body for models.list."""
 
     models: list[GeminiModelInfo] = Field(default_factory=list)
     nextPageToken: str | None = None
 
 
-class GeminiErrorDetail(BaseModel):
+class GeminiErrorDetail(_GeminiModel):
     """Standard Google API error details."""
 
     code: int
@@ -183,7 +193,7 @@ class GeminiErrorDetail(BaseModel):
     details: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class GeminiErrorResponse(BaseModel):
+class GeminiErrorResponse(_GeminiModel):
     """Standard Google API error envelope."""
 
     error: GeminiErrorDetail
