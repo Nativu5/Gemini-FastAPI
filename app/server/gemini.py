@@ -1,4 +1,5 @@
-"""Native Gemini REST API v1beta endpoints.
+"""Native Gemini REST API v1beta endpoints, also served under /v1 to Google's SDKs (see
+`GoogleClientsOnV1Middleware`).
 
 - GET  /v1beta/models                                — list models
 - GET  /v1beta/models/{model}                        — get one model

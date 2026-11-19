@@ -14,7 +14,11 @@ from .server.gemini import add_exception_handlers
 from .server.gemini import router as gemini_router
 from .server.health import router as health_router
 from .server.media import router as media_router
-from .server.middleware import RequestBodyLimitMiddleware, cleanup_expired_media
+from .server.middleware import (
+    GoogleClientsOnV1Middleware,
+    RequestBodyLimitMiddleware,
+    cleanup_expired_media,
+)
 from .services import GeminiClientPool, LMDBConversationStore
 from .utils import g_config
 from .utils.config import ChatMode, GeminiGemPolicyMode
@@ -150,10 +154,12 @@ def create_app() -> FastAPI:
     )
 
     # Order matters: the last middleware added is the outermost, so the body limit has to be
-    # registered first for its 413 to still pass back out through CORS.
+    # registered first for its 413 to still pass back out through CORS, and before the `/v1`
+    # routing for the 413 to be in the envelope of the API that was called.
     app.add_middleware(
         RequestBodyLimitMiddleware, max_body_bytes=g_config.server.max_request_body_bytes
     )
+    app.add_middleware(GoogleClientsOnV1Middleware)
     if (cors := g_config.cors).enabled:
         app.add_middleware(
             CORSMiddleware,

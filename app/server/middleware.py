@@ -9,12 +9,33 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
+from starlette.datastructures import Headers, QueryParams
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.utils import g_config
 
 MEDIA_STORE_DIR = Path(g_config.storage.media_path)
 MEDIA_STORE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class GoogleClientsOnV1Middleware:
+    """Serve `/v1/models...` from the native API when the key comes the way Google's API takes it.
+
+    Google's SDKs call `/v1` unless told otherwise, and `/v1/models` is also the OpenAI model list;
+    OpenAI clients send the key as a bearer token instead.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope["path"] if scope["type"] == "http" else ""
+        if (path == "/v1/models" or path.startswith("/v1/models/")) and (
+            "x-goog-api-key" in Headers(scope=scope) or "key" in QueryParams(scope["query_string"])
+        ):
+            # In place: Starlette answers an unhandled error outside this middleware, from this scope.
+            scope["path"] = "/v1beta" + path.removeprefix("/v1")
+        await self.app(scope, receive, send)
 
 
 class RequestBodyLimitMiddleware:
