@@ -50,7 +50,8 @@ class AppContentItem(BaseModel):
         if raw.startswith(b"data:"):
             raw = raw.partition(b",")[2]
         try:
-            digest_input = base64.b64decode(b"".join(raw.split()), validate=True)
+            # Either alphabet: Google's Python SDK sends a file back in the URL-safe one.
+            digest_input = base64.b64decode(b"".join(raw.split()), altchars=b"-_", validate=True)
         except ValueError:
             digest_input = raw
 
