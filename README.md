@@ -141,6 +141,9 @@ Gemini Web offers fewer controls than the APIs this server imitates. A valid req
   - A turn that returns a tool call is not checked.
 - **Schemas the server cannot evaluate are still sent to the model, but not enforced**, and do not fail the request. The one exception is a `responseJsonSchema` that is not valid JSON Schema, which is a `400`. That covers invalid JSON Schema, a `responseSchema` that does not translate to JSON Schema, a `$ref` that does not resolve (remote references are never fetched), and regex keywords that exceed `server.schema_validation_budget_seconds`.
 - **Streaming with a schema** delivers the answer as one chunk, since JSON can only be validated once it is complete.
+- **Google's SDKs are supported in part on `/v1beta`.** Text chats work, streamed or not. Known limits:
+  - Set the API version to `v1beta`. The SDKs request `/v1` by default and get a `404`.
+  - Field names must be camelCase. The Python SDK writes some nested fields in snake_case, so its requests that carry an image or a file are rejected with a `400`. In a chat that includes every turn after a reply with a generated image, because the SDK sends the image back. The JavaScript SDK is not affected.
 
 ## Configuration
 
