@@ -97,6 +97,44 @@ def test_responses_continues_the_chat_when_the_client_replays_the_output_items(
     assert _continued(api)
 
 
+CITY_SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+
+
+@pytest.mark.parametrize("endpoint", ["chat", "responses", "native"])
+def test_a_continued_chat_is_sent_the_output_format_again(api, endpoint):
+    """Gemini is only asked for JSON in the prompt, and stops returning it a few turns after
+    the last time it was asked."""
+    api.upstream.replies += [reply('```json\n{"city": "Paris"}\n```')] * 2
+    first, again = "First question", "Second question"
+    if endpoint == "chat":
+        schema = {"type": "json_schema", "json_schema": {"name": "city", "schema": CITY_SCHEMA}}
+        request = {"model": MODEL, "response_format": schema}
+        opening = [{"role": "user", "content": first}]
+        answer = api.post("/v1/chat/completions", json={**request, "messages": opening}).json()
+        history = [*opening, answer["choices"][0]["message"], {"role": "user", "content": again}]
+        api.post("/v1/chat/completions", json={**request, "messages": history})
+    elif endpoint == "responses":
+        schema = {"type": "json_schema", "name": "city", "schema": CITY_SCHEMA}
+        request = {"model": MODEL, "text": {"format": schema}}
+        opening = [{"role": "user", "content": first}]
+        output = api.post("/v1/responses", json={**request, "input": opening}).json()["output"]
+        history = [*opening, *output, {"role": "user", "content": again}]
+        api.post("/v1/responses", json={**request, "input": history})
+    else:
+        config = {"responseMimeType": "application/json", "responseJsonSchema": CITY_SCHEMA}
+        parts = _native(api, False, contents=USER_TURN, generationConfig=config)
+        history = [
+            *USER_TURN,
+            {"role": "model", "parts": parts},
+            {"role": "user", "parts": [{"text": again}]},
+        ]
+        _native(api, False, contents=history, generationConfig=config)
+
+    assert _continued(api)
+    assert "STRUCTURED JSON PROTOCOL" in api.upstream.sent[-1].text
+    assert '"city"' in api.upstream.sent[-1].text
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_responses_replays_a_generated_image_as_its_link_not_its_bytes(api, stream):
     api.upstream.replies.append(
