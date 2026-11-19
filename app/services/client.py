@@ -1,11 +1,13 @@
 import asyncio
 import hashlib
 import io
+import re
 import time
 from collections import deque
 from pathlib import Path
 from typing import Any
 
+import gemini_webapi.client as webapi_client
 import orjson
 from gemini_webapi import GeminiClient
 from gemini_webapi.constants import AccountStatus
@@ -26,6 +28,11 @@ from .policy_gems import (
     extract_managed_last_used_at,
     touch_managed_description,
 )
+
+# gemini-webapi 2.1.1 removes the link Google leaves where generated media goes only up to its
+# first number, so ".../image_generation_content/0_974" left "_974" in the reply. This pattern
+# takes the whole link; it can go once the library's own does.
+webapi_client.ARTIFACTS_RE = re.compile(r"https?://googleusercontent\.com/(?:\w+/)+\d+(?:_\d+)*\n*")
 
 # How a model is addressed: by name, or as one of the models a client discovered. `None` leaves
 # the choice to Google.
