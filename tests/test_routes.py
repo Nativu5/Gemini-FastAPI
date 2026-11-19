@@ -10,6 +10,8 @@ from conftest import MODEL, reply
 from gemini_webapi.exceptions import ModelInvalidError
 from gemini_webapi.types import GeneratedVideo, WebImage
 
+from app.models.models import ModelData
+from app.server import chat, gemini
 from app.utils import g_config
 from app.utils.config import GeminiGemPolicyMode
 
@@ -596,6 +598,50 @@ def test_the_native_route_takes_the_key_each_way_google_clients_send_it(
 
     assert locked.post(url, json={"contents": USER_TURN}, headers=headers).status_code == status
     assert len(locked.upstream.sent) == (status == 200)
+
+
+@pytest.mark.parametrize(
+    ("headers", "query"), [({"x-goog-api-key": "secret"}, ""), ({}, "?key=secret")]
+)
+def test_google_sdks_reach_the_native_api_on_v1_where_openai_clients_keep_theirs(
+    locked, monkeypatch, headers, query
+):
+    """Google's SDKs call /v1 unless told otherwise; they send the key the way Google takes it,
+    and OpenAI clients as a bearer token."""
+    monkeypatch.setattr(
+        chat, "_AVAILABLE_MODELS_CACHE", [ModelData(id=MODEL, created=0, owned_by="google")]
+    )
+    models = locked.get(f"/v1/models{query}", headers=headers).json()
+    assert [model["name"] for model in models["models"]] == [f"models/{MODEL}"]
+    assert [model["id"] for model in locked.get("/v1/models", headers=AUTH).json()["data"]] == [
+        MODEL
+    ]
+
+    url = f"/v1/models/{MODEL}:generateContent{query}"
+    answered = locked.post(url, json={"contents": USER_TURN}, headers=headers)
+    assert answered.json()["candidates"][0]["content"]["parts"] == [{"text": "ok"}]
+
+    # A Google key sent along to an OpenAI route changes nothing.
+    chat_headers = {**AUTH, "x-goog-api-key": "secret"}
+    assert locked.post("/v1/chat/completions", json=CHAT, headers=chat_headers).status_code == 200
+
+
+def test_google_sdks_get_errors_on_v1_in_googles_envelope(locked, monkeypatch):
+    url = f"/v1/models/{MODEL}:generateContent"
+    refused = locked.post(url, json={"contents": USER_TURN}, headers={"x-goog-api-key": "wrong"})
+    assert refused.json()["error"]["status"] == "PERMISSION_DENIED"
+
+    def broken(request):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(gemini, "_validate_gemini_request", broken)
+    failed = locked.post(url, json={"contents": USER_TURN}, headers={"x-goog-api-key": "secret"})
+    assert failed.json()["error"] == {
+        "code": 500,
+        "message": "unexpected",
+        "status": "INTERNAL",
+        "details": [],
+    }
 
 
 def test_a_generated_file_is_served_only_through_the_signed_link_in_the_reply(locked):
