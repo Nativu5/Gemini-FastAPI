@@ -700,6 +700,15 @@ def test_any_mode_without_a_single_target_forces_only_that_a_tool_is_called(tool
     assert choice == (None if tool_config is None else "required")
 
 
+# `parameters_json_schema` is what Google's Python SDK sends for a tool given as a Python function.
+@pytest.mark.parametrize("field", ["parameters", "parameters_json_schema"])
+def test_a_function_keeps_its_parameters_whichever_field_declares_them(field):
+    schema = {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+    request = _gemini_request(tools=[{"functionDeclarations": [{"name": "a", field: schema}]}])
+    tools, _ = _gemini_tools_to_internal(request.tools)
+    assert [tool.parameters for tool in tools or []] == [schema]
+
+
 def test_no_tools_yields_no_tool_choice():
     assert _gemini_tools_to_internal(None, None) == (None, None)
 

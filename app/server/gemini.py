@@ -251,7 +251,7 @@ def _gemini_tools_to_internal(
                 type="function",
                 name=decl.name,
                 description=decl.description,
-                parameters=decl.parameters,
+                parameters=decl.parametersJsonSchema or decl.parameters,
             )
             for decl in tool.functionDeclarations or []
         )
