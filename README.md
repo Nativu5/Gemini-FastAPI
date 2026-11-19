@@ -131,7 +131,7 @@ If `server.api_key` is set, send it as `Authorization: Bearer <key>`. The `/v1be
 Gemini Web offers fewer controls than the APIs this server imitates. A valid request is not rejected because of an option that cannot be forwarded.
 
 - **Ignored options.** `temperature`, `top_p`, output-token limits, `parallel_tool_calls`, Gemini `generationConfig` fields and safety settings are accepted and have no effect.
-- **Rejected input.** Malformed requests, and content the server cannot resolve at all, such as a Files API `file_id` or a `cachedContent` handle.
+- **Rejected input.** Malformed requests, and anything the server cannot resolve at all: a Files API `file_id`, a `cachedContent` handle, or earlier turns referenced by `previous_response_id` or `conversation` on `/v1/responses`. Send those turns in `input` instead.
 - **Errors use the envelope of the API that was called**: `{"error": {"message", "type", "param", "code"}}` on the OpenAI endpoints, `{"error": {"code", "message", "status"}}` on `/v1beta`. A malformed request is a `400` on both.
 - **Generated videos and audio are returned as links** in the reply text on every endpoint. Images are links too on the OpenAI endpoints, where `/v1/responses` adds an `image_generation_call` item for each; `/v1beta` returns them as `inlineData` parts instead.
 - **Structured output is requested in the prompt** and checked by the server afterwards, because Gemini Web has no constrained decoding.

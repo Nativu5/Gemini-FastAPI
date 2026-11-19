@@ -656,6 +656,21 @@ def test_a_request_with_nothing_new_to_send_is_refused(api):
     assert len(api.upstream.sent) == 1
 
 
+@pytest.mark.parametrize(
+    ("field", "value"), [("previous_response_id", "resp_1"), ("conversation", {"id": "conv_1"})]
+)
+def test_responses_refuses_a_request_that_leaves_its_history_to_the_server(api, field, value):
+    request = {"model": MODEL, "input": "And then?"}
+
+    refused = api.post("/v1/responses", json={**request, field: value})
+
+    assert refused.status_code == 400
+    assert field in refused.json()["error"]["message"]
+    assert api.upstream.sent == []
+    # null is how a client says there is none
+    assert api.post("/v1/responses", json={**request, field: None}).status_code == 200
+
+
 def _events(response) -> list[dict]:
     """The events of a Responses stream, checked for framing as they are read."""
     assert response.status_code == 200, response.text
