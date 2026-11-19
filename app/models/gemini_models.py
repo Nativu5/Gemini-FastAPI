@@ -76,6 +76,7 @@ class GeminiFunctionDeclaration(_GeminiModel):
     name: str
     description: str | None = None
     parameters: dict[str, Any] | None = None
+    parametersJsonSchema: dict[str, Any] | None = None
 
 
 class GeminiTool(_GeminiModel):
