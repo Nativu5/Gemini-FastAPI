@@ -25,6 +25,7 @@ from jsonschema import SchemaError, ValidationError, validators
 from jsonschema.validators import validator_for
 from loguru import logger
 from pydantic import BaseModel
+from pydantic.alias_generators import to_camel
 
 from app.models import (
     AppContentItem,
@@ -417,6 +418,8 @@ def normalize_openapi_schema(schema: Any) -> Any:
 
     result: dict[str, Any] = {}
     for key, value in schema.items():
+        if "_" in key:  # a proto field name, such as `max_items`; see `_GeminiModel`
+            key = to_camel(key)
         if key in _OPENAPI_ONLY_KEYS:
             continue
         if key == "type" and isinstance(value, str) and value.lower() in _JSON_SCHEMA_TYPE_NAMES:
