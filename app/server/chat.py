@@ -2175,6 +2175,14 @@ async def create_response(
 ):
     base_url = str(raw_request.base_url)
     _log_ignored_openai_options(request)
+    for field in ("previous_response_id", "conversation"):
+        if getattr(request, field) is not None:
+            # Answering without the turns the client left out would look like a model that forgot.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{field} is not supported; send the earlier turns, including each "
+                "response's output items, in input instead.",
+            )
     if input_error := _validate_responses_input(request.input):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=input_error)
     base_messages = _convert_responses_to_app_messages(request.input)

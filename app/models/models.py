@@ -441,6 +441,9 @@ class ResponseCreateRequest(BaseModel):
     response_format: dict[str, Any] | None = Field(default=None)
     metadata: dict[str, Any] | None = Field(default=None)
     parallel_tool_calls: bool | None = Field(default=True)
+    # Declared only so that the route can refuse them: see `create_response`.
+    previous_response_id: str | None = Field(default=None)
+    conversation: Any = Field(default=None)
 
 
 class ResponseCreateResponse(BaseModel):
