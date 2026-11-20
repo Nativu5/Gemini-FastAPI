@@ -56,17 +56,6 @@ async def _run_retention_cleanup() -> None:
     gems = g_config.gemini.gems
     gem_cleanup = gems.policy != GeminiGemPolicyMode.OFF and gems.cleanup.enabled
     next_gem_cleanup = 0.0
-
-    if (
-        g_config.storage.retention_days <= 0
-        and g_config.gemini.chat_mode != ChatMode.AUTO_DELETE
-        and not store.get_pending_deletions()
-        and not store.has_auto_delete_records()
-        and not gem_cleanup
-    ):
-        logger.info("LMDB retention cleanup disabled; skipping scheduler.")
-        return
-
     interval = _get_cleanup_interval()
     logger.info(
         f"Starting LMDB retention cleanup task (retention={g_config.storage.retention_days} day(s), "
