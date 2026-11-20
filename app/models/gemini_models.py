@@ -183,18 +183,3 @@ class GeminiModelListResponse(_GeminiModel):
 
     models: list[GeminiModelInfo] = Field(default_factory=list)
     nextPageToken: str | None = None
-
-
-class GeminiErrorDetail(_GeminiModel):
-    """Standard Google API error details."""
-
-    code: int
-    message: str
-    status: str
-    details: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class GeminiErrorResponse(_GeminiModel):
-    """Standard Google API error envelope."""
-
-    error: GeminiErrorDetail

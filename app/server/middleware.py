@@ -5,11 +5,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 from starlette.datastructures import Headers, QueryParams
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.utils import g_config
@@ -48,7 +50,11 @@ class RequestBodyLimitMiddleware:
 
     def __init__(self, app: ASGIApp, max_body_bytes: int) -> None:
         self.app = app
-        self.max_body_bytes = max(0, max_body_bytes)
+        self.max_body_bytes = max_body_bytes
+        self.detail = (
+            f"Request body exceeds the wrapper safety ceiling of {max_body_bytes} bytes. "
+            "This is a local resource guard, not Gemini Web's upstream input limit."
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or self.max_body_bytes == 0:
@@ -69,58 +75,25 @@ class RequestBodyLimitMiddleware:
             except ValueError:
                 declared_size = 0
             if declared_size > self.max_body_bytes:
-                await self._send_too_large(scope, receive, send)
+                response = error_response(
+                    scope["path"], status.HTTP_413_CONTENT_TOO_LARGE, self.detail
+                )
+                await response(scope, receive, send)
                 return
 
         received = 0
-        overflowed = False
 
         async def limited_receive() -> Message:
-            nonlocal overflowed, received
+            nonlocal received
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > self.max_body_bytes:
-                    overflowed = True
-                    raise HTTPException(
-                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                        detail=self._detail(),
-                    )
+                    # Raised in the route, whose error handler answers it.
+                    raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail=self.detail)
             return message
 
-        async def limited_send(message: Message) -> None:
-            # FastAPI turns the receive error into its own generic envelope; drop that so the
-            # surface-appropriate body below is what the client actually gets.
-            if not overflowed:
-                await send(message)
-
-        await self.app(scope, limited_receive, limited_send)
-        if overflowed:
-            await self._send_too_large(scope, receive, send)
-
-    def _detail(self) -> str:
-        return (
-            f"Request body exceeds the wrapper safety ceiling of {self.max_body_bytes} bytes. "
-            "This is a local resource guard, not Gemini Web's upstream input limit."
-        )
-
-    async def _send_too_large(self, scope: Scope, receive: Receive, send: Send) -> None:
-        detail = self._detail()
-        if str(scope.get("path", "")).startswith("/v1beta/"):
-            content: dict[str, Any] = {
-                "error": {
-                    "code": status.HTTP_413_CONTENT_TOO_LARGE,
-                    "message": detail,
-                    "status": "RESOURCE_EXHAUSTED",
-                }
-            }
-        else:
-            content = _openai_error_body(status.HTTP_413_CONTENT_TOO_LARGE, detail)
-        response = JSONResponse(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            content=content,
-        )
-        await response(scope, receive, send)
+        await self.app(scope, limited_receive, send)
 
 
 def get_media_store_dir() -> Path:
@@ -175,17 +148,53 @@ _OPENAI_ERROR_TYPES = {
     429: "rate_limit_error",
 }
 
+_GRPC_STATUS = {
+    400: "INVALID_ARGUMENT",
+    401: "UNAUTHENTICATED",
+    403: "PERMISSION_DENIED",
+    404: "NOT_FOUND",
+    413: "RESOURCE_EXHAUSTED",
+    429: "RESOURCE_EXHAUSTED",
+    503: "UNAVAILABLE",
+}
 
-def _openai_error_body(status_code: int, message: str) -> dict[str, Any]:
+
+def google_error_body(status_code: int, message: str) -> dict[str, Any]:
+    """An error in the envelope of Google's API."""
+    grpc_status = _GRPC_STATUS.get(status_code, "INTERNAL")
+    return {"error": {"code": status_code, "message": message, "status": grpc_status}}
+
+
+def error_response(path: str, status_code: int, message: str) -> JSONResponse:
+    """An HTTP error in the envelope of the API that `path` belongs to."""
+    if path.startswith("/v1beta/"):
+        return JSONResponse(
+            status_code=status_code, content=google_error_body(status_code, message)
+        )
     error_type = _OPENAI_ERROR_TYPES.get(
         status_code, "invalid_request_error" if status_code < 500 else "server_error"
     )
-    return {"error": {"message": message, "type": error_type, "param": None, "code": None}}
+    body = {"error": {"message": message, "type": error_type, "param": None, "code": None}}
+    return JSONResponse(status_code=status_code, content=body)
 
 
-def openai_error(status_code: int, message: str) -> JSONResponse:
-    """An HTTP error in the envelope the OpenAI clients read."""
-    return JSONResponse(status_code=status_code, content=_openai_error_body(status_code, message))
+def add_exception_handlers(app: FastAPI) -> None:
+    """Answer every error in the envelope of the API the request was made to."""
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException):
+        response = error_response(request.url.path, exc.status_code, str(exc.detail))
+        response.headers.update(exc.headers or {})  # e.g. `Allow` on a 405
+        return response
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError):
+        """A malformed request is a 400 in both APIs, not FastAPI's 422."""
+        return error_response(request.url.path, 400, f"Invalid request: {exc.errors() or exc}")
+
+    @app.exception_handler(Exception)
+    async def unhandled(request: Request, exc: Exception):
+        return error_response(request.url.path, 500, str(exc))
 
 
 def get_temp_dir():

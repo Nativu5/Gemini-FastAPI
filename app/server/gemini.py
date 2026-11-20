@@ -24,14 +24,12 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
 
 import orjson
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from gemini_webapi import ModelOutput
 from gemini_webapi.client import ChatSession
 from loguru import logger
 from pydantic import BaseModel
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.models import (
     AppContentItem,
@@ -46,8 +44,6 @@ from app.models import (
 from app.models.gemini_models import (
     GeminiCandidate,
     GeminiContent,
-    GeminiErrorDetail,
-    GeminiErrorResponse,
     GeminiFunctionCall,
     GeminiGenerateContentRequest,
     GeminiGenerateContentResponse,
@@ -71,11 +67,7 @@ from app.server.chat import (
     _visible_deltas,
     available_models,
 )
-from app.server.middleware import (
-    get_temp_dir,
-    openai_error,
-    verify_gemini_api_key,
-)
+from app.server.middleware import get_temp_dir, google_error_body, verify_gemini_api_key
 from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
 from app.utils.helper import (
     StructuredOutputValidationError,
@@ -89,40 +81,6 @@ from app.utils.helper import (
 )
 
 router = APIRouter(dependencies=[Depends(verify_gemini_api_key)])
-
-
-_GRPC_STATUS = {
-    400: "INVALID_ARGUMENT",
-    401: "UNAUTHENTICATED",
-    403: "PERMISSION_DENIED",
-    404: "NOT_FOUND",
-    429: "RESOURCE_EXHAUSTED",
-    503: "UNAVAILABLE",
-}
-
-
-def add_exception_handlers(app: FastAPI) -> None:
-    """Answer every error in the envelope of the API the request was made to."""
-
-    def error(request: Request, status_code: int, message: str) -> JSONResponse:
-        if request.url.path.startswith("/v1beta/"):
-            return _error_response(status_code, message)
-        return openai_error(status_code, message)
-
-    @app.exception_handler(StarletteHTTPException)
-    async def http_error(request: Request, exc: StarletteHTTPException):
-        response = error(request, exc.status_code, str(exc.detail))
-        response.headers.update(exc.headers or {})  # e.g. `Allow` on a 405
-        return response
-
-    @app.exception_handler(RequestValidationError)
-    async def invalid_request(request: Request, exc: RequestValidationError):
-        """A malformed request is a 400 in both APIs, not FastAPI's 422."""
-        return error(request, 400, f"Invalid request: {exc.errors() or exc}")
-
-    @app.exception_handler(Exception)
-    async def unhandled(request: Request, exc: Exception):
-        return error(request, 500, str(exc))
 
 
 def _inline_data_item(inline: GeminiInlineData) -> AppContentItem:
@@ -317,21 +275,9 @@ def _part_frame(part: GeminiPart) -> str:
     )
 
 
-def _gemini_error(status_code: int, message: str) -> GeminiErrorResponse:
-    """An error in Google's envelope."""
-    return GeminiErrorResponse(
-        error=GeminiErrorDetail(
-            code=status_code,
-            message=message,
-            status=_GRPC_STATUS.get(status_code, "INTERNAL"),
-        )
-    )
-
-
-def _error_response(status_code: int, message: str) -> JSONResponse:
-    """An HTTP error in Google's envelope."""
-    content = _gemini_error(status_code, message).model_dump(mode="json")
-    return JSONResponse(status_code=status_code, content=content)
+def _error_frame(status_code: int, message: str) -> str:
+    """An SSE frame that ends a stream with an error, in Google's envelope."""
+    return f"data: {orjson.dumps(google_error_body(status_code, message)).decode()}\n\n"
 
 
 def _log_ignored_gemini_options(
@@ -488,7 +434,7 @@ async def gemini_get_model(model: str):
     try:
         _resolve_model_name(GeminiClientPool(), model_name)
     except ValueError as exc:
-        return _error_response(404, str(exc))
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     # Reported under the name it was asked for, which may be an alias the list does not show.
     return _model_info(model_name)
 
@@ -603,9 +549,9 @@ async def gemini_generate_content(
             sent.structured_requirement,
         )
     except StructuredOutputValidationError as exc:
-        return _error_response(502, str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
-        return _error_response(502, choice_error)
+        raise HTTPException(status_code=502, detail=choice_error)
 
     downloads = _Downloads(str(raw_request.base_url))
     downloads.add(resp)
@@ -676,7 +622,7 @@ async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str
                 yield _part_frame(GeminiPart(text=delta, thought=is_thought or None))
         except Exception as e:
             logger.exception(f"[Gemini API] Streaming error: {e}")
-            yield _sse(_gemini_error(500, "Streaming error occurred."))
+            yield _error_frame(500, "Streaming error occurred.")
             return
 
         try:
@@ -687,11 +633,11 @@ async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str
             )
         except StructuredOutputValidationError as exc:
             logger.warning(f"[Gemini API] Structured output rejected mid-stream: {exc}")
-            yield _sse(_gemini_error(502, str(exc)))
+            yield _error_frame(502, str(exc))
             return
         if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
             logger.warning(f"[Gemini API] Forced tool choice unmet mid-stream: {choice_error}")
-            yield _sse(_gemini_error(502, choice_error))
+            yield _error_frame(502, choice_error)
             return
 
         if not forward_text and visible_output:
