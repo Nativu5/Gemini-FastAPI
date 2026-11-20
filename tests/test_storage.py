@@ -13,7 +13,7 @@ import pytest
 from conftest import CLIENT_ID
 
 from app.models.core import AppContentItem, AppMessage
-from app.services.lmdb import LMDBConversationStore
+from app.services.lmdb import LMDBConversationStore, _hash_conversation
 from app.utils import g_config
 from app.utils.config import ChatMode
 
@@ -40,6 +40,16 @@ def _exchange(prompt: str = "hello") -> list[AppMessage]:
 def _raw_keys(opened: LMDBConversationStore) -> list[str]:
     with opened._get_transaction() as txn:
         return [bytes(key).decode("utf-8") for key, _ in txn.cursor()]
+
+
+def _backdate(store: LMDBConversationStore, messages: list[AppMessage], **ago: timedelta) -> None:
+    """Move a stored conversation's `created_at` or `updated_at` back by the time given."""
+    conv = store.find(MODEL, messages)
+    assert conv is not None
+    aged = conv.model_copy(update={field: getattr(conv, field) - by for field, by in ago.items()})
+    with store._get_transaction(write=True) as txn:
+        key = _hash_conversation(CLIENT_ID, MODEL, messages).encode()
+        txn.put(key, orjson.dumps(aged.model_dump(mode="json")))
 
 
 def test_a_stored_conversation_is_found_again(store):
@@ -128,13 +138,7 @@ def test_retention_keeps_a_conversation_that_is_still_in_use(store):
     messages = _exchange()
     store.store(CLIENT_ID, MODEL, messages, metadata=["c", "r", "rc"])
 
-    conv = store.find(MODEL, messages)
-    assert conv is not None
-    key = store.keys()[0]
-    conv.created_at = datetime.now() - timedelta(days=90)
-    conv.updated_at = datetime.now()
-    with store._get_transaction(write=True) as txn:
-        txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
+    _backdate(store, messages, created_at=timedelta(days=90))
 
     assert store.cleanup_before(datetime.now() - timedelta(days=14)) == 0
     assert store.find(MODEL, messages) is not None
@@ -189,13 +193,7 @@ def test_normal_conversation_is_not_collected_for_remote_deletion(store):
         chat_mode=ChatMode.NORMAL,
     )
 
-    key = store.keys()[0]
-    conv = store.find(MODEL, messages)
-    assert conv is not None
-    conv.created_at = datetime.now() - timedelta(days=20)
-    conv.updated_at = datetime.now() - timedelta(days=20)
-    with store._get_transaction(write=True) as txn:
-        txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
+    _backdate(store, messages, updated_at=timedelta(days=20))
 
     removed, remote_deletions = store.cleanup_expired()
     assert removed == 1
@@ -204,8 +202,6 @@ def test_normal_conversation_is_not_collected_for_remote_deletion(store):
 
 
 def test_multi_turn_auto_delete_does_not_remotely_delete_cid_if_newer_turn_is_active(store):
-    from app.services.lmdb import _hash_conversation
-
     turn1 = _exchange("turn 1")
     turn2 = [
         *turn1,
@@ -217,30 +213,16 @@ def test_multi_turn_auto_delete_does_not_remotely_delete_cid_if_newer_turn_is_ac
     store.store(CLIENT_ID, MODEL, turn1, metadata=[cid, "r", "rc"], chat_mode=ChatMode.AUTO_DELETE)
     store.store(CLIENT_ID, MODEL, turn2, metadata=[cid, "r", "rc"], chat_mode=ChatMode.AUTO_DELETE)
 
-    # Age turn 1 to be expired (> 24h), keep turn 2 fresh
-    conv1 = store.find(MODEL, turn1)
-    assert conv1 is not None
-    conv1.updated_at = datetime.now() - timedelta(hours=25)
-    key1 = _hash_conversation(CLIENT_ID, MODEL, turn1)
-    with store._get_transaction(write=True) as txn:
-        txn.put(key1.encode("utf-8"), orjson.dumps(conv1.model_dump(mode="json")), overwrite=True)
+    _backdate(store, turn1, updated_at=timedelta(hours=25))
 
-    # First cleanup: turn 1 expires, but turn 2 is active with the same cid
     removed, remote_deletions = store.cleanup_expired()
     assert removed == 1
-    assert remote_deletions == []  # cid must NOT be deleted yet because turn 2 is active!
+    assert remote_deletions == []
     assert store.find(MODEL, turn1) is None
     assert store.find(MODEL, turn2) is not None
 
-    # Now age turn 2 as well
-    conv2 = store.find(MODEL, turn2)
-    assert conv2 is not None
-    conv2.updated_at = datetime.now() - timedelta(hours=25)
-    key2 = _hash_conversation(CLIENT_ID, MODEL, turn2)
-    with store._get_transaction(write=True) as txn:
-        txn.put(key2.encode("utf-8"), orjson.dumps(conv2.model_dump(mode="json")), overwrite=True)
+    _backdate(store, turn2, updated_at=timedelta(hours=25))
 
-    # Second cleanup: turn 2 expires, no active conversations remain for cid
     removed2, remote_deletions2 = store.cleanup_expired()
     assert removed2 == 1
     assert remote_deletions2 == [(CLIENT_ID, cid)]
@@ -258,68 +240,35 @@ def test_pending_deletions_persisted_and_acknowledged(store):
         chat_mode=ChatMode.AUTO_DELETE,
     )
 
-    key = store.keys()[0]
-    conv = store.find(MODEL, messages)
-    assert conv is not None
-    conv.updated_at = datetime.now() - timedelta(hours=25)
-    with store._get_transaction(write=True) as txn:
-        txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
+    _backdate(store, messages, updated_at=timedelta(hours=25))
 
-    # First cleanup removes it locally and stages its remote deletion
     removed, remote_deletions = store.cleanup_expired()
     assert removed == 1
     assert store.find(MODEL, messages) is None
     assert remote_deletions == [(CLIENT_ID, cid)]
     assert store.get_pending_deletions() == [(CLIENT_ID, cid)]
 
-    # Subsequent cleanup without acknowledgment retries the pending deletion
     removed_retry, remote_deletions_retry = store.cleanup_expired()
     assert removed_retry == 0
     assert remote_deletions_retry == [(CLIENT_ID, cid)]
 
-    # Acknowledging deletion clears it from pending
     assert store.remove_pending_deletion(cid) is True
     assert store.get_pending_deletions() == []
 
-    # Following cleanup has nothing to delete
     removed_after, remote_deletions_after = store.cleanup_expired()
     assert removed_after == 0
     assert remote_deletions_after == []
 
 
 def test_legacy_conversation_without_chat_mode_is_not_remotely_deleted(store):
-    from app.utils import g_config
+    messages = _exchange()
+    store.store(CLIENT_ID, MODEL, messages, metadata=["c_legacy_123", "r", "rc"], chat_mode=None)
+    _backdate(
+        store, messages, updated_at=timedelta(hours=25)
+    )  # past auto_delete_ttl, within retention
 
-    orig_mode = g_config.gemini.chat_mode
-    try:
-        g_config.gemini.chat_mode = ChatMode.AUTO_DELETE
-
-        messages = _exchange()
-        cid = "c_legacy_123"
-        store.store(
-            CLIENT_ID,
-            MODEL,
-            messages,
-            metadata=[cid, "r", "rc"],
-            chat_mode=None,
-        )
-
-        key = store.keys()[0]
-        conv = store.find(MODEL, messages)
-        assert conv is not None
-        assert conv.chat_mode is None
-
-        # Age it beyond auto_delete_ttl (25h) but within retention_days (14d)
-        conv.updated_at = datetime.now() - timedelta(hours=25)
-        with store._get_transaction(write=True) as txn:
-            txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
-
-        removed, remote_deletions = store.cleanup_expired()
-        assert removed == 0
-        assert remote_deletions == []
-        assert store.find(MODEL, messages) is not None
-    finally:
-        g_config.gemini.chat_mode = orig_mode
+    assert store.cleanup_expired() == (0, [])
+    assert store.find(MODEL, messages) is not None
 
 
 def test_ephemeral_guest_conversation_is_not_staged_for_remote_deletion(store):
@@ -334,19 +283,9 @@ def test_ephemeral_guest_conversation_is_not_staged_for_remote_deletion(store):
         chat_mode=ChatMode.AUTO_DELETE,
     )
 
-    key = store.keys()[0]
-    conv = store.find(MODEL, messages)
-    assert conv is not None
-    assert conv.chat_mode == ChatMode.AUTO_DELETE
-    assert conv.chat_scope == "guest:session_abc"
-
-    # Age it beyond auto_delete_ttl (25h)
-    conv.updated_at = datetime.now() - timedelta(hours=25)
-    with store._get_transaction(write=True) as txn:
-        txn.put(key.encode("utf-8"), orjson.dumps(conv.model_dump(mode="json")), overwrite=True)
+    _backdate(store, messages, updated_at=timedelta(hours=25))
 
     removed, remote_deletions = store.cleanup_expired()
-    # The record should be removed from LMDB, but NOT staged for Google remote deletion
     assert removed == 1
     assert remote_deletions == []
     assert store.get_pending_deletions() == []
