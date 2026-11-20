@@ -26,11 +26,11 @@ from app.models.models import (
 )
 from app.server.chat import (
     _build_structured_requirement,
+    _convert_responses_to_app_messages,
     _media_markdown,
     _responses_response_format,
     _tool_choice_declaration_error,
     _tool_choice_failure,
-    _validate_responses_input,
 )
 from app.server.gemini import (
     _gemini_structured_requirement,
@@ -753,11 +753,11 @@ def _input_message(*parts) -> ResponseInputMessage:
     ],
 )
 def test_responses_input_refuses_only_unusable_content(items, expected):
-    result = _validate_responses_input(items)
     if expected is None:
-        assert result is None
+        assert _convert_responses_to_app_messages(items)
     else:
-        assert expected in (result or "")
+        with pytest.raises(ValueError, match=expected):
+            _convert_responses_to_app_messages(items)
 
 
 @pytest.mark.parametrize(
@@ -769,12 +769,12 @@ def test_responses_input_refuses_only_unusable_content(items, expected):
     ],
 )
 def test_tool_result_parts_are_validated_too(output, expected):
-    items = [FunctionCallOutput.model_validate({"call_id": "c", "output": output})]
-    result = _validate_responses_input(items)
+    items: list = [FunctionCallOutput.model_validate({"call_id": "c", "output": output})]
     if expected is None:
-        assert result is None
+        assert _convert_responses_to_app_messages(items)
     else:
-        assert expected in (result or "")
+        with pytest.raises(ValueError, match=expected):
+            _convert_responses_to_app_messages(items)
 
 
 def test_non_ascii_data_url_does_not_abort_model_construction():
