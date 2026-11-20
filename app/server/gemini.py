@@ -415,7 +415,6 @@ class _SentRequest(NamedTuple):
 
     sent: _Sent
     model_name: str
-    messages: list[AppMessage]  # as the caller sent them; usage is counted on these
     tool_choice: Literal["none", "auto", "required"] | ToolChoiceFunction | None
     structured_requirement: StructuredOutputRequirement | None
 
@@ -452,7 +451,7 @@ async def _send_gemini_request(
         tmp_dir=tmp_dir,
         stream=stream,
     )
-    return _SentRequest(sent, model_name, messages, tool_choice, structured_requirement)
+    return _SentRequest(sent, model_name, tool_choice, structured_requirement)
 
 
 async def _generated_files(downloads: _Downloads) -> tuple[list[GeminiInlineData], str]:
@@ -508,7 +507,7 @@ async def gemini_generate_content(
     images, media_markdown = await _generated_files(downloads)
     visible_output += media_markdown
 
-    usage = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
+    usage = calculate_usage(sent.sent.prepared, visible_output, tool_calls, thoughts)
     sent.sent.persist(_stored_reply(visible_output, images), tool_calls)
 
     parts = [GeminiPart(text=thoughts, thought=True)] if thoughts else []
@@ -593,7 +592,7 @@ async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str
         for image in images:
             yield _part_frame(GeminiPart(inlineData=image))
 
-        usage = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
+        usage = calculate_usage(sent.sent.prepared, visible_output, tool_calls, thoughts)
         call_parts = _function_call_parts(tool_calls)
         yield _sse(
             GeminiGenerateContentResponse(
