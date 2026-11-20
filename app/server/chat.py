@@ -1762,6 +1762,10 @@ def _create_responses_real_streaming_response(
                 async for is_thought, delta in _visible_deltas(
                     generator, streamed, downloads, not structured_requirement
                 ):
+                    # Whitespace before a tool call must not open a message; the final text is
+                    # stripped anyway.
+                    if not (is_thought or message_open) and not (delta := delta.lstrip()):
+                        continue
                     # The reasoning stays open beside the message: the final chunk can still
                     # carry more of it.
                     for event in open_thought() if is_thought else open_message():

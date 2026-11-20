@@ -799,6 +799,7 @@ def _events(response) -> list[dict]:
         (reply("Answer.", thoughts="Hm.", thoughts_delta="Hm."), ["reasoning", "message"]),
         (reply("Checking. " + TOOL_CALL), ["message", "function_call"]),
         (reply(TOOL_CALL), ["function_call"]),
+        (reply("\n", TOOL_CALL), ["function_call"]),
         (reply(), ["message"]),
         (reply(**IMAGE), ["message", "image_generation_call"]),
         # Thoughts that arrive only with the final chunk, after the text has started.
@@ -810,6 +811,7 @@ def _events(response) -> list[dict]:
         "reasoning",
         "tool-call",
         "only-a-tool-call",
+        "a-tool-call-after-a-newline",
         "empty",
         "image",
         "late-thought",
