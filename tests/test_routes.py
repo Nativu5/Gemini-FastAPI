@@ -934,6 +934,35 @@ def test_a_responses_stream_can_be_reassembled_into_its_final_response(api, answ
 
 
 @pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "native"])
+def test_the_prompt_tokens_count_the_tool_instructions_gemini_is_sent(api, path, stream):
+    def prompt_tokens(with_tool: bool) -> int:
+        api.upstream.replies.append(reply("Sunny."))
+        if path == "native":
+            tools = [{"functionDeclarations": [CHAT_TOOL["function"]]}] if with_tool else []
+            method = "streamGenerateContent" if stream else "generateContent"
+            body = {"contents": USER_TURN, "tools": tools}
+            response = api.post(f"/v1beta/models/{MODEL}:{method}", json=body)
+            return (_sse(response) if stream else [response.json()])[-1]["usageMetadata"][
+                "promptTokenCount"
+            ]
+        if "chat" in path:
+            body = {**CHAT, "stream": stream, "tools": [CHAT_TOOL] if with_tool else None}
+            response = api.post(path, json=body)
+            return (_sse(response)[-1] if stream else response.json())["usage"]["prompt_tokens"]
+        body = {"model": MODEL, "input": "First question", "stream": stream}
+        response = api.post(path, json={**body, "tools": [WEATHER_TOOL] if with_tool else []})
+        if stream:
+            events = _sse(response)
+            return next(e for e in events if e["type"] == "response.completed")["response"][
+                "usage"
+            ]["input_tokens"]
+        return response.json()["usage"]["input_tokens"]
+
+    assert prompt_tokens(with_tool=True) > prompt_tokens(with_tool=False) > 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
 def test_gemini_native_ends_a_reply_with_a_finish_reason_and_its_usage(api, stream):
     api.upstream.replies.append(reply("Hello ", "there.", thoughts="Hm.", thoughts_delta="Hm."))
     method = "streamGenerateContent" if stream else "generateContent"

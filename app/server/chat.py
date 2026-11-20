@@ -1639,7 +1639,9 @@ async def create_chat_completion(
     for markdown, _ in await downloads.all():
         visible_output += f"\n\n{markdown}"
 
-    p_tok, c_tok, t_tok, r_tok = calculate_usage(app_messages, visible_output, tool_calls, thoughts)
+    p_tok, c_tok, t_tok, r_tok = calculate_usage(
+        sent.prepared, visible_output, tool_calls, thoughts
+    )
     payload = ChatCompletionResponse(
         id=completion_id,
         created=created_time,
@@ -1787,7 +1789,9 @@ async def create_response(
     ):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=choice_error)
 
-    p_tok, c_tok, t_tok, r_tok = calculate_usage(messages, assistant_text, tool_calls, thoughts)
+    p_tok, c_tok, t_tok, r_tok = calculate_usage(
+        sent.prepared, assistant_text, tool_calls, thoughts
+    )
     usage = ResponseUsage(
         input_tokens=p_tok,
         output_tokens=c_tok,
