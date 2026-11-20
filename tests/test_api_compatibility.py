@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models.core import AppContentItem, AppMessage, AppToolCall, AppToolCallFunction
-from app.models.gemini_models import GeminiGenerateContentRequest, GeminiGenerationConfig
+from app.models.gemini_models import GeminiGenerateContentRequest
 from app.models.models import (
     ChatCompletionNamedToolChoice,
     FunctionCallOutput,
@@ -33,7 +33,6 @@ from app.server.chat import (
     _validate_responses_input,
 )
 from app.server.gemini import (
-    _gemini_response_schema,
     _gemini_structured_requirement,
     _gemini_tools_to_internal,
     _validate_gemini_request,
@@ -67,13 +66,6 @@ def _requirement(schema: dict, *, strict: bool = True) -> StructuredOutputRequir
 def _gemini_request(**overrides) -> GeminiGenerateContentRequest:
     payload = {"contents": [{"role": "user", "parts": [{"text": "hi"}]}], **overrides}
     return GeminiGenerateContentRequest.model_validate(payload)
-
-
-def _generation_config(request: GeminiGenerateContentRequest) -> GeminiGenerationConfig:
-    """Narrow the optional generationConfig the caller just supplied."""
-    config = request.generationConfig
-    assert config is not None
-    return config
 
 
 @pytest.mark.parametrize("format_type", ["text", "json_object"])
@@ -431,7 +423,9 @@ def test_openapi_response_schema_is_translated_not_rejected():
         }
     )
     assert _validate_gemini_request(request) is None
-    assert _gemini_response_schema(_generation_config(request)) == {
+    requirement = _gemini_structured_requirement(request.generationConfig)
+    assert requirement is not None
+    assert requirement.schema == {
         "type": "object",
         "properties": {"name": {"type": "string"}, "age": {"type": ["integer", "null"]}},
         "required": ["name"],
@@ -458,10 +452,10 @@ def test_the_gemini_surface_asks_for_the_schema_without_enforcing_it():
     request = _gemini_request(
         generationConfig={"responseMimeType": "application/json", "responseSchema": OBJECT_SCHEMA}
     )
-    schema, requirement = _gemini_structured_requirement(request)
+    requirement = _gemini_structured_requirement(request.generationConfig)
 
-    assert schema == OBJECT_SCHEMA
     assert requirement is not None
+    assert requirement.schema == OBJECT_SCHEMA
     assert requirement.strict is False
     assert STRICT_SCHEMA_ADHERENCE_PROMPT not in requirement.instruction
 
@@ -479,10 +473,9 @@ def test_the_gemini_surface_asks_for_the_schema_without_enforcing_it():
     ],
 )
 def test_gemini_json_mode_survives_absent_or_empty_schemas(generation_config):
-    schema, requirement = _gemini_structured_requirement(
-        _gemini_request(generationConfig=generation_config)
+    requirement = _gemini_structured_requirement(
+        _gemini_request(generationConfig=generation_config).generationConfig
     )
-    assert schema in (None, {})
     assert requirement is not None
     assert requirement.schema == {}
     assert requirement.strict is False
@@ -490,9 +483,7 @@ def test_gemini_json_mode_survives_absent_or_empty_schemas(generation_config):
 
 
 def test_no_response_schema_yields_no_requirement():
-    schema, requirement = _gemini_structured_requirement(_gemini_request())
-    assert schema is None
-    assert requirement is None
+    assert _gemini_structured_requirement(_gemini_request().generationConfig) is None
 
 
 def test_normalize_openapi_schema_leaves_json_schema_alone():
@@ -663,7 +654,7 @@ def test_any_mode_without_a_single_target_forces_only_that_a_tool_is_called(tool
 def test_a_function_keeps_its_parameters_whichever_field_declares_them(field):
     schema = {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
     request = _gemini_request(tools=[{"functionDeclarations": [{"name": "a", field: schema}]}])
-    tools, _ = _gemini_tools_to_internal(request.tools)
+    tools, _ = _gemini_tools_to_internal(request.tools, None)
     assert [tool.parameters for tool in tools or []] == [schema]
 
 

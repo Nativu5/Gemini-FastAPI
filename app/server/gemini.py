@@ -21,7 +21,7 @@ from __future__ import annotations
 import mimetypes
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, cast
+from typing import Literal, NamedTuple
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -52,6 +52,8 @@ from app.models.gemini_models import (
     GeminiModelListResponse,
     GeminiPart,
     GeminiSystemInstruction,
+    GeminiTool,
+    GeminiToolConfig,
     GeminiUsageMetadata,
 )
 from app.server.chat import (
@@ -157,7 +159,7 @@ def _gemini_contents_to_messages(
                         id=f"call_{len(tool_calls)}",
                         function=AppToolCallFunction(
                             name=part.functionCall.name,
-                            arguments=orjson.dumps(part.functionCall.args or {}).decode(),
+                            arguments=orjson.dumps(part.functionCall.args).decode(),
                         ),
                     )
                 )
@@ -187,8 +189,8 @@ def _gemini_contents_to_messages(
 
 
 def _gemini_tools_to_internal(
-    tools: list[Any] | None,
-    tool_config: Any | None = None,
+    tools: list[GeminiTool] | None,
+    tool_config: GeminiToolConfig | None,
 ) -> tuple[
     list[FunctionTool] | None,
     Literal["none", "auto", "required"] | ToolChoiceFunction | None,
@@ -205,7 +207,7 @@ def _gemini_tools_to_internal(
                 description=decl.description,
                 parameters=decl.parametersJsonSchema or decl.parameters,
             )
-            for decl in tool.functionDeclarations or []
+            for decl in tool.functionDeclarations
         )
     tool_choice: Literal["none", "auto", "required"] | ToolChoiceFunction | None = None
     if tool_config and tool_config.functionCallingConfig:
@@ -223,12 +225,12 @@ def _gemini_tools_to_internal(
             internal_tools = [tool for tool in internal_tools if tool.name in allowed_names]
 
         if mode == "NONE":
-            tool_choice = cast(Literal["none", "auto", "required"], "none")
+            tool_choice = "none"
         elif mode == "ANY":
             tool_choice = (
                 ToolChoiceFunction(type="function", name=next(iter(allowed_names)))
                 if len(allowed_names) == 1
-                else cast(Literal["none", "auto", "required"], "required")
+                else "required"
             )
         else:
             # AUTO, and VALIDATED - which also permits a natural-language answer.
@@ -277,28 +279,20 @@ def _error_frame(status_code: int, message: str) -> str:
     return f"data: {orjson.dumps(google_error_body(status_code, message)).decode()}\n\n"
 
 
-def _log_ignored_gemini_options(
-    request: GeminiGenerateContentRequest, response_schema: dict[str, Any] | None
-) -> None:
-    """Debug-log valid Gemini options that the Gemini Web client cannot forward.
-
-    `response_schema` is the already-translated result of `_gemini_response_schema`, passed in
-    rather than recomputed.
-    """
+def _log_ignored_gemini_options(request: GeminiGenerateContentRequest) -> None:
+    """Debug-log valid Gemini options that the Gemini Web client cannot forward."""
     ignored: set[str] = set()
     if "safetySettings" in request.model_fields_set:
         ignored.add("safetySettings")
 
     if gen_cfg := request.generationConfig:
-        supported_structured_fields: set[str] = set()
-        if gen_cfg.responseMimeType == "application/json":
-            supported_structured_fields.add("responseMimeType")
-        # An empty schema still counts; `None` means none was sent, or JSON was not asked for.
-        if response_schema is not None:
-            supported_structured_fields.update(("responseSchema", "responseJsonSchema"))
-        ignored.update(
-            name for name in gen_cfg.model_fields_set if name not in supported_structured_fields
+        # The schema fields are acted on only when JSON is asked for.
+        supported = (
+            {"responseMimeType", "responseSchema", "responseJsonSchema"}
+            if gen_cfg.responseMimeType == "application/json"
+            else set()
         )
+        ignored.update(gen_cfg.model_fields_set - supported)
 
     if request.toolConfig and (call_config := request.toolConfig.functionCallingConfig):
         mode = call_config.mode
@@ -363,44 +357,29 @@ def _validate_gemini_request(request: GeminiGenerateContentRequest) -> str | Non
     return None
 
 
-def _gemini_response_schema(gen_cfg: GeminiGenerationConfig) -> dict[str, Any] | None:
-    """The requested response schema as JSON Schema, or None if none was sent.
-
-    A `responseSchema` whose translation is not valid JSON Schema is returned all the same:
-    `_build_structured_requirement` shows it to the model without enforcing it.
-    """
-    if gen_cfg.responseJsonSchema is not None:
-        return gen_cfg.responseJsonSchema
-    if gen_cfg.responseSchema is None:
-        return None
-    return normalize_openapi_schema(gen_cfg.responseSchema)
-
-
 def _gemini_structured_requirement(
-    request: GeminiGenerateContentRequest,
-) -> tuple[dict[str, Any] | None, StructuredOutputRequirement | None]:
-    """Translate the requested response schema once, returning it with its requirement.
+    gen_cfg: GeminiGenerationConfig | None,
+) -> StructuredOutputRequirement | None:
+    """The requirement for the response schema asked for, if JSON was asked for.
 
     The requirement is deliberately non-strict. Google's own API guarantees conformance through
     constrained decoding; Gemini Web offers no such control, so the schema can only be asked for
     in the prompt. Failing the request on a near-miss would throw away an answer the caller can
     still use, so a violation degrades to the raw text and is logged instead.
+
+    A `responseSchema` whose translation is not valid JSON Schema is shown to the model all the
+    same, without being enforced.
     """
-    if not request.generationConfig:
-        return None, None
-
-    gen_cfg = request.generationConfig
-    if gen_cfg.responseMimeType != "application/json":
-        return None, None
-
-    schema = _gemini_response_schema(gen_cfg)
-    response_format = (
+    if not gen_cfg or gen_cfg.responseMimeType != "application/json":
+        return None
+    schema = gen_cfg.responseJsonSchema
+    if schema is None and gen_cfg.responseSchema is not None:
+        schema = normalize_openapi_schema(gen_cfg.responseSchema)
+    return _build_structured_requirement(
         {"type": "json_object"}
         if schema is None
         else {"type": "json_schema", "json_schema": {"schema": schema, "strict": False}}
     )
-    requirement = _build_structured_requirement(response_format)
-    return schema, requirement
 
 
 def _model_info(model_id: str) -> GeminiModelInfo:
@@ -416,11 +395,6 @@ def _model_info(model_id: str) -> GeminiModelInfo:
 async def gemini_list_models():
     """List available models (Gemini API format)."""
     models = available_models(GeminiClientPool())
-
-    logger.info(f"[Gemini API] Retrieved {len(models)} models")
-    if not models:
-        logger.warning("[Gemini API] Model list is empty")
-
     return GeminiModelListResponse(models=[_model_info(m.id) for m in models])
 
 
@@ -460,8 +434,8 @@ async def _send_gemini_request(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if validation_error := _validate_gemini_request(request):
         raise HTTPException(status_code=400, detail=validation_error)
-    response_schema, structured_requirement = _gemini_structured_requirement(request)
-    _log_ignored_gemini_options(request, response_schema)
+    structured_requirement = _gemini_structured_requirement(request.generationConfig)
+    _log_ignored_gemini_options(request)
 
     messages = _gemini_contents_to_messages(request.contents, request.systemInstruction)
     tools, tool_choice = _gemini_tools_to_internal(request.tools, request.toolConfig)
