@@ -58,3 +58,23 @@ def test_a_chat_is_never_continued_across_the_auto_delete_boundary(
     monkeypatch.setattr(g_config.gemini, "chat_mode", active_mode)
 
     assert _is_reusable_chat(_stored(stored_mode), _account_client()) is reusable
+
+
+@pytest.mark.parametrize(
+    ("stored_scope", "latest_cid", "reusable"),
+    [
+        ("temporary:A", "c_1", True),
+        ("temporary:B", "c_1", False),  # opened by a session that has since ended
+        ("temporary:A", "c_2", False),  # a newer chat on this client has closed it
+    ],
+)
+def test_a_temporary_chat_is_continued_only_in_its_own_window_while_it_is_the_latest(
+    stored_scope, latest_cid, reusable, monkeypatch
+):
+    monkeypatch.setattr(g_config.gemini, "chat_mode", ChatMode.TEMPORARY)
+    stored = _stored(ChatMode.TEMPORARY).model_copy(update={"chat_scope": stored_scope})
+    client = SimpleNamespace(
+        id=CLIENT_ID, latest_chat_cid=latest_cid, chat_scope=lambda _temporary: "temporary:A"
+    )
+
+    assert _is_reusable_chat(stored, cast(GeminiClientWrapper, client)) is reusable

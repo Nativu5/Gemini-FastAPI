@@ -406,10 +406,39 @@ def test_gemini_native_normalises_tool_arguments_whether_streamed_or_not(api, st
     ]
 
 
-def test_gemini_native_stream_sends_text_that_only_the_final_chunk_carries(api):
-    api.upstream.replies.append(reply("Hel", text="Hello there"))
+def _streamed(api, path: str) -> tuple[str, str]:
+    """The text and the thoughts a stream sent, added up from its deltas as a client does."""
+    if path == "native":
+        parts = _native(api, True, contents=USER_TURN)
+        return _text(parts), "".join(part["text"] for part in parts if part.get("thought"))
+    prompt = (
+        {"messages": [{"role": "user", "content": "Hi"}]} if "chat" in path else {"input": "Hi"}
+    )
+    events = _sse(api.post(path, json={"model": MODEL, "stream": True, **prompt}))
+    if "chat" in path:
+        deltas = [event["choices"][0]["delta"] for event in events if event.get("choices")]
+        return tuple(
+            "".join(d.get(key) or "" for d in deltas) for key in ("content", "reasoning_content")
+        )
+    return tuple(
+        "".join(e["delta"] for e in events if e["type"] == f"response.{kind}.delta")
+        for kind in ("output_text", "reasoning_summary_text")
+    )
 
-    assert _text(_native(api, True, contents=USER_TURN)) == "Hello there"
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "native"])
+@pytest.mark.parametrize(
+    ("deltas", "last_chunk", "shown"),
+    [
+        (("Hel",), {"text": "Hello there", "thoughts": "Hm."}, ("Hello there", "Hm.")),
+        # A final text that does not continue what was streamed is not added to it.
+        (("Hello",), {"text": "Goodbye"}, ("Hello", "")),
+    ],
+)
+def test_a_stream_sends_what_only_its_final_chunk_carries(api, path, deltas, last_chunk, shown):
+    api.upstream.replies.append(reply(*deltas, **last_chunk))
+
+    assert _streamed(api, path) == shown
 
 
 @pytest.mark.parametrize("stream", [False, True])
