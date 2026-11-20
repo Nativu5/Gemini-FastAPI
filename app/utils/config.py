@@ -5,7 +5,7 @@ from typing import Any, Literal, cast
 
 from curl_cffi import BrowserTypeLiteral
 from loguru import logger
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     SettingsConfigDict,
@@ -152,6 +152,15 @@ class GeminiGemsConfig(BaseModel):
         default=GeminiGemCleanupConfig(),
         description="Cleanup policy for managed gems",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _enabled_false_keeps_gems_off(cls, data: Any) -> Any:
+        """`enabled` is gone and `policy` alone decides, but a config written when `enabled: false`
+        turned gems off whatever the policy said must not start using them."""
+        if isinstance(data, dict) and str(data.get("enabled")).lower() == "false":
+            return {**data, "policy": GeminiGemPolicyMode.OFF}
+        return data
 
 
 class GeminiConfig(BaseModel):
