@@ -17,6 +17,7 @@ from app.server.chat import (
     StreamingOutputFilter,
     _create_real_streaming_response,
     _create_responses_real_streaming_response,
+    _Sent,
 )
 from app.server.gemini import _stream_reply
 
@@ -26,7 +27,7 @@ TOOL_CALL_OUTPUT = (
 )
 HI = [AppMessage(role="user", content="hi")]
 IMAGE = [WebImage(url="http://img/a")]
-UNREAD = cast(Any, None)  # the store, client and session: a stream cut short never reaches them
+UNREAD = cast(Any, None)  # the session: a stream cut short never reaches it
 
 
 @pytest.fixture
@@ -51,14 +52,14 @@ async def _endless_reply():
 
 def _chat_completions(output):
     return _create_real_streaming_response(
-        output, "id", 0, MODEL, HI, UNREAD, MODEL, UNREAD, UNREAD, "http://testserver/"
+        _Sent(output, UNREAD, MODEL, HI), "id", 0, MODEL, "http://testserver/"
     )
 
 
 def _responses(output):
     request = ResponseCreateRequest(model=MODEL, input="hi", stream=True)
     return _create_responses_real_streaming_response(
-        output, "id", 0, MODEL, HI, UNREAD, MODEL, UNREAD, UNREAD, request, "http://testserver/"
+        _Sent(output, UNREAD, MODEL, HI), "id", 0, MODEL, request, "http://testserver/"
     )
 
 
@@ -80,7 +81,8 @@ def test_a_native_stream_that_ends_in_an_error_stops_the_downloads(downloads):
         await asyncio.sleep(0)  # lets the download start
 
     # Only what is read before the unmet tool choice ends the stream.
-    sent = SimpleNamespace(output=one_chunk(), structured_requirement=None, tool_choice="required")
+    output = SimpleNamespace(output=one_chunk())
+    sent = SimpleNamespace(sent=output, structured_requirement=None, tool_choice="required")
 
     async def read_to_the_end() -> tuple[str, list[bool]]:
         frames = [frame async for frame in _stream_reply(cast(Any, sent), "http://testserver/")]

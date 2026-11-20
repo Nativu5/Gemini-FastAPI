@@ -129,9 +129,9 @@ def api(tmp_path, monkeypatch) -> Iterator[SimpleNamespace]:
             return client
 
     store = LMDBConversationStore.open_isolated(db_path=str(tmp_path / "lmdb"))
+    monkeypatch.setattr(chat, "LMDBConversationStore", lambda: store)
     for module in (chat, gemini):
         monkeypatch.setattr(module, "GeminiClientPool", _Pool)
-        monkeypatch.setattr(module, "LMDBConversationStore", lambda: store)
         monkeypatch.setattr(module, "_resolve_model_name", lambda pool, name: MODEL)
     (tmp_path / "media").mkdir()
 

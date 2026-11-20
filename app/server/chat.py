@@ -295,41 +295,45 @@ def _create_responses_standard_payload(
     )
 
 
-def _persist_conversation(
-    db: LMDBConversationStore,
-    model_name: str,
-    client: GeminiClientWrapper,
-    metadata: list[str | None],
-    messages: list[AppMessage],
-    storage_output: str | list[AppContentItem] | None,
-    tool_calls: list[AppToolCall] | None,
-) -> None:
-    """Record this turn as the client's latest chat and store the history so a later request
-    can continue it. A storage failure is logged, not raised: the reply is already made."""
-    # This turn is now the last chat this client opened; any window it replaced is closed. Set
-    # before the store, so a persistence failure cannot leave a closed window looking reusable,
-    # and in every mode, since an expired cookie can turn a client ephemeral without warning.
-    client.latest_chat_cid = cid_of(metadata)
-    chat_scope = client.chat_scope(_use_temporary_chat_mode())
+@dataclass
+class _Sent:
+    """A request sent upstream: its reply, and the chat the turn is stored under."""
 
-    try:
-        reply = AppMessage(
-            role="assistant", content=storage_output or None, tool_calls=tool_calls or None
-        )
+    output: AsyncGenerator[ModelOutput] | ModelOutput
+    session: ChatSession
+    model: str  # resolved; what the chat is stored under
+    prepared: list[AppMessage]  # with the tool and output instructions; what is stored
 
-        # An ephemeral chat is worth storing like any other while its window is live, tagged with
-        # that window so a later session cannot mistake it for one of its own.
-        db.store(
-            client_id=client.id,
-            model=model_name,
-            messages=[*messages, reply],
-            metadata=metadata,
-            chat_scope=chat_scope,
-            chat_mode=g_config.gemini.chat_mode,
-        )
-        logger.debug("Conversation saved to LMDB.")
-    except Exception as e:
-        logger.warning(f"Failed to save {len(messages) + 1} messages to LMDB: {e}")
+    def persist(
+        self, reply: str | list[AppContentItem] | None, tool_calls: list[AppToolCall] | None
+    ) -> None:
+        """Record this turn as the client's latest chat and store the history so a later request
+        can continue it. A storage failure is logged, not raised: the reply is already made."""
+        client = cast(GeminiClientWrapper, self.session.geminiclient)
+        # This turn is now the last chat this client opened; any window it replaced is closed. Set
+        # before the store, so a persistence failure cannot leave a closed window looking reusable,
+        # and in every mode, since an expired cookie can turn a client ephemeral without warning.
+        client.latest_chat_cid = cid_of(self.session.metadata)
+        chat_scope = client.chat_scope(_use_temporary_chat_mode())
+
+        try:
+            reply_message = AppMessage(
+                role="assistant", content=reply or None, tool_calls=tool_calls or None
+            )
+
+            # An ephemeral chat is worth storing like any other while its window is live, tagged
+            # with that window so a later session cannot mistake it for one of its own.
+            LMDBConversationStore().store(
+                client_id=client.id,
+                model=self.model,
+                messages=[*self.prepared, reply_message],
+                metadata=self.session.metadata,
+                chat_scope=chat_scope,
+                chat_mode=g_config.gemini.chat_mode,
+            )
+            logger.debug("Conversation saved to LMDB.")
+        except Exception as e:
+            logger.warning(f"Failed to save {len(self.prepared) + 1} messages to LMDB: {e}")
 
 
 def _build_structured_requirement(
@@ -862,25 +866,16 @@ def _is_reusable_chat(conv: ConversationInStore, client: GeminiClientWrapper) ->
 
 
 async def _find_reusable_session(
-    db: LMDBConversationStore,
-    pool: GeminiClientPool,
-    resolved_model: str,
-    messages: list[AppMessage],
-    require_account: bool = False,
-) -> tuple[
-    ChatSession | None, GeminiClientWrapper | None, list[AppMessage], ConversationInStore | None
-]:
+    resolved_model: str, messages: list[AppMessage], require_account: bool
+) -> tuple[ChatSession, list[AppMessage], ConversationInStore] | None:
     """Find an existing chat session matching the longest suitable history prefix."""
-    if len(messages) < 2:
-        return None, None, messages, None
-
     search_end = len(messages)
     while search_end >= 2:
         search_history = messages[:search_end]
         if search_history[-1].role in {"assistant", "system", "tool"}:
             try:
-                if conv := db.find(resolved_model, search_history):
-                    client = await pool.acquire(conv.client_id)
+                if conv := LMDBConversationStore().find(resolved_model, search_history):
+                    client = await GeminiClientPool().acquire(conv.client_id)
                     if require_account and client.is_guest():
                         # Continuing here would fail on the upload; a fresh chat on an
                         # authenticated client can still serve the request.
@@ -898,11 +893,10 @@ async def _find_reusable_session(
                     session = client.start_chat(
                         metadata=conv.metadata, model=client.usable_model(resolved_model)
                     )
-                    remain = messages[search_end:]
                     logger.debug(
                         f"Match found at prefix length {search_end}/{len(messages)}. Client: {conv.client_id}"
                     )
-                    return session, client, remain, conv
+                    return session, messages[search_end:], conv
             except Exception as e:
                 logger.warning(
                     f"Error checking LMDB for reusable session at length {search_end}: {e}"
@@ -911,7 +905,7 @@ async def _find_reusable_session(
         search_end -= 1
 
     logger.debug(f"No reusable session found for {len(messages)} messages.")
-    return None, None, messages, None
+    return None
 
 
 def _use_temporary_chat_mode() -> bool:
@@ -1020,62 +1014,8 @@ async def _send_and_await_first_chunk(
     return _restream(first, generator)
 
 
-async def _send_with_internal_fallback(
-    *,
-    pool: GeminiClientPool,
-    db: LMDBConversationStore,
-    resolved_model: str,
-    session: ChatSession,
-    client: GeminiClientWrapper,
-    current_input: str,
-    files: list[Any],
-    full_prepared_messages: list[AppMessage],
-    stored_conversation: ConversationInStore | None,
-    tmp_dir: Path,
-    stream: bool,
-) -> tuple[AsyncGenerator[ModelOutput] | ModelOutput, ChatSession, GeminiClientWrapper]:
-    """Send the request, replaying the full history in a fresh chat if reused metadata is dead.
-
-    Streaming is recovered as well as non-streaming: the first chunk is pulled here, which is
-    where Google reports a rejected chat, so the retry happens before any response is committed
-    to the client. The cost is that response headers wait for Google's first chunk.
-    """
-    try:
-        output = await _send_and_await_first_chunk(
-            session, current_input, files=files, stream=stream
-        )
-        return output, session, client
-    except ModelInvalidError:
-        if stored_conversation is None:
-            raise
-
-        try:
-            if db.evict(stored_conversation):
-                logger.info("Evicted stale conversation metadata after Google rejected it.")
-        except Exception as evict_exc:
-            logger.warning(f"Failed to evict stale conversation metadata: {evict_exc}")
-
-        logger.warning(
-            "Metadata-backed chat reuse failed; retrying with internal history replay in a fresh chat."
-        )
-        fallback_input, fallback_files = await process_conversation(full_prepared_messages, tmp_dir)
-        # Built before acquiring, so a replay that needs an upload is not handed to a guest.
-        fallback_client = await pool.acquire(
-            require_account=bool(fallback_files) or len(fallback_input) > _max_chars_per_request()
-        )
-        fallback_session = fallback_client.start_chat(
-            model=fallback_client.usable_model(resolved_model)
-        )
-        output = await _send_and_await_first_chunk(
-            fallback_session, fallback_input, files=list(fallback_files), stream=stream
-        )
-        return output, fallback_session, fallback_client
-
-
 async def _send_request(
     *,
-    pool: GeminiClientPool,
-    db: LMDBConversationStore,
     resolved_model: str,
     history: list[AppMessage],
     prepared: list[AppMessage],
@@ -1088,27 +1028,33 @@ async def _send_request(
     instructions: list[str] | None,
     tmp_dir: Path,
     stream: bool,
-) -> tuple[AsyncGenerator[ModelOutput] | ModelOutput, ChatSession, GeminiClientWrapper]:
+) -> _Sent:
     """Continue the stored chat that `history` extends, or open a new one, and send the rest.
 
     `prepared` is `history` with the tool and output instructions added. It is what reuse is
     matched on and what is stored, system prompt included, so changing or removing a system
     prompt never continues a chat opened under another one.
 
+    A continued chat that Google rejects is evicted and the full history replayed in a fresh one.
+    Streaming is recovered as well: the first chunk is pulled here, which is where Google reports
+    a rejected chat, so the retry happens before any response is committed to the client. The
+    cost is that response headers wait for Google's first chunk.
+
     Raises `HTTPException`: 400 when there is nothing new to send, 503 when no client could take
     the request, 502 when Gemini fails.
     """
+    pool = GeminiClientPool()
     system_prompt, without_system = _extract_leading_system_prompt(history)
     if not without_system:
         system_prompt = None  # a request that is only a system prompt keeps it as its message
     needs_upload = _requires_upload(prepared)
-    session, client, remain, stored_conv = await _find_reusable_session(
-        db, pool, resolved_model, prepared, require_account=needs_upload
-    )
+    found = await _find_reusable_session(resolved_model, prepared, needs_upload)
 
-    if session and client:
+    if found:
+        session, remain, stored_conv = found
         if not remain:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No new messages.")
+        client = cast(GeminiClientWrapper, session.geminiclient)
         if gem_id := await _resolve_system_prompt_gem(client, system_prompt):
             session.gem = gem_id
         to_send = _prepare_messages_for_model(remain, tools, tool_choice, instructions, False)
@@ -1117,6 +1063,7 @@ async def _send_request(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(to_send)} prepared messages."
         )
     else:
+        stored_conv = None
         try:
             client = await pool.acquire(require_account=needs_upload)
             gem_id = await _resolve_system_prompt_gem(client, system_prompt)
@@ -1138,22 +1085,33 @@ async def _send_request(
         logger.debug(
             f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
         )
-        return await _send_with_internal_fallback(
-            pool=pool,
-            db=db,
-            resolved_model=resolved_model,
-            session=session,
-            client=client,
-            current_input=m_input,
-            files=files,
-            full_prepared_messages=prepared,
-            stored_conversation=stored_conv,
-            tmp_dir=tmp_dir,
-            stream=stream,
-        )
+        try:
+            output = await _send_and_await_first_chunk(session, m_input, files=files, stream=stream)
+        except ModelInvalidError:
+            if stored_conv is None:
+                raise
+            try:
+                if LMDBConversationStore().evict(stored_conv):
+                    logger.info("Evicted stale conversation metadata after Google rejected it.")
+            except Exception as evict_exc:
+                logger.warning(f"Failed to evict stale conversation metadata: {evict_exc}")
+
+            logger.warning(
+                "Metadata-backed chat reuse failed; retrying with internal history replay in a fresh chat."
+            )
+            m_input, files = await process_conversation(prepared, tmp_dir)
+            # Built before acquiring, so a replay that needs an upload is not handed to a guest.
+            client = await pool.acquire(
+                require_account=bool(files) or len(m_input) > _max_chars_per_request()
+            )
+            session = client.start_chat(model=client.usable_model(resolved_model))
+            output = await _send_and_await_first_chunk(
+                session, m_input, files=list(files), stream=stream
+            )
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    return _Sent(output, session, resolved_model, prepared)
 
 
 class StreamingOutputFilter:
@@ -1449,15 +1407,10 @@ def _sse_error(
 
 
 def _create_real_streaming_response(
-    generator: AsyncGenerator[ModelOutput],
+    sent: _Sent,
     completion_id: str,
     created_time: int,
     model_name: str,
-    messages: list[AppMessage],
-    db: LMDBConversationStore,
-    resolved_model: str,
-    client_wrapper: GeminiClientWrapper,
-    session: ChatSession,
     base_url: str,
     structured_requirement: StructuredOutputRequirement | None = None,
     tool_choice: Any = None,
@@ -1483,7 +1436,10 @@ def _create_real_streaming_response(
             yield make_chunk({"role": "assistant", "content": ""})
             try:
                 async for is_thought, delta in _visible_deltas(
-                    generator, streamed, downloads, not structured_requirement
+                    cast(AsyncGenerator[ModelOutput], sent.output),
+                    streamed,
+                    downloads,
+                    not structured_requirement,
                 ):
                     yield make_chunk({"reasoning_content" if is_thought else "content": delta})
             except Exception as e:
@@ -1529,7 +1485,7 @@ def _create_real_streaming_response(
                 )
 
             p_tok, c_tok, t_tok, r_tok = calculate_usage(
-                messages, storage_output, detected_tool_calls, streamed.thoughts
+                sent.prepared, storage_output, detected_tool_calls, streamed.thoughts
             )
             usage = CompletionUsage(
                 prompt_tokens=p_tok,
@@ -1537,15 +1493,7 @@ def _create_real_streaming_response(
                 total_tokens=t_tok,
                 completion_tokens_details={"reasoning_tokens": r_tok},
             )
-            _persist_conversation(
-                db,
-                resolved_model,
-                client_wrapper,
-                session.metadata,
-                messages,
-                storage_output,
-                detected_tool_calls,
-            )
+            sent.persist(storage_output, detected_tool_calls)
             yield make_chunk(
                 {}, "tool_calls" if detected_tool_calls else "stop", usage=dump_model(usage)
             )
@@ -1557,15 +1505,10 @@ def _create_real_streaming_response(
 
 
 def _create_responses_real_streaming_response(
-    generator: AsyncGenerator[ModelOutput],
+    sent: _Sent,
     response_id: str,
     created_time: int,
     model_name: str,
-    messages: list[AppMessage],
-    db: LMDBConversationStore,
-    resolved_model: str,
-    client_wrapper: GeminiClientWrapper,
-    session: ChatSession,
     request: ResponseCreateRequest,
     base_url: str,
     structured_requirement: StructuredOutputRequirement | None = None,
@@ -1762,7 +1705,10 @@ def _create_responses_real_streaming_response(
 
             try:
                 async for is_thought, delta in _visible_deltas(
-                    generator, streamed, downloads, not structured_requirement
+                    cast(AsyncGenerator[ModelOutput], sent.output),
+                    streamed,
+                    downloads,
+                    not structured_requirement,
                 ):
                     if is_thought and message_open:
                         # The reasoning item is finished; these follow the message in one of
@@ -1854,7 +1800,7 @@ def _create_responses_real_streaming_response(
                     yield event
 
             p_tok, c_tok, t_tok, r_tok = calculate_usage(
-                messages, assistant_text, detected_tool_calls, streamed.thoughts
+                sent.prepared, assistant_text, detected_tool_calls, streamed.thoughts
             )
             usage = ResponseUsage(
                 input_tokens=p_tok,
@@ -1917,15 +1863,7 @@ def _create_responses_real_streaming_response(
                 for etype in ("response.output_item.added", "response.output_item.done"):
                     yield make_event(etype, {"output_index": index, "item": dump_model(item)})
 
-            _persist_conversation(
-                db,
-                resolved_model,
-                client_wrapper,
-                session.metadata,
-                messages,
-                assistant_text,
-                detected_tool_calls,
-            )
+            sent.persist(assistant_text, detected_tool_calls)
 
             yield make_event(
                 "response.completed",
@@ -1955,9 +1893,8 @@ async def create_chat_completion(
     tmp_dir: Path = Depends(get_temp_dir),
 ):
     base_url = str(raw_request.base_url)
-    pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
-        resolved_model = _resolve_model_name(pool, request.model)
+        model = _resolve_model_name(GeminiClientPool(), request.model)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if not request.messages:
@@ -1984,10 +1921,8 @@ async def create_chat_completion(
 
     completion_id = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(datetime.now(tz=UTC).timestamp())
-    resp_or_stream, session, client = await _send_request(
-        pool=pool,
-        db=db,
-        resolved_model=resolved_model,
+    sent = await _send_request(
+        resolved_model=model,
         history=app_messages,
         prepared=msgs,
         tools=request.tools,
@@ -1997,17 +1932,13 @@ async def create_chat_completion(
         stream=bool(request.stream),
     )
 
+    resp_or_stream = sent.output
     if not isinstance(resp_or_stream, ModelOutput):  # which is what `stream` asked for
         return _create_real_streaming_response(
-            resp_or_stream,
+            sent,
             completion_id,
             created_time,
             request.model,
-            msgs,
-            db,
-            resolved_model,
-            client,
-            session,
             base_url,
             structured_requirement,
             request.tool_choice,
@@ -2063,15 +1994,7 @@ async def create_chat_completion(
             completion_tokens_details={"reasoning_tokens": r_tok},
         ),
     )
-    _persist_conversation(
-        db,
-        resolved_model,
-        client,
-        session.metadata,
-        msgs,
-        visible_output,
-        tool_calls,
-    )
+    sent.persist(visible_output, tool_calls)
     return payload
 
 
@@ -2137,18 +2060,15 @@ async def create_response(
         model_tool_choice,
         extra_instr or None,
     )
-    pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
-        resolved_model = _resolve_model_name(pool, request.model)
+        model = _resolve_model_name(GeminiClientPool(), request.model)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     response_id = f"resp_{uuid.uuid4().hex}"
     created_time = int(datetime.now(tz=UTC).timestamp())
-    resp_or_stream, session, client = await _send_request(
-        pool=pool,
-        db=db,
-        resolved_model=resolved_model,
+    sent = await _send_request(
+        resolved_model=model,
         history=conv_messages,
         prepared=messages,
         tools=standard_tools or None,
@@ -2158,17 +2078,13 @@ async def create_response(
         stream=bool(request.stream),
     )
 
+    resp_or_stream = sent.output
     if not isinstance(resp_or_stream, ModelOutput):  # which is what `stream` asked for
         return _create_responses_real_streaming_response(
-            resp_or_stream,
+            sent,
             response_id,
             created_time,
             request.model,
-            messages,
-            db,
-            resolved_model,
-            client,
-            session,
             request,
             base_url,
             structured_requirement,
@@ -2217,13 +2133,5 @@ async def create_response(
         structured_requirement,
         thoughts,
     )
-    _persist_conversation(
-        db,
-        resolved_model,
-        client,
-        session.metadata,
-        messages,
-        assistant_text,
-        tool_calls,
-    )
+    sent.persist(assistant_text, tool_calls)
     return payload
