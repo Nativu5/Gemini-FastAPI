@@ -141,14 +141,13 @@ def _hash_conversation(
 class LMDBConversationStore(metaclass=Singleton):
     """LMDB-based storage for Message lists with hash-based key-value operations."""
 
-    # Bump when _hash_message changes shape. Entries under an older version can never match
-    # again, and their conversations would otherwise keep index rows no eviction can find,
-    # so startup sweeps them instead of leaving them to accumulate.
+    # Bump when _hash_message changes shape. Startup then deletes the lookup entries of older
+    # versions, which no eviction could find any more.
     #
-    # The conversation records themselves are keyed by the hash that produced them, so records
-    # written under an older version stay unreachable after the sweep: a repeat of the same
-    # conversation is replayed in full and stored again under a current key, and the superseded
-    # record is left to expire on the normal retention schedule.
+    # A conversation record is keyed by its exact hash, so one whose hash the change leaves alone
+    # is still found. One whose hash changed, or that a client's replay matched only through a
+    # deleted fuzzy entry, is replayed in full once and stored again; the old record expires
+    # under retention.
     INDEX_VERSION = "v3"
     FUZZY_LOOKUP_PREFIX = f"fuzzy:{INDEX_VERSION}:"
     PENDING_DELETE_PREFIX = "pending_del:"
@@ -335,9 +334,7 @@ class LMDBConversationStore(metaclass=Singleton):
     def prune_stale_indexes(self) -> int:
         """Drop lookup entries written under a superseded INDEX_VERSION.
 
-        Only the lookup entries go: the conversation records they pointed at are keyed by the
-        old hash and cannot be re-indexed under the new one, so they are left to expire under
-        the normal retention window.
+        Only the lookup entries go; the conversation records stay and expire under retention.
 
         A marker records that the sweep ran for this version, so later startups skip the scan.
         """
@@ -363,9 +360,8 @@ class LMDBConversationStore(metaclass=Singleton):
 
         if stale:
             logger.info(
-                f"Pruned {len(stale)} LMDB lookup entries from a superseded index version; "
-                "the conversations behind them are replayed in full once and stored again "
-                "under a current key, and the superseded records expire under retention."
+                f"Pruned {len(stale)} LMDB lookup entries from a superseded index version; a "
+                "conversation that only they matched is replayed in full once."
             )
         return len(stale)
 

@@ -139,7 +139,7 @@ Gemini 网页端提供的控制项比本服务所模拟的 API 少。合法的�
   - `strict: false`（两套 OpenAI 接口的默认值）或 JSON 模式下，回复按原样返回。
   - Gemini 原生的 `responseSchema` 和 `responseJsonSchema` 始终是尽力而为。
   - 返回工具调用的那一轮不做校验。
-- **服务无法求值的 Schema 仍会发给模型，但不会被强制执行**，也不会导致请求失败。唯一的例外是不合法的 `responseJsonSchema`，会返回 `400`。包括非法的 JSON Schema、无法翻译成 JSON Schema 的 `responseSchema`、无法解析的 `$ref`（远程引用一律不会去抓取），以及正则关键字超出 `server.schema_validation_budget_seconds` 的情况。
+- **服务无法求值的 Schema 仍会发给模型，但不会被强制执行**，也不会导致请求失败。包括非法的 JSON Schema、无法翻译成 JSON Schema 的 `responseSchema`、无法解析的 `$ref`（远程引用一律不会去抓取），以及正则关键字超出 `server.schema_validation_budget_seconds` 的情况。唯一的例外是不合法的 `responseJsonSchema`，会返回 `400`。
 - **带 Schema 的流式响应**会在校验后作为单个分块返回，因为 JSON 只有完整后才能校验。
 - **Google 的 SDK 使用默认设置即可**，文字和图片的对话（流式和非流式）以及 `responseSchema` 和函数工具都可以正常使用。字段名接受驼峰和下划线两种形式，与 Google 一致。
 
