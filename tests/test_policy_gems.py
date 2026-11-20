@@ -396,3 +396,18 @@ def test_startup_fails_when_the_cleanup_task_dies_on_its_first_step(monkeypatch)
         asyncio.run(start())
     # Without the check the same error still surfaces, but only at shutdown.
     assert not came_up
+
+
+# `enabled` was removed; on main, `enabled: false` turned gems off whatever the policy said.
+@pytest.mark.parametrize(
+    ("enabled", "policy"),
+    [
+        (False, GeminiGemPolicyMode.OFF),
+        ("false", GeminiGemPolicyMode.OFF),  # as an environment variable sets it
+        (True, GeminiGemPolicyMode.CREATE_ON_DEMAND),
+    ],
+)
+def test_a_config_that_turned_gems_off_with_enabled_keeps_them_off(enabled, policy):
+    config = GeminiGemsConfig.model_validate({"enabled": enabled, "policy": "create_on_demand"})
+
+    assert config.policy == policy

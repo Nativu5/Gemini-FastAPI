@@ -236,7 +236,7 @@ export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 
 ### 已移除的配置项
 
-`gemini.models`、`gemini.model_strategy`、`gemini.oversized_context_strategy`、`storage.images_path`，以及 `gemini.gems` 下的 `enabled`、`fetch_on_init`、`include_hidden_on_fetch`、`policies.default_policy` 和 `cleanup.require_managed_marker` 已不存在，即使出现在配置中也会被忽略。生成的媒体文件保存在 `storage.media_path` 下。
+`gemini.models`、`gemini.model_strategy`、`gemini.oversized_context_strategy`、`storage.images_path`，以及 `gemini.gems` 下的 `enabled`、`fetch_on_init`、`include_hidden_on_fetch`、`policies.default_policy` 和 `cleanup.require_managed_marker` 已不存在，即使出现在配置中也会被忽略。现在只由 `gemini.gems.policy` 决定是否使用 Gem，但仍写着 `gemini.gems.enabled: false` 的配置会保持关闭。生成的媒体文件保存在 `storage.media_path` 下。
 
 ## 维护
 

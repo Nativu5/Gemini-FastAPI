@@ -236,7 +236,7 @@ Input longer than 90% of `gemini.max_chars_per_request` (81% in `temporary` mode
 
 ### Removed settings
 
-`gemini.models`, `gemini.model_strategy`, `gemini.oversized_context_strategy`, `storage.images_path` and, under `gemini.gems`, `enabled`, `fetch_on_init`, `include_hidden_on_fetch`, `policies.default_policy` and `cleanup.require_managed_marker` no longer exist and are ignored if present. Generated media is stored under `storage.media_path`.
+`gemini.models`, `gemini.model_strategy`, `gemini.oversized_context_strategy`, `storage.images_path` and, under `gemini.gems`, `enabled`, `fetch_on_init`, `include_hidden_on_fetch`, `policies.default_policy` and `cleanup.require_managed_marker` no longer exist and are ignored if present. `gemini.gems.policy` alone now turns gems on, but a config that still says `gemini.gems.enabled: false` keeps them off. Generated media is stored under `storage.media_path`.
 
 ## Maintenance
 
