@@ -51,6 +51,7 @@ from app.models import (
     ResponseInputMessage,
     ResponseInputText,
     ResponseOutputMessage,
+    ResponseOutputRefusal,
     ResponseOutputText,
     ResponseReasoningItem,
     ResponseTextConfig,
@@ -506,34 +507,36 @@ def _tool_choice_declaration_error(
     return None
 
 
-def _validate_responses_input(items: Any) -> str | None:
-    """Describe why an input item is unusable, or None if every part can be represented.
+def _content_item(
+    part: ResponseInputText
+    | ResponseInputImage
+    | ResponseInputFile
+    | ResponseOutputText
+    | ResponseOutputRefusal,
+    drop_empty: bool,
+) -> AppContentItem | None:
+    """One part of an input item as a message part; None for a refusal, and with `drop_empty`
+    for empty text or a file whose source is empty. A tool result keeps its empty pieces.
 
-    Only content is judged here: a reference this wrapper cannot resolve, or a media part whose
-    source is missing or ambiguous. Dropping either silently would change what the model sees.
+    Raises `ValueError` for a reference this wrapper cannot resolve, or a media part whose source
+    is missing or ambiguous: dropping either silently would change what the model sees.
     """
-    if isinstance(items, str):
-        return None
-    for item in items:
-        parts = (
-            item.output if isinstance(item, FunctionCallOutput) else getattr(item, "content", None)
+    if getattr(part, "file_id", None):
+        raise ValueError("file_id inputs are not supported; use file_url or inline Base64 data")
+    if isinstance(part, ResponseInputImage):
+        if not part.image_url:
+            raise ValueError("input_image must contain image_url")
+        return AppContentItem(type="image_url", url=part.image_url)
+    if isinstance(part, ResponseInputFile):
+        if (part.file_url is None) == (part.file_data is None):
+            raise ValueError("input_file must contain exactly one of file_url or file_data")
+        if drop_empty and not (part.file_url or part.file_data):
+            return None
+        return AppContentItem(
+            type="file", url=part.file_url, file_data=part.file_data, filename=part.filename
         )
-        if not isinstance(parts, list):
-            continue
-        for part in parts:
-            if getattr(part, "file_id", None):
-                return "file_id inputs are not supported; use file_url or inline Base64 data"
-            if getattr(part, "type", None) == "input_file":
-                sources = [
-                    getattr(part, "file_url", None),
-                    getattr(part, "file_data", None),
-                ]
-                if sum(value is not None for value in sources) != 1:
-                    return "input_file must contain exactly one of file_url or file_data"
-            if getattr(part, "type", None) == "input_image" and not getattr(
-                part, "image_url", None
-            ):
-                return "input_image must contain image_url"
+    if isinstance(part, ResponseInputText | ResponseOutputText) and (part.text or not drop_empty):
+        return AppContentItem(type="text", text=part.text or "")
     return None
 
 
@@ -637,7 +640,7 @@ def _convert_responses_to_app_messages(
     """Convert Responses API input items into internal messages.
 
     Consecutive assistant items - a message, its reasoning, its function calls - are one turn of
-    the model and become one message.
+    the model and become one message. Raises `ValueError` for a part that cannot be represented.
     """
     if isinstance(items, str):
         return [AppMessage(role="user", content=items)]
@@ -645,28 +648,10 @@ def _convert_responses_to_app_messages(
     messages: list[AppMessage] = []
     for item in items:
         if isinstance(item, (ResponseInputMessage, ResponseOutputMessage)):
-            role = normalize_app_message_role(item.role)
-            if isinstance(item.content, str):
-                messages.append(AppMessage(role=role, content=item.content))
-                continue
-            converted: list[AppContentItem] = []
-            for part in item.content:
-                if isinstance(part, (ResponseInputText, ResponseOutputText)):
-                    if part.text:
-                        converted.append(AppContentItem(type="text", text=part.text))
-                elif isinstance(part, ResponseInputImage):
-                    if part.image_url:
-                        converted.append(AppContentItem(type="image_url", url=part.image_url))
-                elif isinstance(part, ResponseInputFile) and (part.file_url or part.file_data):
-                    converted.append(
-                        AppContentItem(
-                            type="file",
-                            url=part.file_url,
-                            file_data=part.file_data,
-                            filename=part.filename,
-                        )
-                    )
-            messages.append(AppMessage(role=role, content=converted or None))
+            content = item.content
+            if not isinstance(content, str):
+                content = [x for part in content if (x := _content_item(part, True))] or None
+            messages.append(AppMessage(role=normalize_app_message_role(item.role), content=content))
 
         elif isinstance(item, ResponseFunctionToolCall):
             call_id = item.call_id or item.id
@@ -688,36 +673,10 @@ def _convert_responses_to_app_messages(
                 )
             )
         elif isinstance(item, FunctionCallOutput):
-            output_content: str | list[AppContentItem] | None
-            if isinstance(item.output, list):
-                converted_output: list[AppContentItem] = []
-                for part in item.output:
-                    if isinstance(part, ResponseInputText):
-                        converted_output.append(AppContentItem(type="text", text=part.text or ""))
-                    elif isinstance(part, ResponseInputImage):
-                        if part.image_url:
-                            converted_output.append(
-                                AppContentItem(type="image_url", url=part.image_url)
-                            )
-                    else:
-                        converted_output.append(
-                            AppContentItem(
-                                type="file",
-                                url=part.file_url,
-                                file_data=part.file_data,
-                                filename=part.filename,
-                            )
-                        )
-                output_content = converted_output or None
-            else:
-                output_content = item.output
-            messages.append(
-                AppMessage(
-                    role="tool",
-                    tool_call_id=item.call_id,
-                    content=output_content,
-                )
-            )
+            output = item.output
+            if isinstance(output, list):
+                output = [x for part in output if (x := _content_item(part, False))] or None
+            messages.append(AppMessage(role="tool", tool_call_id=item.call_id, content=output))
         elif isinstance(item, ResponseReasoningItem):
             # The reasoning itself is not sent back to the model, but the item still marks a
             # turn of the model: a reply that was only reasoning is stored as an empty one.
@@ -1989,10 +1948,8 @@ async def create_response(
                 detail=f"{field} is not supported; send the earlier turns, including each "
                 "response's output items, in input instead.",
             )
-    if input_error := _validate_responses_input(request.input):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=input_error)
-    base_messages = _convert_responses_to_app_messages(request.input)
     try:
+        base_messages = _convert_responses_to_app_messages(request.input)
         structured_requirement = _build_structured_requirement(_responses_response_format(request))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
