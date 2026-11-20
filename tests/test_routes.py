@@ -842,7 +842,10 @@ def _events(response) -> list[dict]:
         (reply(**IMAGE), ["message", "image_generation_call"]),
         # Thoughts that arrive only with the final chunk, after the text has started.
         (reply("Answer.", thoughts="Hm."), ["message", "reasoning"]),
-        (reply("Answer.", thoughts="Hm, more.", thoughts_delta="Hm"), ["reasoning", "message"]),
+        (
+            reply("Answer.", thoughts="Hm, more.", thoughts_delta="Hm"),
+            ["reasoning", "message", "reasoning"],
+        ),
     ],
     ids=[
         "text",
@@ -858,8 +861,9 @@ def _events(response) -> list[dict]:
 )
 def test_a_responses_stream_can_be_reassembled_into_its_final_response(api, answer, item_types):
     """What an SDK does with the stream: follow the items as they open and close, add up the
-    text deltas, and end up with exactly the response the last event carries. Without
-    streaming, the response has the same items."""
+    text deltas, and end up with exactly the response the last event carries. As in OpenAI's
+    streams, each item is finished before the next one is added. Without streaming, the
+    response has the same kinds of items; the thoughts are one reasoning item there."""
     api.upstream.replies += [answer, answer]
     request = {"model": MODEL, "input": "Hi", "tools": [WEATHER_TOOL]}
     events = _events(api.post("/v1/responses", json={**request, "stream": True}))
@@ -878,7 +882,12 @@ def test_a_responses_stream_can_be_reassembled_into_its_final_response(api, answ
         about_item = [events.index(e) for e in events if e.get("output_index") == index]
         assert events[about_item[0]] is opened[index]  # nothing refers to an item before it opens
         assert events[about_item[-1]]["type"] == "response.output_item.done"
-    closed.sort(key=lambda e: e["output_index"])
+    lifecycle = [(e["type"], e["output_index"]) for e in events if e in opened or e in closed]
+    assert lifecycle == [
+        (f"response.output_item.{step}", index)
+        for index in range(len(item_types))
+        for step in ("added", "done")
+    ]
     assert [e["item"] for e in closed] == final["response"]["output"]
 
     streamed_text = "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta")
@@ -888,7 +897,7 @@ def test_a_responses_stream_can_be_reassembled_into_its_final_response(api, answ
     # Text before a tool call keeps its trailing space in the deltas and loses it in the final.
     assert texts == ([streamed_text.rstrip()] if "message" in item_types else [])
     assert [e["text"] for e in events if e["type"] == "response.output_text.done"] == texts
-    assert sorted(item["type"] for item in unstreamed) == sorted(item_types)
+    assert {item["type"] for item in unstreamed} == set(item_types)
 
 
 @pytest.mark.parametrize("stream", [False, True])
