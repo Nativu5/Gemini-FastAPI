@@ -372,6 +372,7 @@ def test_a_system_message_with_an_attachment_is_not_moved_into_a_gem():
     [
         (False, GeminiGemPolicyMode.OFF),
         ("false", GeminiGemPolicyMode.OFF),  # as an environment variable sets it
+        ("0", GeminiGemPolicyMode.OFF),
         (True, GeminiGemPolicyMode.CREATE_ON_DEMAND),
     ],
 )
