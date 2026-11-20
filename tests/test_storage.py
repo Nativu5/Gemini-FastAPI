@@ -23,7 +23,8 @@ MODEL = "gemini-3-pro"
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(g_config.gemini, "auto_delete_ttl", 86400)
-    opened = LMDBConversationStore.open_isolated(db_path=str(tmp_path / "lmdb"), retention_days=14)
+    monkeypatch.setattr(g_config.storage, "retention_days", 14)
+    opened = LMDBConversationStore.open_isolated(db_path=str(tmp_path / "lmdb"))
     try:
         yield opened
     finally:
@@ -38,7 +39,7 @@ def _exchange(prompt: str = "hello") -> list[AppMessage]:
 
 
 def _raw_keys(opened: LMDBConversationStore) -> list[str]:
-    with opened._get_transaction() as txn:
+    with opened._env.begin() as txn:
         return [bytes(key).decode("utf-8") for key, _ in txn.cursor()]
 
 
@@ -47,7 +48,7 @@ def _backdate(store: LMDBConversationStore, messages: list[AppMessage], **ago: t
     conv = store.find(MODEL, messages)
     assert conv is not None
     aged = conv.model_copy(update={field: getattr(conv, field) - by for field, by in ago.items()})
-    with store._get_transaction(write=True) as txn:
+    with store._env.begin(write=True) as txn:
         key = _hash_conversation(CLIENT_ID, MODEL, messages).encode()
         txn.put(key, orjson.dumps(aged.model_dump(mode="json")))
 
@@ -156,7 +157,7 @@ def test_retention_removes_a_conversation_last_touched_before_the_cutoff(store):
 def test_indexes_from_a_superseded_version_are_pruned(tmp_path):
     """A hash-shape change strands old entries that eviction can no longer find by hash."""
     db_path = tmp_path / "lmdb"
-    env = lmdb.open(str(db_path), map_size=10_000_000, max_dbs=3, writemap=True)
+    env = lmdb.open(str(db_path), map_size=10_000_000, writemap=True)
     with env.begin(write=True) as txn:
         txn.put(b"hash:v1:deadbeef", b'["conv1"]')
         txn.put(b"fuzzy:v1:deadbeef", b'["conv1"]')
@@ -294,7 +295,7 @@ def test_ephemeral_guest_conversation_is_not_staged_for_remote_deletion(store):
 
 def test_a_remote_deletion_that_keeps_failing_is_given_up(store):
     cid = "c_retry_fail"
-    with store._get_transaction(write=True) as txn:
+    with store._env.begin(write=True) as txn:
         txn.put(f"{store.PENDING_DELETE_PREFIX}{cid}".encode(), CLIENT_ID.encode())
 
     for _ in range(store.MAX_REMOTE_DELETION_ATTEMPTS - 1):

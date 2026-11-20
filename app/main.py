@@ -58,7 +58,7 @@ async def _run_retention_cleanup() -> None:
     next_gem_cleanup = 0.0
 
     if (
-        store.retention_days <= 0
+        g_config.storage.retention_days <= 0
         and g_config.gemini.chat_mode != ChatMode.AUTO_DELETE
         and not store.get_pending_deletions()
         and not store.has_auto_delete_records()
@@ -69,7 +69,7 @@ async def _run_retention_cleanup() -> None:
 
     interval = _get_cleanup_interval()
     logger.info(
-        f"Starting LMDB retention cleanup task (retention={store.retention_days} day(s), "
+        f"Starting LMDB retention cleanup task (retention={g_config.storage.retention_days} day(s), "
         f"auto_delete_ttl={g_config.gemini.auto_delete_ttl}s, interval={interval}s)."
     )
 
@@ -86,7 +86,7 @@ async def _run_retention_cleanup() -> None:
             if g_config.gemini.chat_mode == ChatMode.AUTO_DELETE:
                 cleanup_expired_media(g_config.gemini.auto_delete_ttl)
             else:
-                cleanup_expired_media(store.retention_days * 24 * 60 * 60)
+                cleanup_expired_media(g_config.storage.retention_days * 24 * 60 * 60)
         except Exception:
             logger.exception("LMDB retention cleanup task failed.")
 

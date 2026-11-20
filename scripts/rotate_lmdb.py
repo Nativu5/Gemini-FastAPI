@@ -44,9 +44,7 @@ def rotate_lmdb(path: Path, keep: str, map_size: int = DEFAULT_MAP_SIZE) -> int:
     if not (path / "data.mdb").is_file():
         raise SystemExit(f"No LMDB database at {path}")
 
-    store = LMDBConversationStore.open_isolated(
-        db_path=str(path), max_db_size=map_size, retention_days=0
-    )
+    store = LMDBConversationStore.open_isolated(db_path=str(path), max_db_size=map_size)
     try:
         if keep == "all":
             return store.clear()

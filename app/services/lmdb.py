@@ -161,7 +161,6 @@ class LMDBConversationStore(metaclass=Singleton):
         cls,
         db_path: str,
         max_db_size: int | None = None,
-        retention_days: int | None = None,
     ) -> Self:
         """Open a store outside the singleton, for maintenance commands and isolated tests.
 
@@ -170,59 +169,21 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         return cast(
             Self,
-            type.__call__(
-                cls,
-                db_path=db_path,
-                max_db_size=max_db_size,
-                retention_days=retention_days,
-            ),
+            type.__call__(cls, db_path=db_path, max_db_size=max_db_size),
         )
 
-    def __init__(
-        self,
-        db_path: str | None = None,
-        max_db_size: int | None = None,
-        retention_days: int | None = None,
-    ):
+    def __init__(self, db_path: str | None = None, max_db_size: int | None = None):
         """Open the store; an argument left as None takes its value from `g_config.storage`."""
-        if db_path is None:
-            db_path = g_config.storage.path
-        if max_db_size is None:
-            max_db_size = g_config.storage.max_size
-        if retention_days is None:
-            retention_days = g_config.storage.retention_days
-
-        self.db_path: Path = Path(db_path)
-        self.max_db_size: int = max_db_size
-        self.retention_days: int = max(0, int(retention_days))
-        self._env: Environment | None = None
-
-        self._ensure_db_path()
-        self._init_environment()
-
-    def _ensure_db_path(self) -> None:
-        """Create the parent of the database directory; LMDB creates the directory itself."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _init_environment(self) -> None:
-        try:
-            self._env = lmdb.open(
-                str(self.db_path),
-                map_size=self.max_db_size,
-                max_dbs=3,
-                writemap=True,
-                readahead=False,
-                meminit=False,
-            )
-            logger.info(f"LMDB environment initialized at {self.db_path}")
-        except Error as e:
-            logger.error(f"Failed to initialize LMDB environment: {e}")
-            raise
-
-    def _get_transaction(self, write: bool = False) -> Transaction:
-        """A transaction to use in a `with`: it commits on success and aborts on an error."""
-        assert self._env is not None, "the store has been closed"
-        return self._env.begin(write=write)
+        path = Path(db_path or g_config.storage.path)
+        path.parent.mkdir(parents=True, exist_ok=True)  # LMDB creates the directory itself
+        self._env: Environment = lmdb.open(
+            str(path),
+            map_size=max_db_size or g_config.storage.max_size,
+            writemap=True,
+            readahead=False,
+            meminit=False,
+        )
+        logger.info(f"LMDB environment initialized at {path}")
 
     def _update_index(self, txn: Transaction, fuzzy_hash: str, storage_key: str, add: bool) -> None:
         """Add a conversation to, or remove it from, those listed under its fuzzy hash."""
@@ -264,7 +225,7 @@ class LMDBConversationStore(metaclass=Singleton):
         storage_key = _hash_conversation(conv.client_id, conv.model, conv.messages)
         fuzzy_hash = _hash_conversation(conv.client_id, conv.model, conv.messages, fuzzy=True)
         value = orjson.dumps(conv.model_dump(mode="json"))
-        with self._get_transaction(write=True) as txn:
+        with self._env.begin(write=True) as txn:
             txn.put(storage_key.encode("utf-8"), value, overwrite=True)
             self._update_index(txn, fuzzy_hash, storage_key, add=True)
         logger.debug(f"Stored {len(conv.messages)} messages with key: {storage_key[:12]}")
@@ -272,7 +233,7 @@ class LMDBConversationStore(metaclass=Singleton):
     def get(self, key: str) -> ConversationInStore | None:
         """The conversation stored under this key, or None if there is none or it is unreadable."""
         try:
-            with self._get_transaction() as txn:
+            with self._env.begin() as txn:
                 data = txn.get(key.encode("utf-8"))
                 return ConversationInStore.model_validate(orjson.loads(data)) if data else None
         except Exception as e:
@@ -293,7 +254,7 @@ class LMDBConversationStore(metaclass=Singleton):
                 return conv
         for client in clients:
             fuzzy_hash = _hash_conversation(client.id, model, messages, fuzzy=True)
-            with self._get_transaction() as txn:
+            with self._env.begin() as txn:
                 listed = txn.get(f"{self.FUZZY_LOOKUP_PREFIX}{fuzzy_hash}".encode())
             for key in reversed(orjson.loads(listed) if listed else []):  # newest first
                 if conv := self.get(key):
@@ -308,12 +269,8 @@ class LMDBConversationStore(metaclass=Singleton):
         does not rediscover the same dead session and fail again.
         """
         key = _hash_conversation(conv.client_id, conv.model, conv.messages)
-        try:
-            with self._get_transaction(write=True) as txn:
-                return self._delete_conversation(txn, key, conv)
-        except Error as e:
-            logger.error(f"Failed to delete messages with key {key[:12]}: {e}")
-            return False
+        with self._env.begin(write=True) as txn:
+            return self._delete_conversation(txn, key, conv)
 
     def _delete_conversation(self, txn: Transaction, key: str, conv: ConversationInStore) -> bool:
         """Delete a conversation and its index entry; False if it was not stored."""
@@ -322,10 +279,6 @@ class LMDBConversationStore(metaclass=Singleton):
         fuzzy_hash = _hash_conversation(conv.client_id, conv.model, conv.messages, fuzzy=True)
         self._update_index(txn, fuzzy_hash, key, add=False)
         return True
-
-    def _is_index_key(self, key: str) -> bool:
-        """Whether a raw key is a lookup entry rather than a stored conversation."""
-        return key.startswith(self._INDEX_NAMESPACES)
 
     def _is_internal_key(self, key: str) -> bool:
         """Whether a raw key is bookkeeping rather than a stored conversation."""
@@ -340,7 +293,7 @@ class LMDBConversationStore(metaclass=Singleton):
         """
         version_key = self._INDEX_VERSION_KEY.encode("utf-8")
         try:
-            with self._get_transaction(write=True) as txn:
+            with self._env.begin(write=True) as txn:
                 if txn.get(version_key) == self.INDEX_VERSION.encode("utf-8"):
                     return 0
 
@@ -348,7 +301,7 @@ class LMDBConversationStore(metaclass=Singleton):
                     bytes(key)
                     for key, _ in txn.cursor()
                     if (decoded := bytes(key).decode("utf-8", "replace"))
-                    and self._is_index_key(decoded)
+                    and decoded.startswith(self._INDEX_NAMESPACES)
                     and not decoded.startswith(self.FUZZY_LOOKUP_PREFIX)
                 ]
                 for key in stale:
@@ -368,7 +321,7 @@ class LMDBConversationStore(metaclass=Singleton):
     def keys(self) -> list[str]:
         """Keys of the stored conversations; lookup and bookkeeping entries are left out."""
         try:
-            with self._get_transaction() as txn:
+            with self._env.begin() as txn:
                 return [
                     key
                     for raw_key, _ in txn.cursor()
@@ -383,7 +336,7 @@ class LMDBConversationStore(metaclass=Singleton):
         deletions: list[tuple[str, str]] = []
         prefix_bytes = self.PENDING_DELETE_PREFIX.encode()
         try:
-            with self._get_transaction() as txn:
+            with self._env.begin() as txn:
                 cursor = txn.cursor()
                 if cursor.set_range(prefix_bytes):
                     for key_bytes, val_bytes in cursor:
@@ -401,7 +354,7 @@ class LMDBConversationStore(metaclass=Singleton):
         """Acknowledge a completed remote deletion and remove its pending marker."""
         key = f"{self.PENDING_DELETE_PREFIX}{cid}".encode()
         try:
-            with self._get_transaction(write=True) as txn:
+            with self._env.begin(write=True) as txn:
                 return txn.delete(key)
         except Error as e:
             logger.error(f"Failed to remove pending deletion marker for {cid}: {e}")
@@ -411,7 +364,7 @@ class LMDBConversationStore(metaclass=Singleton):
         """Count a failed remote deletion, and give up on it at MAX_REMOTE_DELETION_ATTEMPTS."""
         key = f"{self.PENDING_DELETE_PREFIX}{cid}".encode()
         try:
-            with self._get_transaction(write=True) as txn:
+            with self._env.begin(write=True) as txn:
                 if not (val := txn.get(key)):
                     return
                 client_id, attempts = _parse_pending_val(bytes(val))
@@ -429,7 +382,7 @@ class LMDBConversationStore(metaclass=Singleton):
 
     def has_auto_delete_records(self) -> bool:
         try:
-            with self._get_transaction(write=False) as txn:
+            with self._env.begin() as txn:
                 cursor = txn.cursor()
                 for key_bytes, value_bytes in cursor:
                     key_str = bytes(key_bytes).decode("utf-8")
@@ -454,11 +407,9 @@ class LMDBConversationStore(metaclass=Singleton):
 
         Returns how many were removed, and every (client_id, cid) waiting for remote deletion.
         """
-        now = datetime.now()
+        now, days = datetime.now(), g_config.storage.retention_days
         return self.cleanup_with_remote(
-            normal_cutoff=now - timedelta(days=self.retention_days)
-            if self.retention_days
-            else None,
+            normal_cutoff=now - timedelta(days=days) if days else None,
             auto_delete_cutoff=now - timedelta(seconds=g_config.gemini.auto_delete_ttl),
         )
 
@@ -469,8 +420,8 @@ class LMDBConversationStore(metaclass=Singleton):
 
     def cleanup_with_remote(
         self,
-        normal_cutoff: datetime | None = None,
-        auto_delete_cutoff: datetime | None = None,
+        normal_cutoff: datetime | None,
+        auto_delete_cutoff: datetime | None,
     ) -> tuple[int, list[tuple[str, str]]]:
         """Delete conversations last used before the cutoff for their kind; None keeps that kind.
 
@@ -480,39 +431,23 @@ class LMDBConversationStore(metaclass=Singleton):
         expired_entries: list[tuple[str, ConversationInStore, bool]] = []
         active_cids: set[str] = set()
 
-        try:
-            with self._get_transaction(write=False) as txn:
-                cursor = txn.cursor()
-                for key_bytes, value_bytes in cursor:
-                    key_str = bytes(key_bytes).decode("utf-8")
-                    if self._is_internal_key(key_str):
-                        continue
-
-                    try:
-                        storage_data = orjson.loads(value_bytes)
-                        ts_raw = storage_data.get("updated_at") or storage_data.get("created_at")
-                        if not ts_raw:
-                            continue  # nothing to age it by
-                        timestamp = datetime.fromisoformat(ts_raw)
-
-                        is_auto_delete = storage_data.get("chat_mode") == ChatMode.AUTO_DELETE
-                        cutoff = auto_delete_cutoff if is_auto_delete else normal_cutoff
-
-                        raw_meta = storage_data.get("metadata")
-                        cid = raw_meta[0] if raw_meta and isinstance(raw_meta, list) else None
-
-                        if cutoff is not None and timestamp < cutoff:
-                            conv = ConversationInStore.model_validate(storage_data)
-                            expired_entries.append((key_str, conv, is_auto_delete))
-                        else:
-                            if cid:
-                                active_cids.add(cid)
-                    except (orjson.JSONDecodeError, Exception) as exc:
-                        logger.warning(f"Failed to decode record for key {key_str}: {exc}")
-                        continue
-        except Error as exc:
-            logger.error(f"Failed to scan LMDB for retention cleanup: {exc}")
-            raise
+        with self._env.begin() as txn:
+            for key_bytes, value_bytes in txn.cursor():
+                key_str = bytes(key_bytes).decode("utf-8")
+                if self._is_internal_key(key_str):
+                    continue
+                try:
+                    storage_data = orjson.loads(value_bytes)
+                    timestamp = datetime.fromisoformat(storage_data["updated_at"])
+                    is_auto_delete = storage_data.get("chat_mode") == ChatMode.AUTO_DELETE
+                    cutoff = auto_delete_cutoff if is_auto_delete else normal_cutoff
+                    if cutoff is not None and timestamp < cutoff:
+                        conv = ConversationInStore.model_validate(storage_data)
+                        expired_entries.append((key_str, conv, is_auto_delete))
+                    elif cid := cid_of(storage_data.get("metadata")):
+                        active_cids.add(cid)
+                except Exception as exc:
+                    logger.warning(f"Failed to decode record for key {key_str}: {exc}")
 
         if not expired_entries:
             return 0, self.get_pending_deletions()
@@ -527,19 +462,11 @@ class LMDBConversationStore(metaclass=Singleton):
                     remote_to_stage.append((conv.client_id, cid))
 
         removed = 0
-        try:
-            with self._get_transaction(write=True) as txn:
-                for key_str, conv, _ in expired_entries:
-                    removed += self._delete_conversation(txn, key_str, conv)
-
-                for client_id, cid in remote_to_stage:
-                    txn.put(
-                        f"{self.PENDING_DELETE_PREFIX}{cid}".encode(),
-                        client_id.encode(),
-                    )
-        except Error as exc:
-            logger.error(f"Failed to delete expired conversations: {exc}")
-            raise
+        with self._env.begin(write=True) as txn:
+            for key_str, conv, _ in expired_entries:
+                removed += self._delete_conversation(txn, key_str, conv)
+            for client_id, cid in remote_to_stage:
+                txn.put(f"{self.PENDING_DELETE_PREFIX}{cid}".encode(), client_id.encode())
 
         remote_deletions = self.get_pending_deletions()
         if removed or remote_deletions:
@@ -552,22 +479,14 @@ class LMDBConversationStore(metaclass=Singleton):
 
     def clear(self) -> int:
         """Delete every conversation and index entry from the store."""
-        removed = len(self.keys())
-        try:
-            with self._get_transaction(write=True) as txn:
-                keys = [bytes(key) for key, _ in txn.cursor()]
-                for key in keys:
-                    txn.delete(key)
-        except Error as exc:
-            logger.error(f"Failed to clear LMDB: {exc}")
-            raise
-        return removed
+        with self._env.begin(write=True) as txn:
+            keys = [bytes(key) for key, _ in txn.cursor()]
+            for key in keys:
+                txn.delete(key)
+        return sum(not self._is_internal_key(key.decode("utf-8")) for key in keys)
 
     def stats(self) -> Mapping[str, Any]:
         """LMDB's statistics for the environment; {} when they cannot be read."""
-        if not self._env:
-            logger.error("LMDB environment not initialized")
-            return {}
         try:
             return self._env.stat()
         except Error as e:
@@ -575,10 +494,4 @@ class LMDBConversationStore(metaclass=Singleton):
             return {}
 
     def close(self) -> None:
-        if self._env:
-            self._env.close()
-            self._env = None
-            logger.info("LMDB environment closed")
-
-    def __del__(self):
-        self.close()
+        self._env.close()
