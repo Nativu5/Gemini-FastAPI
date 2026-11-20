@@ -101,22 +101,11 @@ async def _run_retention_cleanup() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     pool = GeminiClientPool()
-    try:
-        await pool.init()
-        available_models(pool)  # listed now, so `created` is the startup time
-    except Exception as e:
-        logger.exception(f"Failed to initialize Gemini clients: {e}")
-        raise
-
-    try:
-        LMDBConversationStore().prune_stale_indexes()
-    except Exception:
-        logger.exception("Failed to prune stale LMDB indexes; continuing with startup.")
-
+    await pool.init()
+    available_models(pool)  # listed now, so `created` is the startup time
+    # Opens the store, so a store that cannot be opened stops the startup here.
+    LMDBConversationStore().prune_stale_indexes()
     cleanup_task = asyncio.create_task(_run_retention_cleanup())
-    await asyncio.sleep(0)  # let it take its first step, so that a failure there stops the startup
-    if cleanup_task.done():
-        cleanup_task.result()
 
     if (gem_policy := g_config.gemini.gems.policy) != GeminiGemPolicyMode.OFF:
         logger.warning(
