@@ -366,6 +366,37 @@ def test_a_system_message_with_an_attachment_is_not_moved_into_a_gem():
     assert rest == messages
 
 
+def test_the_pool_is_closed_at_shutdown_even_after_the_cleanup_task_failed(monkeypatch):
+    closed = []
+
+    class _Pool:
+        clients: list[Any] = []  # noqa: RUF012
+
+        async def init(self) -> None:
+            pass
+
+        async def close(self) -> None:
+            closed.append(True)
+
+    async def broken() -> None:
+        raise RuntimeError("store is unusable")
+
+    monkeypatch.setattr(main_module, "GeminiClientPool", _Pool)
+    monkeypatch.setattr(
+        main_module, "LMDBConversationStore", lambda: SimpleNamespace(prune_stale_indexes=lambda: 0)
+    )
+    monkeypatch.setattr(main_module, "available_models", lambda pool: [])
+    monkeypatch.setattr(main_module, "_run_retention_cleanup", broken)
+
+    async def serve_and_stop() -> None:
+        async with main_module.lifespan(cast(Any, None)):
+            await asyncio.sleep(0)  # the cleanup task fails here
+
+    asyncio.run(serve_and_stop())
+
+    assert closed
+
+
 # `enabled` was removed; on main, `enabled: false` turned gems off whatever the policy said.
 @pytest.mark.parametrize(
     ("enabled", "policy"),

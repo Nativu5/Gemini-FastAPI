@@ -125,8 +125,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         cleanup_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await cleanup_task
+        # Also collects a failure that ended the task early, which would skip the rest.
+        await asyncio.gather(cleanup_task, return_exceptions=True)
 
         try:
             await pool.close()
