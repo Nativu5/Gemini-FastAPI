@@ -77,6 +77,8 @@ class _Session:
     async def send_message_stream(self, text: str, **kwargs: Any):
         turn = self._begin(text, kwargs)
         for chunk in turn:
+            if isinstance(chunk, Exception):
+                raise chunk
             yield chunk
             await asyncio.sleep(0)  # as a network read would: lets background downloads start
         self.metadata = turn[-1].metadata
@@ -113,7 +115,7 @@ def api(tmp_path, monkeypatch) -> Iterator[SimpleNamespace]:
     """The real app with Gemini replaced by a script.
 
     `api.upstream.replies` queues what Gemini answers (a `reply(...)` or an exception to raise;
-    "ok" once the queue is empty), `api.upstream.sent` records what it was asked,
+    "ok" once the queue is empty; an exception after the chunks of a reply fails its stream there), `api.upstream.sent` records what it was asked,
     `api.upstream.downloaded` the urls of the generated files that were fetched, and
     `api.post(path, json=...)` sends a request. Conversations go to a store under `tmp_path`.
     """

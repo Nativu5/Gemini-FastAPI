@@ -11,7 +11,7 @@ from gemini_webapi.exceptions import ModelInvalidError
 from gemini_webapi.types import GeneratedVideo, WebImage
 
 from app.models.models import ModelData
-from app.server import chat, gemini
+from app.server import chat, gemini, middleware
 from app.utils import g_config
 from app.utils.config import GeminiGemPolicyMode
 
@@ -58,10 +58,9 @@ def _responses_output(response, stream: bool) -> list[dict]:
     assert response.status_code == 200, response.text
     if not stream:
         return response.json()["output"]
-    events = [
-        json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")
+    return next(e for e in _sse(response) if e["type"] == "response.completed")["response"][
+        "output"
     ]
-    return next(e for e in events if e["type"] == "response.completed")["response"]["output"]
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -257,7 +256,6 @@ def test_chat_completions_continues_the_chat_when_the_reply_comes_back_as_text_p
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_gemini_native_continues_the_chat_after_a_function_response(api, stream):
-    """The native API has no call ids, so none may be invented that differ between requests."""
     tools = [{"functionDeclarations": [{k: v for k, v in WEATHER_TOOL.items() if k != "type"}]}]
     history = [{"role": "user", "parts": [{"text": "First question"}]}]
     api.upstream.replies += [reply("Let me check. ", TOOL_CALL), reply("Sunny.")]
@@ -393,17 +391,33 @@ def test_responses_stream_delivers_a_reply_that_was_held_back_until_the_end(api)
     ]
 
 
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "native"])
 @pytest.mark.parametrize("stream", [False, True])
-def test_gemini_native_normalises_tool_arguments_whether_streamed_or_not(api, stream):
+def test_tool_arguments_are_normalised_whether_streamed_or_not(api, path, stream):
     """Gemini's text is brought to NFC before tool calls are read from it; here, e + accent."""
     api.upstream.replies.append(reply(TOOL_CALL.replace("Hanoi", "Cafe\u0301")))
-    tools = [{"functionDeclarations": [{k: v for k, v in WEATHER_TOOL.items() if k != "type"}]}]
+    if path == "native":
+        tools = [{"functionDeclarations": [{k: v for k, v in WEATHER_TOOL.items() if k != "type"}]}]
+        parts = _native(api, stream, contents=USER_TURN, tools=tools)
+        arguments = [part["functionCall"]["args"] for part in parts if "functionCall" in part]
+    elif "chat" in path:
+        tools = [
+            {"type": "function", "function": {k: v for k, v in WEATHER_TOOL.items() if k != "type"}}
+        ]
+        response = api.post(path, json={**CHAT, "stream": stream, "tools": tools})
+        messages = (
+            [e["choices"][0]["delta"] for e in _sse(response) if e["choices"]]
+            if stream
+            else [response.json()["choices"][0]["message"]]
+        )
+        calls = [call for m in messages for call in m.get("tool_calls") or []]
+        arguments = [json.loads(call["function"]["arguments"]) for call in calls]
+    else:
+        body = {"model": MODEL, "input": "Hi", "tools": [WEATHER_TOOL], "stream": stream}
+        output = _responses_output(api.post(path, json=body), stream)
+        arguments = [json.loads(i["arguments"]) for i in output if i["type"] == "function_call"]
 
-    parts = _native(api, stream, contents=USER_TURN, tools=tools)
-
-    assert [part["functionCall"]["args"] for part in parts if "functionCall" in part] == [
-        {"city": "Caf\u00e9"}
-    ]
+    assert arguments == [{"city": "Caf\u00e9"}]
 
 
 def _streamed(api, path: str, **body) -> tuple[str, str]:
@@ -922,13 +936,14 @@ def test_gemini_native_ends_a_reply_with_a_finish_reason_and_its_usage(api, stre
 def test_a_chat_completions_stream_ends_with_its_usage_beside_the_choices(api):
     """Where OpenAI's SDKs read it: `ChatCompletionChunk.usage`, not inside a choice."""
     api.upstream.replies.append(reply("Hello there, how can I help?"))
-    chunks = _sse(
-        api.post(
-            "/v1/chat/completions",
-            json={"model": MODEL, "stream": True, "messages": [{"role": "user", "content": "Hi"}]},
-        )
+    response = api.post(
+        "/v1/chat/completions",
+        json={"model": MODEL, "stream": True, "messages": [{"role": "user", "content": "Hi"}]},
     )
+    chunks = _sse(response)
 
+    assert chunks[0]["choices"][0]["delta"] == {"role": "assistant", "content": ""}
+    assert response.text.endswith("data: [DONE]\n\n")
     assert chunks[-1]["choices"] == [{"index": 0, "delta": {}, "finish_reason": "stop"}]
     assert chunks[-1]["usage"]["completion_tokens"] > 0
 
@@ -966,3 +981,117 @@ def test_a_developer_message_is_a_system_message(api, path):
     as_system, as_developer = api.upstream.sent
     assert "Be brief" in as_system.text
     assert as_developer.text == as_system.text
+
+
+CHAT_TOOL = {"type": "function", "function": {k: v for k, v in WEATHER_TOOL.items() if k != "type"}}
+
+
+def test_a_chat_completions_stream_reports_a_tool_call_and_finishes_with_it(api):
+    api.upstream.replies.append(reply("Let me check. ", TOOL_CALL))
+    response = api.post("/v1/chat/completions", json={**CHAT, "stream": True, "tools": [CHAT_TOOL]})
+
+    chunks = _sse(response)
+    calls = [
+        c for e in chunks if e["choices"] for c in e["choices"][0]["delta"].get("tool_calls", [])
+    ]
+    assert [call["function"]["name"] for call in calls] == ["get_weather"]
+    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    assert "[ToolCalls]" not in response.text
+
+
+def test_a_chat_completions_stream_that_breaks_its_schema_ends_with_an_error(api):
+    api.upstream.replies.append(reply('{"wrong": ', "true}"))
+    schema = {"name": "r", "schema": SCHEMA, "strict": True}
+    body = {
+        **CHAT,
+        "stream": True,
+        "response_format": {"type": "json_schema", "json_schema": schema},
+    }
+
+    response = api.post("/v1/chat/completions", json=body)
+
+    assert response.text.endswith("data: [DONE]\n\n")
+    *before, last = _sse(response)
+    assert last["error"]["code"] == "schema_validation_failed"
+    # Structured output is withheld until validated, so none of the bad reply was sent first.
+    assert [e["choices"][0]["delta"].get("content") for e in before] == [""]
+    assert api.store.keys() == []  # nor stored, for a later request to continue
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("extra", [{}, IMAGE], ids=["prose", "prose-and-an-image"])
+def test_a_chat_completion_without_the_forced_tool_call_is_an_error(api, extra, stream):
+    """Chat Completions has no image tool, so an image cannot stand in for the call either."""
+    api.upstream.replies.append(reply("Just prose.", **extra))
+    body = {**CHAT, "stream": stream, "tools": [CHAT_TOOL], "tool_choice": "required"}
+
+    response = api.post("/v1/chat/completions", json=body)
+
+    if not stream:
+        assert response.status_code == 502, response.text
+        return
+    assert response.text.endswith("data: [DONE]\n\n")
+    error = _sse(response)[-1]["error"]
+    assert (error["param"], error["code"]) == ("tool_choice", "required_tool_missing")
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "native"])
+def test_a_stream_that_gemini_breaks_off_ends_with_an_error(api, path):
+    api.upstream.replies.append([*reply("Partial"), RuntimeError("upstream went away")])
+    if path == "native":
+        url, body = f"/v1beta/models/{MODEL}:streamGenerateContent", {"contents": USER_TURN}
+    else:
+        prompt = {"messages": CHAT["messages"]} if "chat" in path else {"input": "Hi"}
+        url, body = path, {"model": MODEL, "stream": True, **prompt}
+
+    response = api.post(url, json=body)
+
+    assert "error" in _sse(response)[-1]
+    if "chat" in path:
+        assert response.text.endswith("data: [DONE]\n\n")
+
+
+def test_a_streamed_structured_reply_is_continued_by_replaying_what_the_client_received(api):
+    """Streamed structured output is sent as the validated document, which is what is stored."""
+    api.upstream.replies.append(reply("```json\n", '{"a": "x"}', "\n```"))
+    schema = {"type": "json_schema", "json_schema": {"name": "r", "schema": SCHEMA}}
+    request = {**CHAT, "stream": True, "response_format": schema}
+    received = _reply_text(api.post("/v1/chat/completions", json=request), True)
+    again = [
+        {"role": "assistant", "content": received},
+        {"role": "user", "content": "Second question"},
+    ]
+
+    api.post("/v1/chat/completions", json={**request, "messages": [*CHAT["messages"], *again]})
+
+    assert _continued(api)
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses"])
+def test_a_second_copy_of_a_generated_video_is_linked_once_and_deleted(api, path):
+    videos = [GeneratedVideo(url=f"http://vid/1#{n}", title="Clip") for n in (1, 2)]
+    api.upstream.replies.append(reply("Watch.", generated_videos=videos))
+    prompt = {"messages": CHAT["messages"]} if "chat" in path else {"input": "Film"}
+
+    text = _reply_text(api.post(path, json={"model": MODEL, **prompt}), False)
+
+    assert text.count("[Clip](") == 1
+    assert len(list(middleware.MEDIA_STORE_DIR.iterdir())) == 1
+
+
+@pytest.mark.parametrize(
+    ("requested", "schema", "applied"),
+    [
+        (True, SCHEMA, True),
+        (False, SCHEMA, False),
+        (None, SCHEMA, False),
+        (True, {"type": "not-a-type"}, False),  # asked for, but not a schema we can enforce
+    ],
+)
+def test_responses_echoes_the_strict_it_enforced(api, requested, schema, applied):
+    api.upstream.replies.append(reply('{"a": "x"}'))
+    json_schema = {"name": "r", "schema": schema, "strict": requested}
+    response_format = {"type": "json_schema", "json_schema": json_schema}
+    body = {"model": MODEL, "input": "Hi", "response_format": response_format}
+
+    assert api.post("/v1/responses", json=body).json()["text"]["format"]["strict"] is applied

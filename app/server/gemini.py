@@ -154,9 +154,8 @@ def _gemini_contents_to_messages(
             if part.functionCall:
                 tool_calls.append(
                     AppToolCall(
-                        # The native API pairs a call and its response by function name. An id
-                        # invented here must not vary between requests, or the same history
-                        # would stop matching the chat stored for it.
+                        # The native API pairs a call and its response by function name; the
+                        # id only has to be unique within this request.
                         id=f"call_{len(tool_calls)}",
                         function=AppToolCallFunction(
                             name=part.functionCall.name,
