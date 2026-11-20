@@ -849,8 +849,8 @@ async def _send_request(
     a rejected chat, so the retry happens before any response is committed to the client. The
     cost is that response headers wait for Google's first chunk.
 
-    Raises `HTTPException`: 400 when there is nothing new to send, 503 when no client could take
-    the request, 502 when Gemini fails.
+    Raises `HTTPException`: 400 when there is nothing new to send or an attachment is refused, 503
+    when no client could take the request, 502 when Gemini fails.
     """
     pool = GeminiClientPool()
     system_prompt, without_system = _extract_leading_system_prompt(history)
@@ -867,7 +867,6 @@ async def _send_request(
         if gem_id := await _resolve_system_prompt_gem(client, system_prompt):
             session.gem = gem_id
         to_send = _prepare_messages_for_model(remain, tools, tool_choice, instructions, False)
-        m_input, files = await process_conversation(to_send, tmp_dir)
         logger.debug(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(to_send)} prepared messages."
         )
@@ -883,12 +882,18 @@ async def _send_request(
                 else prepared
             )
             session = client.start_chat(model=client.usable_model(resolved_model), gem=gem_id)
-            m_input, files = await process_conversation(to_send, tmp_dir)
         except Exception as e:
             logger.error(f"Error in preparing conversation: {e}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
             ) from e
+    try:
+        m_input, files = await process_conversation(to_send, tmp_dir)
+    except ValueError as e:  # an attachment that is refused, or whose data is not valid
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except Exception as e:
+        logger.error(f"Error in preparing conversation: {e}")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)) from e
 
     try:
         logger.debug(
