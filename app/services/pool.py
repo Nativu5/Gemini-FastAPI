@@ -98,7 +98,7 @@ class GeminiClientPool(metaclass=Singleton):
         """Make sure the client is running, attempting a restart if needed."""
         if client.running():
             return True
-        # The library's `init` holds a lock and returns at once once another call started it.
+        # The library's `init` holds a lock, and returns early when the client is already running.
         if await self._start(client):
             logger.info(f"Restarted Gemini client {client.id} after it stopped.")
             return True

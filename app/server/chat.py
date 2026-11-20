@@ -222,7 +222,7 @@ def _create_responses_standard_payload(
     """The completed response object: the JSON body, or a stream's `response.completed` event.
 
     Its items are the reasoning, the message (None for no message), the images and the function
-    calls, in the order a stream adds them.
+    calls; a stream that opened its message before its reasoning puts them in that order.
     """
     message_id = message_id or f"msg_{uuid.uuid4().hex[:24]}"
     reason_id = reason_id or f"rs_{uuid.uuid4().hex[:24]}"
@@ -1868,7 +1868,7 @@ def _create_responses_real_streaming_response(
                 thought_item_id,
             )
             if message_open:
-                # Thoughts that only the final chunk carries open their item after the message.
+                # Thoughts that first arrive after the text open their item after the message.
                 payload.output[:next_output_index] = sorted(
                     payload.output[:next_output_index],
                     key=lambda item: thought_index if item.type == "reasoning" else message_index,

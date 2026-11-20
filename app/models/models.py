@@ -324,9 +324,6 @@ class ResponseOutputRefusal(BaseModel):
     refusal: str | None = Field(default=None)
 
 
-ResponseOutputContent = ResponseOutputText | ResponseOutputRefusal
-
-
 class ResponseOutputMessage(BaseModel):
     """Assistant message output item in a Responses API response."""
 
