@@ -924,7 +924,7 @@ def _requires_upload(messages: list[AppMessage]) -> bool:
 
     Attachments do; so does input long enough to be sent as `message.txt`. The length is measured
     before the prompt is assembled, so it slightly underestimates and only steers client choice -
-    `_send_with_split` makes the real call.
+    `_send` makes the real call.
     """
     total = 0
     for message in messages:
@@ -939,10 +939,25 @@ def _requires_upload(messages: list[AppMessage]) -> bool:
     return total > _max_chars_per_request()
 
 
-async def _send_with_split(
+async def _restream(
+    first: ModelOutput, rest: AsyncGenerator[ModelOutput]
+) -> AsyncGenerator[ModelOutput]:
+    """Re-emit an already-consumed first chunk, then delegate to the remainder."""
+    yield first
+    async for chunk in rest:
+        yield chunk
+
+
+async def _send(
     session: ChatSession, text: str, files: list[Any], stream: bool
 ) -> AsyncGenerator[ModelOutput] | ModelOutput:
-    """Send text to Gemini, as an attachment when it is too long for a prompt."""
+    """Send to Gemini, as an attachment when the text is too long for a prompt, pulling the first
+    streamed chunk so that start-of-stream errors surface here.
+
+    `send_message_stream` is an async generator function: calling it runs none of its body, so
+    without that the request would not reach Google until the caller iterates - by which point
+    the HTTP response has already been committed and a failure can no longer be recovered.
+    """
     limit = _max_chars_per_request()
     if len(text) > limit:
         if cast(GeminiClientWrapper, session.geminiclient).is_guest():
@@ -968,42 +983,14 @@ async def _send_with_split(
         )
 
     send = session.send_message_stream if stream else session.send_message
-    result = send(
+    generator = send(
         text,
         files=files,
         temporary=_use_temporary_chat_mode(),
         extended_thinking=g_config.gemini.extended_thinking,
     )
-    return result if isinstance(result, AsyncGenerator) else await result
-
-
-async def _restream(
-    first: ModelOutput, rest: AsyncGenerator[ModelOutput]
-) -> AsyncGenerator[ModelOutput]:
-    """Re-emit an already-consumed first chunk, then delegate to the remainder."""
-    yield first
-    async for chunk in rest:
-        yield chunk
-
-
-async def _send_and_await_first_chunk(
-    session: ChatSession,
-    text: str,
-    *,
-    files: list[Any],
-    stream: bool,
-) -> AsyncGenerator[ModelOutput] | ModelOutput:
-    """Send to Gemini, pulling the first streamed chunk so start-of-stream errors surface here.
-
-    `send_message_stream` is an async generator function: calling it runs none of its body, so
-    without this the request would not reach Google until the caller iterates - by which point
-    the HTTP response has already been committed and a failure can no longer be recovered.
-    """
-    output = await _send_with_split(session, text, files, stream)
-    if isinstance(output, ModelOutput):
-        return output
-
-    generator = output
+    if not isinstance(generator, AsyncGenerator):
+        return await generator
     try:
         first = await anext(generator)
     except StopAsyncIteration:
@@ -1086,7 +1073,7 @@ async def _send_request(
             f"Client ID: {client.id}, Input length: {len(m_input)}, files count: {len(files)}"
         )
         try:
-            output = await _send_and_await_first_chunk(session, m_input, files=files, stream=stream)
+            output = await _send(session, m_input, files, stream)
         except ModelInvalidError:
             if stored_conv is None:
                 raise
@@ -1105,9 +1092,7 @@ async def _send_request(
                 require_account=bool(files) or len(m_input) > _max_chars_per_request()
             )
             session = client.start_chat(model=client.usable_model(resolved_model))
-            output = await _send_and_await_first_chunk(
-                session, m_input, files=list(files), stream=stream
-            )
+            output = await _send(session, m_input, list(files), stream)
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
