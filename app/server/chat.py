@@ -540,7 +540,7 @@ def _prepare_messages_for_model(
     if instructions:
         combined_instructions = "\n\n".join(instructions)
         if prepared and prepared[0].role == "system" and isinstance(prepared[0].content, str):
-            existing = prepared[0].content or ""
+            existing = prepared[0].content
             if combined_instructions not in existing:
                 separator = "\n\n" if existing else ""
                 prepared[0].content = f"{existing}{separator}{combined_instructions}"
@@ -558,9 +558,6 @@ def _extract_leading_system_prompt(
     messages: list[AppMessage],
 ) -> tuple[str | None, list[AppMessage]]:
     """Extract and remove leading text-only system messages, returning joined system text."""
-    if not messages:
-        return None, messages
-
     idx = 0
     system_parts: list[str] = []
     while idx < len(messages) and messages[idx].role == "system":

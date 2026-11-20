@@ -386,8 +386,6 @@ class ResponseFormatJSONObject(BaseModel):
 class ResponseFormatTextJSONSchemaConfig(BaseModel):
     """JSON-schema-constrained output format."""
 
-    model_config = {"protected_namespaces": (), "arbitrary_types_allowed": True}
-
     type: Literal["json_schema"] = Field(default="json_schema")
     name: str | None = Field(default=None)
     schema_: dict[str, Any] | None = Field(

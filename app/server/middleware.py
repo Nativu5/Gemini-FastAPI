@@ -106,9 +106,7 @@ def get_media_token(filename: str) -> str:
     if not secret:
         return ""
 
-    msg = filename.encode("utf-8")
-    secret_bytes = secret.encode("utf-8")
-    return hmac.new(secret_bytes, msg, hashlib.sha256).hexdigest()
+    return hmac.new(secret.encode(), filename.encode(), hashlib.sha256).hexdigest()
 
 
 def verify_media_token(filename: str, token: str | None) -> bool:
@@ -198,11 +196,8 @@ def add_exception_handlers(app: FastAPI) -> None:
 
 
 def get_temp_dir():
-    temp_dir = tempfile.TemporaryDirectory()
-    try:
-        yield Path(temp_dir.name)
-    finally:
-        temp_dir.cleanup()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        yield Path(temp_dir)
 
 
 def _check_api_key(api_key: str | None) -> None:
