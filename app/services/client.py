@@ -24,11 +24,7 @@ from app.utils.helper import (
     save_url_to_tempfile,
 )
 
-from .policy_gems import (
-    delete_unused_gems,
-    extract_managed_last_used_at,
-    touch_managed_description,
-)
+from .policy_gems import extract_managed_last_used_at, touch_managed_description
 
 # gemini-webapi 2.1.1 removes the link Google leaves where generated media goes only up to its
 # first number, so ".../image_generation_content/0_974" left "_974" in the reply. This pattern
@@ -83,27 +79,43 @@ class GeminiClientWrapper(GeminiClient):
         return self._running
 
     async def delete_unused_gems(self) -> None:
-        """Delete the managed gems that went unused for longer than the configured retention.
+        """Delete the managed gems last used more than `cleanup.unused_days` ago.
+
+        Only a gem that carries this server's last-use record is ever deleted: one a person made
+        under the same name prefix has none, and is left alone.
 
         Never call this from `init()`: when Google rejects a gem request the library restarts
         the client inside the call that holds `_gem_lock`, and `init()` would wait for it forever.
         """
-        gem_cfg = g_config.gemini.gems
-        if (
-            gem_cfg.policy == GeminiGemPolicyMode.OFF
-            or not gem_cfg.cleanup.enabled
-            or self.is_guest()
-        ):
+        if self.is_guest():
             return
-
+        gem_cfg = g_config.gemini.gems
+        cutoff_ts = int(time.time() - gem_cfg.cleanup.unused_days * 24 * 60 * 60)
+        deleted: list[str] = []
+        would_delete = 0
         async with self._gem_lock:
-            deleted = await delete_unused_gems(
-                self,
-                prefix=gem_cfg.policies.prefix,
-                unused_days=gem_cfg.cleanup.unused_days,
-                dry_run=gem_cfg.cleanup.dry_run,
-                max_deletes=gem_cfg.cleanup.max_deletes_per_run,
-            )
+            # Hidden predefined gems keep the list from ever being empty, which gemini-webapi
+            # treats as a broken response: it raises and closes the client.
+            for gem in await self.fetch_gems(include_hidden=True):
+                last_used_at = extract_managed_last_used_at(gem.description)
+                if (
+                    gem.predefined
+                    or not gem.name.startswith(gem_cfg.policies.prefix)
+                    or last_used_at is None
+                    or last_used_at >= cutoff_ts
+                    or len(deleted) >= gem_cfg.cleanup.max_deletes_per_run
+                ):
+                    continue
+                if gem_cfg.cleanup.dry_run:
+                    would_delete += 1
+                    continue
+                try:
+                    await self.delete_gem(gem)
+                    deleted.append(gem.id)
+                except Exception as exc:
+                    # Still stale, so the next cleanup tries again.
+                    logger.warning(f"Failed to delete unused managed gem {gem.name!r}: {exc}")
+        logger.info(f"Managed gem cleanup: deleted={len(deleted)}, dry_run={would_delete}")
         self._system_prompt_gems = {
             key: gem for key, gem in self._system_prompt_gems.items() if gem.id not in deleted
         }
@@ -114,22 +126,21 @@ class GeminiClientWrapper(GeminiClient):
         None when gems are off, the session is a guest, no gem exists and the policy forbids
         creating one, or a creation limit is reached.
         """
-        prompt = (system_prompt or "").strip()
-        if not prompt or self.is_guest() or g_config.gemini.gems.policy == GeminiGemPolicyMode.OFF:
+        if self.is_guest() or g_config.gemini.gems.policy == GeminiGemPolicyMode.OFF:
             return None
 
-        prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
         gem = self._system_prompt_gems.get(prompt_hash)
         if gem is None:
             async with self._gem_lock:
                 # Looked up again: another request may have created it while this one waited.
                 gem = self._system_prompt_gems.get(prompt_hash) or await self._find_or_create_gem(
-                    prompt, prompt_hash
+                    system_prompt, prompt_hash
                 )
                 if gem is None:
                     return None
                 self._system_prompt_gems[prompt_hash] = gem
-        await self._record_gem_use(gem, prompt)
+        await self._record_gem_use(gem, system_prompt)
         return gem.id
 
     async def _find_or_create_gem(self, prompt: str, prompt_hash: str) -> Gem | None:
