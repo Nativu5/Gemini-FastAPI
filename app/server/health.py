@@ -29,12 +29,10 @@ async def health_check(response: Response):
 
     guest_mode = g_config.gemini.guest_mode
     if guest_mode == GuestMode.STRICT:
-        any_client_unhealthy = not all(client_status.values())
-        clients_unavailable = any_client_unhealthy
+        clients_unavailable = not all(client_status.values())
         client_error = "One or more Gemini clients are unhealthy"
     else:
-        all_clients_unhealthy = not any(client_status.values())
-        clients_unavailable = guest_mode == GuestMode.ADAPTIVE and all_clients_unhealthy
+        clients_unavailable = guest_mode == GuestMode.ADAPTIVE and not any(client_status.values())
         client_error = "No usable Gemini client is available"
 
     if clients_unavailable:
