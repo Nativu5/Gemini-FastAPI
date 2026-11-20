@@ -18,7 +18,6 @@ from app import main as main_module
 from app.models import AppContentItem, AppMessage
 from app.server import chat
 from app.services import client as client_module
-from app.services import policy_gems as policy_gems_module
 from app.services.client import GeminiClientWrapper
 from app.services.policy_gems import (
     extract_managed_last_used_at,
@@ -104,7 +103,6 @@ def account(monkeypatch):
         monkeypatch.setattr(wrapper, name, fake)
     clock = SimpleNamespace(time=lambda: state.now, monotonic=lambda: state.now)
     monkeypatch.setattr(client_module, "time", clock)
-    monkeypatch.setattr(policy_gems_module, "time", clock)
     return state
 
 
