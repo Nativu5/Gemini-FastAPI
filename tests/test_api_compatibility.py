@@ -450,7 +450,7 @@ def test_the_echoed_strict_reports_what_was_enforced(requested, schema, applied)
     assert requirement.strict is applied
 
     payload = _create_responses_standard_payload(
-        "resp_1", 0, "m", None, [], [], _EMPTY_USAGE, request, requirement
+        "resp_1", 0, "m", None, [], None, _EMPTY_USAGE, request, requirement
     )
     text_format = payload.text.format if payload.text else None
     assert isinstance(text_format, ResponseFormatTextJSONSchemaConfig)
@@ -972,16 +972,13 @@ def test_generated_media_is_linked_once_and_a_second_copy_is_deleted(tmp_path, m
     first = {"video": ("v1.mp4", "hash-v"), "video_thumbnail": ("v1.jpg", "hash-t")}
     copy = {"video": ("copy.mp4", "hash-v"), "video_thumbnail": ("copy.jpg", "hash-t")}
 
-    class Clip:
-        title = "Clip"
-
     link = "[![Clip](http://h/media/v1.jpg?token=t-v1.jpg)](http://h/media/v1.mp4?token=t-v1.mp4)"
-    assert _media_markdown(Clip(), first, seen, "http://h/") == link
-    assert _media_markdown(Clip(), copy, seen, "http://h/") == ""
+    assert _media_markdown("Clip", first, seen, "http://h/") == link
+    assert _media_markdown("Clip", copy, seen, "http://h/") == ""
     assert sorted(f.name for f in tmp_path.iterdir()) == ["v1.jpg", "v1.mp4"]
     # Audio without a thumbnail is a plain link; an item that produced no file yields nothing.
     audio = {"audio": ("a.mp3", "hash-a")}
-    assert _media_markdown(Clip(), audio, seen, "http://h/") == (
+    assert _media_markdown("Clip", audio, seen, "http://h/") == (
         "[Clip - Audio](http://h/media/a.mp3?token=t-a.mp3)"
     )
-    assert _media_markdown(Clip(), {}, seen, "http://h/") == ""
+    assert _media_markdown("Clip", {}, seen, "http://h/") == ""

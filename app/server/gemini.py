@@ -60,18 +60,15 @@ from app.models.gemini_models import (
     GeminiUsageMetadata,
 )
 from app.server.chat import (
-    ProcessedImageData,
-    ProcessedMediaData,
-    StreamingOutputFilter,
     _build_structured_requirement,
     _Downloads,
-    _media_markdown,
     _persist_conversation,
     _prepare_messages_for_model,
     _resolve_model_name,
     _send_request,
+    _Streamed,
     _tool_choice_failure,
-    _unsent_tail,
+    _visible_deltas,
     available_models,
 )
 from app.server.middleware import (
@@ -560,9 +557,7 @@ async def _send_gemini_request(
     )
 
 
-async def _generated_files(
-    downloads: _Downloads, base_url: str
-) -> tuple[list[GeminiInlineData], str]:
+async def _generated_files(downloads: _Downloads) -> tuple[list[GeminiInlineData], str]:
     """The reply's generated images as inline data, and markdown links to its videos and audio.
 
     Videos and audio are linked from the text, as on the OpenAI routes: the native format has no
@@ -570,14 +565,13 @@ async def _generated_files(
     """
     images: list[GeminiInlineData] = []
     media_markdown = ""
-    for kind, item, data in await downloads.all():
-        if kind == "media":
-            files = cast(ProcessedMediaData, data)
-            if links := _media_markdown(item, files, downloads.kept_media, base_url):
-                media_markdown += f"\n\n{links}"
-        elif name := downloads.new_image(image := cast(ProcessedImageData, data)):
+    for markdown, image in await downloads.all():
+        if image:
+            b64, _, _, name, _ = image
             mime_type = mimetypes.guess_type(name)[0] or "image/png"
-            images.append(GeminiInlineData(mimeType=mime_type, data=image[0]))
+            images.append(GeminiInlineData(mimeType=mime_type, data=b64))
+        else:
+            media_markdown += f"\n\n{markdown}"
     return images, media_markdown
 
 
@@ -613,9 +607,9 @@ async def gemini_generate_content(
     if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
         return _error_response(502, choice_error)
 
-    downloads = _Downloads()
+    downloads = _Downloads(str(raw_request.base_url))
     downloads.add(resp)
-    images, media_markdown = await _generated_files(downloads, str(raw_request.base_url))
+    images, media_markdown = await _generated_files(downloads)
     visible_output += media_markdown
 
     usage = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
@@ -669,79 +663,43 @@ async def gemini_stream_generate_content(
 
 async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str]:
     """The SSE frames of a streamed reply; the conversation is stored once it is complete."""
-    downloads = _Downloads()
-    try:
-        async for frame in _reply_frames(sent, base_url, downloads):
-            yield frame
-    finally:
-        # Whatever ended the stream early - an error, or the client going away.
-        await downloads.cancel()
-
-
-async def _reply_frames(
-    sent: _SentRequest, base_url: str, downloads: _Downloads
-) -> AsyncGenerator[str]:
-    generator = sent.output
-    assert not isinstance(generator, ModelOutput)
-    full_thoughts, full_text = "", ""
-    last_chunk: ModelOutput | None = None
-    suppressor = StreamingOutputFilter()
+    assert not isinstance(sent.output, ModelOutput)
+    streamed = _Streamed()
+    downloads = _Downloads(base_url)
     # Structured output is withheld until it has been validated.
     forward_text = not sent.structured_requirement
-
     try:
-        async for chunk in generator:
-            last_chunk = chunk
-            downloads.add(chunk)
+        try:
+            async for is_thought, delta in _visible_deltas(
+                sent.output, streamed, downloads, forward_text
+            ):
+                yield _part_frame(GeminiPart(text=delta, thought=is_thought or None))
+        except Exception as e:
+            logger.exception(f"[Gemini API] Streaming error: {e}")
+            yield _sse(_gemini_error(500, "Streaming error occurred."))
+            return
 
-            if chunk.thoughts_delta:
-                full_thoughts += chunk.thoughts_delta
-                yield _part_frame(GeminiPart(text=chunk.thoughts_delta, thought=True))
-            if chunk.text_delta:
-                full_text += chunk.text_delta
-                if forward_text and (visible := suppressor.process(chunk.text_delta)):
-                    yield _part_frame(GeminiPart(text=visible))
-    except Exception as e:
-        logger.exception(f"[Gemini API] Streaming error: {e}")
-        yield _sse(_gemini_error(500, "Streaming error occurred."))
-        return
+        try:
+            thoughts, visible_output, tool_calls = process_llm_output(
+                normalize_llm_text(streamed.thoughts),
+                normalize_llm_text(streamed.text),
+                sent.structured_requirement,
+            )
+        except StructuredOutputValidationError as exc:
+            logger.warning(f"[Gemini API] Structured output rejected mid-stream: {exc}")
+            yield _sse(_gemini_error(502, str(exc)))
+            return
+        if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
+            logger.warning(f"[Gemini API] Forced tool choice unmet mid-stream: {choice_error}")
+            yield _sse(_gemini_error(502, choice_error))
+            return
 
-    if last_chunk is not None:
-        if tail := _unsent_tail(last_chunk.thoughts, full_thoughts):
-            full_thoughts += tail
-            yield _part_frame(GeminiPart(text=tail, thought=True))
-        if tail := _unsent_tail(last_chunk.text, full_text):
-            full_text += tail
-            if forward_text and (visible := suppressor.process(tail)):
-                yield _part_frame(GeminiPart(text=visible))
-    if forward_text and (held_back := suppressor.flush()):
-        yield _part_frame(GeminiPart(text=held_back))
-
-    # The two expected failures are reported with their own message and status, matching the
-    # non-streaming route; only unexpected errors fall through to the catch-all below, which
-    # cannot say anything more useful than that something broke.
-    try:
-        thoughts, visible_output, tool_calls = process_llm_output(
-            normalize_llm_text(full_thoughts),
-            normalize_llm_text(full_text),
-            sent.structured_requirement,
-        )
-    except StructuredOutputValidationError as exc:
-        logger.warning(f"[Gemini API] Structured output rejected mid-stream: {exc}")
-        yield _sse(_gemini_error(502, str(exc)))
-        return
-    if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
-        logger.warning(f"[Gemini API] Forced tool choice unmet mid-stream: {choice_error}")
-        yield _sse(_gemini_error(502, choice_error))
-        return
-
-    try:
         if not forward_text and visible_output:
             yield _part_frame(GeminiPart(text=visible_output))
 
         # ponytail: no keep-alive is sent while the downloads finish; the OpenAI streams send
         # a comment line every 5 s, which Google's clients are not known to accept.
-        images, media_markdown = await _generated_files(downloads, base_url)
+        images, media_markdown = await _generated_files(downloads)
         if media_markdown:
             yield _part_frame(GeminiPart(text=media_markdown))
             visible_output += media_markdown
@@ -776,6 +734,6 @@ async def _reply_frames(
             _stored_reply(visible_output, images),
             tool_calls,
         )
-    except Exception as exc:
-        logger.exception(f"[Gemini API] Post-processing error: {exc}")
-        yield _sse(_gemini_error(500, "Post-processing error."))
+    finally:
+        # Whatever ended the stream early - an error, or the client going away.
+        await downloads.cancel()
