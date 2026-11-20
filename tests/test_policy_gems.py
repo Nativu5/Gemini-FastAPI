@@ -289,16 +289,10 @@ def test_gem_cleanup_reaches_every_account_even_after_one_fails(monkeypatch):
     assert cleaned == ["first", "last"]
 
 
-def test_gem_cleanup_alone_keeps_the_periodic_task_alive_and_runs_on_its_own_clock(monkeypatch):
+def test_gem_cleanup_runs_on_its_own_clock(monkeypatch):
     passes = gem_cleanups = 0
 
     class _Store:
-        def get_pending_deletions(self) -> list[Any]:
-            return []
-
-        def has_auto_delete_records(self) -> bool:
-            return False
-
         def cleanup_expired(self) -> tuple[int, list[Any]]:
             nonlocal passes
             passes += 1
@@ -314,7 +308,6 @@ def test_gem_cleanup_alone_keeps_the_periodic_task_alive_and_runs_on_its_own_clo
         cleanup=GeminiGemCleanupConfig(enabled=True),
     )
     monkeypatch.setattr(main_module.g_config.gemini, "gems", gems_cfg)
-    monkeypatch.setattr(main_module.g_config.storage, "retention_days", 0)
     monkeypatch.setattr(main_module, "LMDBConversationStore", _Store)
     monkeypatch.setattr(main_module, "GeminiClientPool", _Pool)
     monkeypatch.setattr(main_module, "_get_cleanup_interval", lambda: 0.001)
@@ -328,7 +321,7 @@ def test_gem_cleanup_alone_keeps_the_periodic_task_alive_and_runs_on_its_own_clo
             await task
 
     asyncio.run(_run())
-    assert passes >= 3  # nothing else is switched on, so the task would have exited at once
+    assert passes >= 3
     assert gem_cleanups == 1  # at startup, then not again until six hours have passed
 
 

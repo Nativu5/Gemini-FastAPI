@@ -380,24 +380,6 @@ class LMDBConversationStore(metaclass=Singleton):
         except Error as e:
             logger.error(f"Failed to update pending deletion for {cid}: {e}")
 
-    def has_auto_delete_records(self) -> bool:
-        try:
-            with self._env.begin() as txn:
-                cursor = txn.cursor()
-                for key_bytes, value_bytes in cursor:
-                    key_str = bytes(key_bytes).decode("utf-8")
-                    if self._is_internal_key(key_str):
-                        continue
-                    try:
-                        storage_data = orjson.loads(value_bytes)
-                        if storage_data.get("chat_mode") == ChatMode.AUTO_DELETE:
-                            return True
-                    except Exception:
-                        continue
-        except Error as e:
-            logger.error(f"Failed to check for auto_delete records: {e}")
-        return False
-
     def cleanup_expired(self) -> tuple[int, list[tuple[str, str]]]:
         """Delete the conversations the configuration says are due.
 

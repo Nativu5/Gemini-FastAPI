@@ -306,29 +306,6 @@ def test_a_remote_deletion_that_keeps_failing_is_given_up(store):
     assert store.get_pending_deletions() == []
 
 
-def test_only_an_auto_delete_conversation_makes_the_store_report_auto_delete_work(store):
-    assert store.has_auto_delete_records() is False
-
-    messages = _exchange()
-    store.store(
-        CLIENT_ID,
-        MODEL,
-        messages,
-        metadata=["c_norm", "r", "rc"],
-        chat_mode=ChatMode.NORMAL,
-    )
-    assert store.has_auto_delete_records() is False
-
-    store.store(
-        CLIENT_ID,
-        MODEL,
-        messages,
-        metadata=["c_auto", "r", "rc"],
-        chat_mode=ChatMode.AUTO_DELETE,
-    )
-    assert store.has_auto_delete_records() is True
-
-
 def test_cleanup_expired_media_with_ttl_seconds(tmp_path, monkeypatch):
     import os
     import time
