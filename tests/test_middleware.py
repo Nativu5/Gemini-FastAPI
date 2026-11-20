@@ -179,3 +179,15 @@ def test_a_link_that_leads_out_of_the_store_is_not_followed(tmp_path):
 
 def test_a_matching_name_with_no_file_behind_it_is_refused(tmp_path):
     assert _resolve_media_file(tmp_path, f"{STEM}.png") is None
+
+
+def test_a_refusal_on_v1_from_a_google_sdk_is_in_googles_envelope(monkeypatch):
+    """The body limit runs inside the `/v1` routing, so it sees the path the SDK is served on."""
+    monkeypatch.setattr(g_config.server, "max_request_body_bytes", LIMIT)
+    client = TestClient(create_app())  # no `with`: the lifespan would log in to Google
+
+    refused = client.post(
+        "/v1/models/m:generateContent", content=b"x" * (LIMIT + 1), headers={"x-goog-api-key": "k"}
+    )
+
+    assert refused.json()["error"]["status"] == "RESOURCE_EXHAUSTED"
