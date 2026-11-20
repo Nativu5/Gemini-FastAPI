@@ -417,13 +417,15 @@ def _streamed(api, path: str) -> tuple[str, str]:
     events = _sse(api.post(path, json={"model": MODEL, "stream": True, **prompt}))
     if "chat" in path:
         deltas = [event["choices"][0]["delta"] for event in events if event.get("choices")]
-        return tuple(
+        text, thoughts = (
             "".join(d.get(key) or "" for d in deltas) for key in ("content", "reasoning_content")
         )
-    return tuple(
+        return text, thoughts
+    text, thoughts = (
         "".join(e["delta"] for e in events if e["type"] == f"response.{kind}.delta")
         for kind in ("output_text", "reasoning_summary_text")
     )
+    return text, thoughts
 
 
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "native"])
@@ -485,6 +487,28 @@ def test_a_second_copy_of_a_generated_image_is_linked_once(api, path, stream):
     response = api.post(path, json={"model": MODEL, "stream": stream, **prompt})
 
     assert _reply_text(response, stream).count("/media/img_") == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_image_that_was_not_downloaded_does_not_satisfy_a_forced_image_tool(
+    api, stream, monkeypatch
+):
+    async def fail(*args, **kwargs):
+        raise OSError("download failed")
+
+    monkeypatch.setattr(WebImage, "save", fail)
+    api.upstream.replies.append(reply("Here.", **IMAGE))
+    tool = {"type": "image_generation"}
+    request = {"model": MODEL, "input": "Draw", "tools": [tool], "tool_choice": tool}
+
+    response = api.post("/v1/responses", json={**request, "stream": stream})
+
+    if stream:
+        error = next(event for event in _sse(response) if event["type"] == "error")["error"]
+    else:
+        assert response.status_code == 502
+        error = response.json()["error"]
+    assert error["message"] == "The model did not return a required image generation result"
 
 
 def _as_googles_python_sdk_sends_it(part: dict) -> dict:
@@ -779,19 +803,32 @@ def _events(response) -> list[dict]:
         (reply("Hel", "lo."), ["message"]),
         (reply("Answer.", thoughts="Hm.", thoughts_delta="Hm."), ["reasoning", "message"]),
         (reply("Checking. " + TOOL_CALL), ["message", "function_call"]),
+        (reply(TOOL_CALL), ["function_call"]),
+        (reply(), ["message"]),
+        (reply(**IMAGE), ["message", "image_generation_call"]),
+        # Thoughts that arrive only with the final chunk, after the text has started.
+        (reply("Answer.", thoughts="Hm."), ["message", "reasoning"]),
+        (reply("Answer.", thoughts="Hm, more.", thoughts_delta="Hm"), ["reasoning", "message"]),
     ],
-    ids=["text", "reasoning", "tool-call"],
+    ids=[
+        "text",
+        "reasoning",
+        "tool-call",
+        "only-a-tool-call",
+        "empty",
+        "image",
+        "late-thought",
+        "more-thought-at-the-end",
+    ],
 )
 def test_a_responses_stream_can_be_reassembled_into_its_final_response(api, answer, item_types):
     """What an SDK does with the stream: follow the items as they open and close, add up the
-    text deltas, and end up with exactly the response the last event carries."""
-    api.upstream.replies.append(answer)
-    events = _events(
-        api.post(
-            "/v1/responses",
-            json={"model": MODEL, "input": "Hi", "stream": True, "tools": [WEATHER_TOOL]},
-        )
-    )
+    text deltas, and end up with exactly the response the last event carries. Without
+    streaming, the response has the same items."""
+    api.upstream.replies += [answer, answer]
+    request = {"model": MODEL, "input": "Hi", "tools": [WEATHER_TOOL]}
+    events = _events(api.post("/v1/responses", json={**request, "stream": True}))
+    unstreamed = api.post("/v1/responses", json=request).json()["output"]
 
     assert [e["type"] for e in events[:2]] == ["response.created", "response.in_progress"]
     assert [e["sequence_number"] for e in events] == list(range(len(events)))
@@ -806,13 +843,16 @@ def test_a_responses_stream_can_be_reassembled_into_its_final_response(api, answ
         about_item = [events.index(e) for e in events if e.get("output_index") == index]
         assert events[about_item[0]] is opened[index]  # nothing refers to an item before it opens
         assert events[about_item[-1]]["type"] == "response.output_item.done"
-    assert sorted(closed, key=lambda e: e["output_index"]) == closed
+    closed.sort(key=lambda e: e["output_index"])
     assert [e["item"] for e in closed] == final["response"]["output"]
 
     streamed_text = "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta")
-    message = next(item for item in final["response"]["output"] if item["type"] == "message")
+    texts = [
+        item["content"][0]["text"] for item in final["response"]["output"] if "content" in item
+    ]
     # Text before a tool call keeps its trailing space in the deltas and loses it in the final.
-    assert streamed_text.rstrip() == message["content"][0]["text"]
+    assert texts == ([streamed_text.rstrip()] if "message" in item_types else [])
+    assert sorted(item["type"] for item in unstreamed) == sorted(item_types)
 
 
 @pytest.mark.parametrize("stream", [False, True])

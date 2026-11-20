@@ -253,7 +253,7 @@ def test_responses_schema_failure_cancels_pending_media_tasks(db, monkeypatch):
         started.append(cast(asyncio.Task, asyncio.current_task()))
         await asyncio.sleep(5)
 
-    monkeypatch.setattr("app.server.chat._process_image_item", slow_download)
+    monkeypatch.setattr("app.server.chat._download", slow_download)
     first = _output('{"wrong": true}')
     first.candidates[0].web_images = [WebImage(url="http://127.0.0.1:1/x.png")]
 
@@ -300,7 +300,7 @@ def test_stream_disconnect_cancels_pending_media_tasks(db, monkeypatch):
         started.append(cast(asyncio.Task, asyncio.current_task()))
         await asyncio.sleep(5)
 
-    monkeypatch.setattr("app.server.chat._process_image_item", slow_download)
+    monkeypatch.setattr("app.server.chat._download", slow_download)
     first = _output("Here is the image: ")
     first.candidates[0].web_images = [WebImage(url="http://127.0.0.1:1/x.png")]
 
@@ -349,7 +349,7 @@ def test_responses_disconnect_cancels_pending_media_tasks(db, monkeypatch):
         started.append(cast(asyncio.Task, asyncio.current_task()))
         await asyncio.sleep(5)
 
-    monkeypatch.setattr("app.server.chat._process_image_item", slow_download)
+    monkeypatch.setattr("app.server.chat._download", slow_download)
     first = _output("Here is the image: ")
     first.candidates[0].web_images = [WebImage(url="http://127.0.0.1:1/x.png")]
 
@@ -421,7 +421,7 @@ def test_native_stream_failure_cancels_pending_media_tasks(monkeypatch):
         started.append(cast(asyncio.Task, asyncio.current_task()))
         await asyncio.sleep(5)
 
-    monkeypatch.setattr("app.server.chat._process_image_item", slow_download)
+    monkeypatch.setattr("app.server.chat._download", slow_download)
     first = _output("just prose")
     first.candidates[0].web_images = [WebImage(url="http://127.0.0.1:1/x.png")]
 

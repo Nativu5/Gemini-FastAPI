@@ -5,6 +5,7 @@ import io
 import reprlib
 import uuid
 from collections.abc import AsyncGenerator, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -49,7 +50,6 @@ from app.models import (
     ResponseInputImage,
     ResponseInputMessage,
     ResponseInputText,
-    ResponseOutputContent,
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseReasoningItem,
@@ -105,10 +105,10 @@ _AVAILABLE_MODELS_CACHE: list[ModelData] | None = None
 
 type ProcessedImageData = tuple[str, int | None, int | None, str, str]
 type ProcessedMediaData = dict[str, tuple[str, str]]
-type ProcessedImageResult = tuple[Literal["image"], Image, ProcessedImageData]
-type ProcessedMediaResult = tuple[
-    Literal["media"], GeneratedVideo | GeneratedMedia, ProcessedMediaData
-]
+type GeneratedFile = Image | GeneratedVideo | GeneratedMedia
+type DownloadedData = ProcessedImageData | ProcessedMediaData
+# A downloaded file as a reply shows it: the markdown that links it, and its data if an image.
+type ShownFile = tuple[str, ProcessedImageData | None]
 
 
 async def _image_to_base64(
@@ -210,7 +210,7 @@ def _create_responses_standard_payload(
     model_name: str,
     detected_tool_calls: list[AppToolCall] | None,
     image_call_items: list[ImageGenerationCall],
-    response_contents: list[ResponseOutputContent],
+    message_text: str | None,
     usage: ResponseUsage,
     request: ResponseCreateRequest,
     structured_requirement: StructuredOutputRequirement | None = None,
@@ -218,7 +218,11 @@ def _create_responses_standard_payload(
     message_id: str | None = None,
     reason_id: str | None = None,
 ) -> ResponseCreateResponse:
-    """The completed response object: the JSON body, or a stream's `response.completed` event."""
+    """The completed response object: the JSON body, or a stream's `response.completed` event.
+
+    Its items are the reasoning, the message (None for no message), the images and the function
+    calls, in the order a stream adds them.
+    """
     message_id = message_id or f"msg_{uuid.uuid4().hex[:24]}"
     reason_id = reason_id or f"rs_{uuid.uuid4().hex[:24]}"
     now_ts = int(datetime.now(tz=UTC).timestamp())
@@ -234,16 +238,17 @@ def _create_responses_standard_payload(
             )
         )
 
-    if response_contents or not (detected_tool_calls or image_call_items):
+    if message_text is not None:
         output_items.append(
             ResponseOutputMessage(
                 id=message_id,
                 type="message",
                 status="completed",
                 role="assistant",
-                content=response_contents,
+                content=[ResponseOutputText(type="output_text", text=message_text)],
             )
         )
+    output_items.extend(image_call_items)
 
     if detected_tool_calls:
         output_items.extend(
@@ -258,8 +263,6 @@ def _create_responses_standard_payload(
                 for call in detected_tool_calls
             ]
         )
-
-    output_items.extend(image_call_items)
 
     text_config = request.text.model_copy(deep=True) if request.text else ResponseTextConfig()
     if request.response_format and request.response_format.get("type") == "json_schema":
@@ -1252,23 +1255,14 @@ class StreamingOutputFilter:
         return strip_system_hints(res)
 
 
-async def _process_image_item(image: Image) -> ProcessedImageResult | None:
-    """Download one generated image into the media store; None if that fails."""
+async def _download(item: GeneratedFile) -> tuple[GeneratedFile, DownloadedData] | None:
+    """Download one generated file into the media store; None if that fails."""
     try:
-        return "image", image, await _image_to_base64(image, get_media_store_dir())
+        if isinstance(item, Image):
+            return item, await _image_to_base64(item, get_media_store_dir())
+        return item, await _media_to_local_file(item, get_media_store_dir())
     except Exception as exc:
-        logger.warning(f"Background image processing failed: {exc}")
-        return None
-
-
-async def _process_media_item(
-    media_item: GeneratedVideo | GeneratedMedia,
-) -> ProcessedMediaResult | None:
-    """Download one generated video or audio item into the media store; None if that fails."""
-    try:
-        return "media", media_item, await _media_to_local_file(media_item, get_media_store_dir())
-    except Exception as exc:
-        logger.warning(f"Background media processing failed: {exc}")
+        logger.warning(f"Background download failed: {exc}")
         return None
 
 
@@ -1276,28 +1270,24 @@ class _Downloads:
     """The images, videos and audio generated for one reply, downloaded in the background.
 
     A download starts as soon as a chunk mentions the file, so most are finished by the time the
-    text has been sent. Gemini can list one file under several urls; it is used once.
+    text has been sent. Gemini can list one file under several urls, or send one picture twice;
+    the reply shows it once, and a second copy is deleted.
     """
 
-    def __init__(self) -> None:
-        self._tasks: list[asyncio.Task[ProcessedImageResult | ProcessedMediaResult | None]] = []
+    def __init__(self, base_url: str) -> None:
+        self._base_url = base_url
+        self._tasks: list[asyncio.Task[tuple[GeneratedFile, DownloadedData] | None]] = []
         self._seen_urls: set[str] = set()
         self._image_hashes: set[str] = set()
-        self.kept_media: dict[
-            str, str
-        ] = {}  # content hash -> file kept for it, for `_media_markdown`
+        self._kept_media: dict[str, str] = {}  # content hash -> file kept for it
 
     def add(self, output: ModelOutput) -> None:
         """Start downloading what this chunk mentions for the first time."""
-        for image in output.images or []:
-            if image.url and image.url not in self._seen_urls:
-                self._seen_urls.add(image.url)
-                self._tasks.append(asyncio.create_task(_process_image_item(image)))
-        for item in (output.videos or []) + (output.media or []):
+        for item in [*output.images, *output.videos, *output.media]:
             url = getattr(item, "url", None) or getattr(item, "mp3_url", None)
             if url and url not in self._seen_urls:
                 self._seen_urls.add(url)
-                self._tasks.append(asyncio.create_task(_process_media_item(item)))
+                self._tasks.append(asyncio.create_task(_download(item)))
 
     async def cancel(self) -> None:
         """Stop the downloads still running, on a path that will not use their results.
@@ -1310,11 +1300,9 @@ class _Downloads:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def as_completed(
-        self,
-    ) -> AsyncGenerator[ProcessedImageResult | ProcessedMediaResult | None]:
-        """Each download as it finishes, and None after every 5 seconds without one, so that a
-        stream can send a keep-alive. Failed downloads are skipped."""
+    async def as_completed(self) -> AsyncGenerator[ShownFile | None]:
+        """Each file to show as its download finishes, and None after every 5 seconds without
+        one, so that a stream can send a keep-alive."""
         while self._tasks:
             done, _ = await asyncio.wait(
                 self._tasks, timeout=5.0, return_when=asyncio.FIRST_COMPLETED
@@ -1325,23 +1313,28 @@ class _Downloads:
             finished = [task for task in self._tasks if task in done]
             self._tasks = [task for task in self._tasks if task not in done]
             for task in finished:
-                if result := task.result():
-                    yield result
+                if shown := self._shown(task.result()):
+                    yield shown
 
-    async def all(self) -> list[ProcessedImageResult | ProcessedMediaResult]:
-        """Every download that succeeded, in the order the files were listed."""
+    async def all(self) -> list[ShownFile]:
+        """Every file to show, in the order the files were listed."""
         tasks, self._tasks = self._tasks, []
-        return [result for result in await asyncio.gather(*tasks) if result]
+        return [shown for done in await asyncio.gather(*tasks) if (shown := self._shown(done))]
 
-    def new_image(self, data: ProcessedImageData) -> str | None:
-        """File name of a downloaded image, or None for a second copy of a picture this reply
-        already has; the copy is deleted."""
+    def _shown(self, download: tuple[GeneratedFile, DownloadedData] | None) -> ShownFile | None:
+        """A finished download as the reply shows it; None if it failed or shows nothing new."""
+        if download is None:
+            return None
+        item, data = download
+        if isinstance(data, dict):
+            markdown = _media_markdown(item.title, data, self._kept_media, self._base_url)
+            return (markdown, None) if markdown else None
         *_, name, content_hash = data
         if content_hash in self._image_hashes:
             (get_media_store_dir() / name).unlink(missing_ok=True)
             return None
         self._image_hashes.add(content_hash)
-        return name
+        return f"![{item.title}]({_media_url(name, self._base_url)})", data
 
 
 def _media_url(name: str, base_url: str) -> str:
@@ -1350,10 +1343,7 @@ def _media_url(name: str, base_url: str) -> str:
 
 
 def _media_markdown(
-    item: object,  # only its title is used
-    files: ProcessedMediaData,
-    seen_hashes: dict[str, str],
-    base_url: str,
+    title: str, files: ProcessedMediaData, seen_hashes: dict[str, str], base_url: str
 ) -> str:
     """Markdown links to one generated video or audio item, or "" if it has nothing new to show.
 
@@ -1371,26 +1361,12 @@ def _media_markdown(
                 continue
         urls[kind] = _media_url(kept, base_url)
 
-    title = getattr(item, "title", "Media")
     thumbnail = urls.get("video_thumbnail") or urls.get("audio_thumbnail")
     links = []
     for kind, label in (("video", title), ("audio", f"{title} - Audio")):
         if url := urls.get(kind):
             links.append(f"[![{label}]({thumbnail})]({url})" if thumbnail else f"[{label}]({url})")
     return "\n\n".join(links)
-
-
-def _chat_markdown(
-    result: ProcessedImageResult | ProcessedMediaResult, downloads: _Downloads, base_url: str
-) -> str:
-    """Markdown that shows one downloaded file in a Chat Completions reply; "" for a repeat."""
-    kind, item, data = result
-    if kind == "media":
-        files = cast(ProcessedMediaData, data)
-        return _media_markdown(item, files, downloads.kept_media, base_url)
-    if name := downloads.new_image(cast(ProcessedImageData, data)):
-        return f"![{getattr(item, 'title', 'Image')}]({_media_url(name, base_url)})"
-    return ""
 
 
 def _image_generation_call(data: ProcessedImageData) -> ImageGenerationCall:
@@ -1413,6 +1389,51 @@ def _unsent_tail(final: str | None, sent: str) -> str:
     if final and len(final) > len(sent) and final.startswith(sent):
         return final[len(sent) :]
     return ""
+
+
+@dataclass
+class _Streamed:
+    """The text and thoughts a stream has added up, hidden parts included."""
+
+    text: str = ""
+    thoughts: str = ""
+
+
+async def _visible_deltas(
+    generator: AsyncGenerator[ModelOutput],
+    streamed: _Streamed,
+    downloads: _Downloads,
+    forward_text: bool,
+) -> AsyncGenerator[tuple[bool, str]]:
+    """The deltas a stream shows, as (is_thought, delta), adding up everything in `streamed` and
+    starting the downloads each chunk mentions.
+
+    Text goes through the stream filter, and is only added up when `forward_text` is False. The
+    final chunk's own text and thoughts are then reconciled with the deltas, and what the filter
+    held back is released.
+    """
+    suppressor = StreamingOutputFilter()
+    last: ModelOutput | None = None
+    async for chunk in generator:
+        last = chunk
+        downloads.add(chunk)
+        if delta := chunk.thoughts_delta:
+            streamed.thoughts += delta
+            yield True, delta
+        if delta := chunk.text_delta:
+            streamed.text += delta
+            if forward_text and (visible := suppressor.process(delta)):
+                yield False, visible
+    if last is not None:
+        if tail := _unsent_tail(last.thoughts, streamed.thoughts):
+            streamed.thoughts += tail
+            yield True, tail
+        if tail := _unsent_tail(last.text, streamed.text):
+            streamed.text += tail
+            if forward_text and (visible := suppressor.process(tail)):
+                yield False, visible
+    if forward_text and (held_back := suppressor.flush()):
+        yield False, held_back
 
 
 def _sse_error(
@@ -1444,74 +1465,36 @@ def _create_real_streaming_response(
     """The SSE stream of a Chat Completions reply; the conversation is stored once it completes."""
 
     async def generate_stream():
-        full_text = ""
-        full_thoughts = ""
-        has_started = False
-        last_output: ModelOutput | None = None
-        suppressor = StreamingOutputFilter()
+        streamed = _Streamed()
+        downloads = _Downloads(base_url)
 
-        downloads = _Downloads()
-
-        def make_chunk(delta_content: dict, **fields: Any) -> str:
+        def make_chunk(delta: dict, finish_reason: str | None = None, **fields: Any) -> str:
             data = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": created_time,
                 "model": model_name,
-                "choices": [{"index": 0, **delta_content}],
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
                 **fields,
             }
             return f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
         try:
+            yield make_chunk({"role": "assistant", "content": ""})
             try:
-                async for chunk in generator:
-                    last_output = chunk
-                    if not has_started:
-                        yield make_chunk(
-                            {"delta": {"role": "assistant", "content": ""}, "finish_reason": None}
-                        )
-                        has_started = True
-
-                    if t_delta := chunk.thoughts_delta:
-                        full_thoughts += t_delta
-                        yield make_chunk(
-                            {"delta": {"reasoning_content": t_delta}, "finish_reason": None}
-                        )
-
-                    if text_delta := chunk.text_delta:
-                        full_text += text_delta
-                        if not structured_requirement and (
-                            visible_delta := suppressor.process(text_delta)
-                        ):
-                            yield make_chunk(
-                                {"delta": {"content": visible_delta}, "finish_reason": None}
-                            )
-
-                    downloads.add(chunk)
+                async for is_thought, delta in _visible_deltas(
+                    generator, streamed, downloads, not structured_requirement
+                ):
+                    yield make_chunk({"reasoning_content" if is_thought else "content": delta})
             except Exception as e:
                 logger.error(f"Error during streaming: {e}")
                 yield _sse_error(f"Streaming error occurred: {e}", "server_error")
                 return
 
-            if last_output is not None:
-                if tail := _unsent_tail(last_output.thoughts, full_thoughts):
-                    full_thoughts += tail
-                    yield make_chunk({"delta": {"reasoning_content": tail}, "finish_reason": None})
-                if tail := _unsent_tail(last_output.text, full_text):
-                    full_text += tail
-                    if not structured_requirement and (visible_tail := suppressor.process(tail)):
-                        yield make_chunk(
-                            {"delta": {"content": visible_tail}, "finish_reason": None}
-                        )
-
-            if not structured_requirement and (remaining_text := suppressor.flush()):
-                yield make_chunk({"delta": {"content": remaining_text}, "finish_reason": None})
-
             try:
                 _, visible_output, detected_tool_calls = process_llm_output(
-                    normalize_llm_text(full_thoughts or ""),
-                    normalize_llm_text(full_text or ""),
+                    normalize_llm_text(streamed.thoughts),
+                    normalize_llm_text(streamed.text),
                     structured_requirement,
                 )
             except StructuredOutputValidationError as exc:
@@ -1525,39 +1508,28 @@ def _create_real_streaming_response(
                 )
                 return
             if structured_requirement and visible_output:
-                yield make_chunk({"delta": {"content": visible_output}, "finish_reason": None})
+                yield make_chunk({"content": visible_output})
 
             storage_output = visible_output  # plus the links to generated files, sent next
-            async for result in downloads.as_completed():
-                if result is None:
+            async for shown in downloads.as_completed():
+                if shown is None:
                     yield ": ping\n\n"
-                elif md := _chat_markdown(result, downloads, base_url):
-                    storage_output += f"\n\n{md}"
-                    yield make_chunk({"delta": {"content": f"\n\n{md}"}, "finish_reason": None})
+                    continue
+                storage_output += f"\n\n{shown[0]}"
+                yield make_chunk({"content": f"\n\n{shown[0]}"})
 
-            if detected_tool_calls:
-                for idx, call in enumerate(detected_tool_calls):
-                    tc_dict = {
-                        "index": idx,
-                        "id": call.id,
-                        "type": "function",
-                        "function": {
-                            "name": call.function.name,
-                            "arguments": call.function.arguments,
-                        },
+            for idx, call in enumerate(detected_tool_calls):
+                function = {"name": call.function.name, "arguments": call.function.arguments}
+                yield make_chunk(
+                    {
+                        "tool_calls": [
+                            {"index": idx, "id": call.id, "type": "function", "function": function}
+                        ]
                     }
-
-                    yield make_chunk(
-                        {
-                            "delta": {
-                                "tool_calls": [tc_dict],
-                            },
-                            "finish_reason": None,
-                        }
-                    )
+                )
 
             p_tok, c_tok, t_tok, r_tok = calculate_usage(
-                messages, storage_output, detected_tool_calls, full_thoughts
+                messages, storage_output, detected_tool_calls, streamed.thoughts
             )
             usage = CompletionUsage(
                 prompt_tokens=p_tok,
@@ -1575,8 +1547,7 @@ def _create_real_streaming_response(
                 detected_tool_calls,
             )
             yield make_chunk(
-                {"delta": {}, "finish_reason": "tool_calls" if detected_tool_calls else "stop"},
-                usage=dump_model(usage),
+                {}, "tool_calls" if detected_tool_calls else "stop", usage=dump_model(usage)
             )
             yield "data: [DONE]\n\n"
         finally:
@@ -1617,7 +1588,7 @@ def _create_responses_real_streaming_response(
             seq += 1
             return f"event: {etype}\ndata: {orjson.dumps(data).decode()}\n\n"
 
-        downloads = _Downloads()
+        downloads = _Downloads(base_url)
 
         try:
             yield make_event(
@@ -1646,10 +1617,7 @@ def _create_responses_real_streaming_response(
                 },
             )
 
-            full_text = ""
-            full_thoughts = ""
-            last_output: ModelOutput | None = None
-
+            streamed = _Streamed()
             thought_item_id = f"rs_{uuid.uuid4().hex[:24]}"
             message_item_id = f"msg_{uuid.uuid4().hex[:24]}"
 
@@ -1657,7 +1625,6 @@ def _create_responses_real_streaming_response(
             next_output_index = 0
             thought_index = 0
             message_index = 0
-            suppressor = StreamingOutputFilter()
 
             def open_thought() -> list[str]:
                 """Events that start the reasoning item, unless one is open."""
@@ -1717,7 +1684,7 @@ def _create_responses_real_streaming_response(
                             "item_id": thought_item_id,
                             "output_index": thought_index,
                             "summary_index": 0,
-                            "text": full_thoughts,
+                            "text": streamed.thoughts,
                         },
                     ),
                     make_event(
@@ -1726,7 +1693,7 @@ def _create_responses_real_streaming_response(
                             "item_id": thought_item_id,
                             "output_index": thought_index,
                             "summary_index": 0,
-                            "part": dump_model(SummaryTextContent(text=full_thoughts)),
+                            "part": dump_model(SummaryTextContent(text=streamed.thoughts)),
                         },
                     ),
                     make_event(
@@ -1738,7 +1705,7 @@ def _create_responses_real_streaming_response(
                                     id=thought_item_id,
                                     type="reasoning",
                                     status="completed",
-                                    summary=[SummaryTextContent(text=full_thoughts)],
+                                    summary=[SummaryTextContent(text=streamed.thoughts)],
                                 )
                             ),
                         },
@@ -1793,30 +1760,14 @@ def _create_responses_real_streaming_response(
                 )
 
             try:
-                async for chunk in generator:
-                    last_output = chunk
-
-                    if chunk.thoughts_delta:
-                        for event in open_thought():
-                            yield event
-
-                        full_thoughts += chunk.thoughts_delta
-                        yield thought_delta(chunk.thoughts_delta)
-
-                    if chunk.text_delta:
-                        full_text += chunk.text_delta
-                        for event in close_thought():
-                            yield event
-
-                        if not structured_requirement:
-                            for event in open_message():
-                                yield event
-
-                            if visible := suppressor.process(chunk.text_delta):
-                                yield text_delta(visible)
-
-                    downloads.add(chunk)
-
+                async for is_thought, delta in _visible_deltas(
+                    generator, streamed, downloads, not structured_requirement
+                ):
+                    # The reasoning stays open beside the message: the final chunk can still
+                    # carry more of it.
+                    for event in open_thought() if is_thought else open_message():
+                        yield event
+                    yield thought_delta(delta) if is_thought else text_delta(delta)
             except Exception as e:
                 logger.error(f"Error during streaming: {e}")
                 yield make_event(
@@ -1827,32 +1778,13 @@ def _create_responses_real_streaming_response(
                 )
                 return
 
-            if last_output is not None:
-                if tail := _unsent_tail(last_output.thoughts, full_thoughts):
-                    full_thoughts += tail
-                    for event in open_thought():
-                        yield event
-                    yield thought_delta(tail)
-                if tail := _unsent_tail(last_output.text, full_text):
-                    full_text += tail
-                    if not structured_requirement and (visible := suppressor.process(tail)):
-                        for event in open_message():
-                            yield event
-                        yield text_delta(visible)
-
-            if not structured_requirement and (remaining := suppressor.flush()):
-                # Text that arrived only with the final chunk can still be held back here.
-                for event in open_message():
-                    yield event
-                yield text_delta(remaining)
-
             for event in close_thought():
                 yield event
 
             try:
                 _, assistant_text, detected_tool_calls = process_llm_output(
-                    normalize_llm_text(full_thoughts or ""),
-                    normalize_llm_text(full_text or ""),
+                    normalize_llm_text(streamed.thoughts),
+                    normalize_llm_text(streamed.text),
                     structured_requirement,
                 )
             except StructuredOutputValidationError as exc:
@@ -1869,39 +1801,24 @@ def _create_responses_real_streaming_response(
                 )
                 return
 
-            if structured_requirement and assistant_text and not message_open:
+            if structured_requirement and assistant_text:
                 for event in open_message():
                     yield event
                 yield text_delta(assistant_text)
 
             image_items = []
-            async for result in downloads.as_completed():
-                if result is None:
+            async for shown in downloads.as_completed():
+                if shown is None:
                     yield ": ping\n\n"
                     continue
-                kind, item, data = result
-                if kind == "media":
-                    files = cast(ProcessedMediaData, data)
-                    link = _media_markdown(item, files, downloads.kept_media, base_url)
-                elif name := downloads.new_image(cast(ProcessedImageData, data)):
-                    img_item = _image_generation_call(cast(ProcessedImageData, data))
-                    img_index = next_output_index
-                    next_output_index += 1
-                    for etype in ("response.output_item.added", "response.output_item.done"):
-                        yield make_event(
-                            etype, {"output_index": img_index, "item": dump_model(img_item)}
-                        )
-                    image_items.append(img_item)
-                    link = f"![{name}]({_media_url(name, base_url)})"
-                else:
-                    continue
-                if link:
-                    for event in open_message():
-                        yield event
-                    yield text_delta(f"\n\n{link}")
-                    assistant_text += f"\n\n{link}"
+                markdown, image = shown
+                if image:
+                    image_items.append(_image_generation_call(image))
+                for event in open_message():
+                    yield event
+                yield text_delta(f"\n\n{markdown}")
+                assistant_text += f"\n\n{markdown}"
 
-            final_response_contents: list[ResponseOutputContent] = []
             if choice_error := _tool_choice_failure(
                 request.tool_choice,
                 detected_tool_calls,
@@ -1920,71 +1837,12 @@ def _create_responses_real_streaming_response(
                     },
                 )
                 return
-            if message_open:
-                text_part = ResponseOutputText(type="output_text", text=assistant_text)
-                final_response_contents = [text_part]
-
-                yield make_event(
-                    "response.output_text.done",
-                    {
-                        "item_id": message_item_id,
-                        "output_index": message_index,
-                        "content_index": 0,
-                    },
-                )
-                yield make_event(
-                    "response.content_part.done",
-                    {
-                        "item_id": message_item_id,
-                        "output_index": message_index,
-                        "content_index": 0,
-                        "part": dump_model(text_part),
-                    },
-                )
-
-                yield make_event(
-                    "response.output_item.done",
-                    {
-                        "output_index": message_index,
-                        "item": dump_model(
-                            ResponseOutputMessage(
-                                id=message_item_id,
-                                type="message",
-                                status="completed",
-                                role="assistant",
-                                content=final_response_contents,
-                            )
-                        ),
-                    },
-                )
-
-            for call in detected_tool_calls:
-                tc_index = next_output_index
-                next_output_index += 1
-                tc_item = ResponseFunctionToolCall(
-                    id=call.id,
-                    call_id=call.id,
-                    name=call.function.name,
-                    arguments=call.function.arguments,
-                    status="completed",
-                )
-                yield make_event(
-                    "response.output_item.added",
-                    {
-                        "output_index": tc_index,
-                        "item": dump_model(tc_item),
-                    },
-                )
-                yield make_event(
-                    "response.output_item.done",
-                    {
-                        "output_index": tc_index,
-                        "item": dump_model(tc_item),
-                    },
-                )
+            if message_open or not detected_tool_calls:  # an empty reply is still a message
+                for event in open_message():
+                    yield event
 
             p_tok, c_tok, t_tok, r_tok = calculate_usage(
-                messages, assistant_text, detected_tool_calls, full_thoughts
+                messages, assistant_text, detected_tool_calls, streamed.thoughts
             )
             usage = ResponseUsage(
                 input_tokens=p_tok,
@@ -1998,14 +1856,45 @@ def _create_responses_real_streaming_response(
                 model_name,
                 detected_tool_calls,
                 image_items,
-                final_response_contents,
+                assistant_text if message_open else None,
                 usage,
                 request,
                 structured_requirement,
-                full_thoughts,
+                streamed.thoughts,
                 message_item_id,
                 thought_item_id,
             )
+            if message_open:
+                # Thoughts that only the final chunk carries open their item after the message.
+                payload.output[:next_output_index] = sorted(
+                    payload.output[:next_output_index],
+                    key=lambda item: thought_index if item.type == "reasoning" else message_index,
+                )
+                message = payload.output[message_index]
+                part = {
+                    "item_id": message_item_id,
+                    "output_index": message_index,
+                    "content_index": 0,
+                }
+                yield make_event("response.output_text.done", {**part, "text": assistant_text})
+                yield make_event(
+                    "response.content_part.done",
+                    {
+                        **part,
+                        "part": dump_model(
+                            ResponseOutputText(type="output_text", text=assistant_text)
+                        ),
+                    },
+                )
+                yield make_event(
+                    "response.output_item.done",
+                    {"output_index": message_index, "item": dump_model(message)},
+                )
+            # The images and function calls, which follow the message, each opened and finished.
+            for index, item in enumerate(payload.output[next_output_index:], next_output_index):
+                for etype in ("response.output_item.added", "response.output_item.done"):
+                    yield make_event(etype, {"output_index": index, "item": dump_model(item)})
+
             _persist_conversation(
                 db,
                 resolved_model,
@@ -2114,11 +2003,10 @@ async def create_chat_completion(
     if choice_error := _tool_choice_failure(request.tool_choice, tool_calls):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=choice_error)
 
-    downloads = _Downloads()
+    downloads = _Downloads(base_url)
     downloads.add(resp_or_stream)
-    for result in await downloads.all():
-        if md := _chat_markdown(result, downloads, base_url):
-            visible_output += f"\n\n{md}"
+    for markdown, _ in await downloads.all():
+        visible_output += f"\n\n{markdown}"
 
     p_tok, c_tok, t_tok, r_tok = calculate_usage(app_messages, visible_output, tool_calls, thoughts)
     payload = ChatCompletionResponse(
@@ -2273,36 +2161,22 @@ async def create_response(
         )
     except StructuredOutputValidationError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    downloads = _Downloads(base_url)
+    downloads.add(resp_or_stream)
+    img_calls: list[ImageGenerationCall] = []
+    for markdown, image in await downloads.all():
+        if image:
+            img_calls.append(_image_generation_call(image))
+        assistant_text += f"\n\n{markdown}"
     if choice_error := _tool_choice_failure(
         request.tool_choice,
         tool_calls,
-        has_images=bool(resp_or_stream.images),
+        has_images=bool(img_calls),
         has_image_tool=bool(image_tools),
     ):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=choice_error)
 
-    downloads = _Downloads()
-    downloads.add(resp_or_stream)
-    img_calls: list[ImageGenerationCall] = []
-    image_markdown = media_markdown = ""
-    for kind, item, data in await downloads.all():
-        if kind == "media":
-            files = cast(ProcessedMediaData, data)
-            if md := _media_markdown(item, files, downloads.kept_media, base_url):
-                media_markdown += f"\n\n{md}"
-        elif name := downloads.new_image(cast(ProcessedImageData, data)):
-            img_calls.append(_image_generation_call(cast(ProcessedImageData, data)))
-            image_markdown += f"\n\n![{img_calls[-1].id}]({_media_url(name, base_url)})"
-
-    # Text, image links and media links are three parts here, and one in a stream.
-    contents: list[ResponseOutputContent] = [
-        ResponseOutputText(type="output_text", text=text)
-        for text in (assistant_text, image_markdown, media_markdown)
-        if text
-    ] or [ResponseOutputText(type="output_text", text="")]
-    storage_output = assistant_text + image_markdown + media_markdown
-
-    p_tok, c_tok, t_tok, r_tok = calculate_usage(messages, storage_output, tool_calls, thoughts)
+    p_tok, c_tok, t_tok, r_tok = calculate_usage(messages, assistant_text, tool_calls, thoughts)
     usage = ResponseUsage(
         input_tokens=p_tok,
         output_tokens=c_tok,
@@ -2315,7 +2189,7 @@ async def create_response(
         request.model,
         tool_calls,
         img_calls,
-        contents,
+        assistant_text if assistant_text or not tool_calls else None,
         usage,
         request,
         structured_requirement,
@@ -2327,7 +2201,7 @@ async def create_response(
         client,
         session.metadata,
         messages,
-        storage_output,
+        assistant_text,
         tool_calls,
     )
     return payload
