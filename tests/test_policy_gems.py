@@ -293,8 +293,6 @@ def test_gem_cleanup_alone_keeps_the_periodic_task_alive_and_runs_on_its_own_clo
     passes = gem_cleanups = 0
 
     class _Store:
-        retention_days = 0
-
         def get_pending_deletions(self) -> list[Any]:
             return []
 
@@ -316,6 +314,7 @@ def test_gem_cleanup_alone_keeps_the_periodic_task_alive_and_runs_on_its_own_clo
         cleanup=GeminiGemCleanupConfig(enabled=True),
     )
     monkeypatch.setattr(main_module.g_config.gemini, "gems", gems_cfg)
+    monkeypatch.setattr(main_module.g_config.storage, "retention_days", 0)
     monkeypatch.setattr(main_module, "LMDBConversationStore", _Store)
     monkeypatch.setattr(main_module, "GeminiClientPool", _Pool)
     monkeypatch.setattr(main_module, "_get_cleanup_interval", lambda: 0.001)
