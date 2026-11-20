@@ -126,6 +126,9 @@ class GeminiGemCleanupConfig(BaseModel):
     )
 
 
+_FALSE = {"false", "0", "no", "off", "f", "n"}
+
+
 class GeminiGemsConfig(BaseModel):
     policy: GeminiGemPolicyMode = Field(
         default=GeminiGemPolicyMode.OFF,
@@ -158,7 +161,8 @@ class GeminiGemsConfig(BaseModel):
     def _enabled_false_keeps_gems_off(cls, data: Any) -> Any:
         """`enabled` is gone and `policy` alone decides, but a config written when `enabled: false`
         turned gems off whatever the policy said must not start using them."""
-        if isinstance(data, dict) and str(data.get("enabled")).lower() == "false":
+        # Every spelling of false that pydantic read for the old bool field.
+        if isinstance(data, dict) and str(data.get("enabled")).lower() in _FALSE:
             return {**data, "policy": GeminiGemPolicyMode.OFF}
         return data
 
