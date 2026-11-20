@@ -572,7 +572,7 @@ def test_the_native_route_reports_an_error_in_googles_envelope(api):
     api.upstream.replies.append(RuntimeError("upstream refused"))
     failed = api.post(f"/v1beta/models/{MODEL}:generateContent", json={"contents": USER_TURN})
     assert failed.json() == {
-        "error": {"code": 502, "message": "upstream refused", "status": "INTERNAL", "details": []}
+        "error": {"code": 502, "message": "upstream refused", "status": "INTERNAL"}
     }
 
 
@@ -689,12 +689,7 @@ def test_google_sdks_get_errors_on_v1_in_googles_envelope(locked, monkeypatch):
 
     monkeypatch.setattr(gemini, "_validate_gemini_request", broken)
     failed = locked.post(url, json={"contents": USER_TURN}, headers={"x-goog-api-key": "secret"})
-    assert failed.json()["error"] == {
-        "code": 500,
-        "message": "unexpected",
-        "status": "INTERNAL",
-        "details": [],
-    }
+    assert failed.json()["error"] == {"code": 500, "message": "unexpected", "status": "INTERNAL"}
 
 
 def test_a_generated_file_is_served_only_through_the_signed_link_in_the_reply(locked):

@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.server.media import _resolve_media_file
-from app.server.middleware import RequestBodyLimitMiddleware
+from app.server.middleware import RequestBodyLimitMiddleware, add_exception_handlers
 from app.utils import g_config
 from app.utils.config import CORSConfig
 
@@ -38,6 +38,7 @@ def _build_app(max_body_bytes: int = LIMIT) -> FastAPI:
         return {"received": len(await request.body())}
 
     app.add_middleware(RequestBodyLimitMiddleware, max_body_bytes=max_body_bytes)
+    add_exception_handlers(app)
     return app
 
 
