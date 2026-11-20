@@ -194,7 +194,7 @@ _master_parts.append(f"(?P<HINT_EXIT>(?:{_ends})\n?)")
 STREAM_MASTER_RE = re.compile("|".join(_master_parts), re.IGNORECASE)
 
 # Partial markers held back until the next chunk completes them.
-_PARTIAL_MARKER = r"\\|\\?\[[^]]*|\\?<\\?\|?i?m?\\?_?(?:s?t?a?r?t?|e?n?d?)\\?\|?\\?>?"
+_PARTIAL_PROTOCOL = r"\\|\\?\[[^]]*|\\?<\\?\|?i?m?\\?_?(?:s?t?a?r?t?|e?n?d?)\\?\|?\\?>?"
 
 # Hint anchors are prose, so a chunk boundary inside one leaks the header.
 # The line-start requirement spares ordinary words sharing a prefix.
@@ -208,15 +208,11 @@ _partial_anchors = sorted(
     reverse=True,
 )
 _partial_anchor_alt = "|".join(re.escape(prefix) for prefix in _partial_anchors)
-_PARTIAL_MARKER = rf"{_PARTIAL_MARKER}|(?:^|\n)(?:{_partial_anchor_alt})"
-
-STREAM_TAIL_RE = re.compile(rf"(?:{_PARTIAL_MARKER})$", re.IGNORECASE)
-
-# Flush discards what it matches, so it may only drop genuine protocol fragments.
-STREAM_FLUSH_TAIL_RE = re.compile(
-    r"(?:\\|\\?\[[^]]*|\\?<\\?\|?i?m?\\?_?(?:s?t?a?r?t?|e?n?d?)\\?\|?\\?>?)$",
-    re.IGNORECASE,
+STREAM_TAIL_RE = re.compile(
+    rf"(?:{_PARTIAL_PROTOCOL}|(?:^|\n)(?:{_partial_anchor_alt}))$", re.IGNORECASE
 )
+# Flush discards what it matches, so it may only drop genuine protocol fragments.
+STREAM_FLUSH_TAIL_RE = re.compile(rf"(?:{_PARTIAL_PROTOCOL})$", re.IGNORECASE)
 
 
 def add_tag(role: AppMessageRole, content: str, unclose: bool = False) -> str:
@@ -229,9 +225,6 @@ def normalize_llm_text(s: str) -> str:
     Safely normalize LLM-generated text for both display and hashing.
     Includes: HTML unescaping, NFC normalization, and line ending standardization.
     """
-    if not s:
-        return ""
-
     s = html.unescape(s)
     s = unicodedata.normalize("NFC", s)
     return s.replace("\r\n", "\n").replace("\r", "\n")
@@ -239,7 +232,7 @@ def normalize_llm_text(s: str) -> str:
 
 def unescape_text(s: str) -> str:
     """Remove CommonMark backslash escapes from LLM-generated text."""
-    return COMMONMARK_UNESCAPE_RE.sub(r"\1", s) if s else ""
+    return COMMONMARK_UNESCAPE_RE.sub(r"\1", s)
 
 
 def strip_markdown_fence(s: str) -> str:
@@ -251,9 +244,6 @@ def strip_markdown_fence(s: str) -> str:
     Any optional language tag on the opening fence is stripped cleanly.
     """
     s = s.strip()
-    if not s:
-        return ""
-
     match = PARAM_FENCE_RE.match(s)
     if not match:
         return s
@@ -277,15 +267,10 @@ def _parse_tool_argument_value(raw_value: str) -> JsonValue:
     strict argument types, while plain text values remain strings for compatibility.
     """
     value = strip_markdown_fence(raw_value)
-    if not value:
-        return ""
-
     try:
-        parsed_value: Any = orjson.loads(value)
+        return orjson.loads(value)
     except orjson.JSONDecodeError:
         return value
-
-    return parsed_value
 
 
 def estimate_tokens(text: str | None) -> int:
@@ -597,9 +582,6 @@ def strip_tagged_blocks(text: str) -> str:
     Remove ChatML role blocks (<|im_start|>role...<|im_end|>).
     Role 'tool' blocks are removed entirely; others have markers stripped but content preserved.
     """
-    if not text:
-        return text
-
     result = []
     idx = 0
     while idx < len(text):
@@ -628,12 +610,7 @@ def strip_tagged_blocks(text: str) -> str:
 def strip_system_hints(text: str) -> str:
     """Undo markdown escaping, then remove echoed hints, ChatML tags (tool-role blocks with
     their content) and every tool-call and tool-result block."""
-    if not text:
-        return text
-
-    t_unescaped = unescape_text(text)
-
-    cleaned = t_unescaped
+    cleaned = unescape_text(text)
     for hint in SYSTEM_HINTS:
         cleaned = cleaned.replace(hint, "").replace(hint.strip(), "")
 
@@ -691,9 +668,7 @@ def text_from_message(message: AppMessage) -> str:
     if isinstance(message.content, str):
         base_text = message.content
     elif isinstance(message.content, list):
-        base_text = "\n".join(
-            item.text or "" for item in message.content if getattr(item, "type", "") == "text"
-        )
+        base_text = "\n".join(item.text or "" for item in message.content if item.type == "text")
 
     if message.tool_calls:
         tool_arg_text = "".join(call.function.arguments or "" for call in message.tool_calls)
@@ -756,19 +731,9 @@ def calculate_usage(
 ) -> tuple[int, int, int, int]:
     """Calculate prompt, completion, total and reasoning tokens consistently."""
     prompt_tokens = sum(estimate_tokens(text_from_message(msg)) for msg in messages)
-    tool_args_text = ""
-    if tool_calls:
-        for call in tool_calls:
-            tool_args_text += call.function.arguments or ""
-
-    completion_basis = assistant_text or ""
-    if tool_args_text:
-        completion_basis = (
-            f"{completion_basis}\n{tool_args_text}" if completion_basis else tool_args_text
-        )
-
-    completion_tokens = estimate_tokens(completion_basis)
-    reasoning_tokens = estimate_tokens(thoughts) if thoughts else 0
+    reply = AppMessage(role="assistant", content=assistant_text, tool_calls=tool_calls)
+    completion_tokens = estimate_tokens(text_from_message(reply))
+    reasoning_tokens = estimate_tokens(thoughts)
     total_completion_tokens = completion_tokens + reasoning_tokens
 
     return (
@@ -1019,14 +984,13 @@ def append_tool_hint_to_last_user_message(messages: list[AppMessage]) -> None:
 
         if isinstance(msg.content, list):
             for part in reversed(msg.content):
-                if getattr(part, "type", None) != "text":
+                if part.type != "text":
                     continue
-                text_value = getattr(part, "text", "") or ""
+                text_value = part.text or ""
                 if TOOL_HINT_STRIPPED in text_value:
                     return
                 part.text = f"{text_value}\n{TOOL_WRAP_HINT}"
                 return
 
-            messages_text = TOOL_WRAP_HINT.strip()
-            msg.content.append(AppContentItem(type="text", text=messages_text))
+            msg.content.append(AppContentItem(type="text", text=TOOL_HINT_STRIPPED))
             return
