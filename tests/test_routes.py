@@ -806,6 +806,23 @@ def test_a_history_that_matches_no_stored_chat_is_sent_whole_to_a_new_one(api):
     assert "something the server never said" in api.upstream.sent[1].text
 
 
+@pytest.mark.parametrize("continued", [False, True])
+def test_an_attachment_the_server_refuses_to_fetch_is_a_bad_request(api, monkeypatch, continued):
+    monkeypatch.setattr(g_config.gemini, "allow_private_url_fetch", False)
+    history = CHAT["messages"]
+    if continued:
+        api.post("/v1/chat/completions", json=CHAT)
+        history = [*history, {"role": "assistant", "content": "ok"}]
+    image = {"type": "image_url", "image_url": {"url": "http://127.0.0.1/cat.png"}}
+    messages = [*history, {"role": "user", "content": [image]}]
+
+    refused = api.post("/v1/chat/completions", json={**CHAT, "messages": messages})
+
+    assert refused.status_code == 400, refused.text
+    assert "private" in refused.json()["error"]["message"]
+    assert len(api.upstream.sent) == int(continued)
+
+
 def test_a_request_with_nothing_new_to_send_is_refused(api):
     api.post("/v1/chat/completions", json=CHAT)
     replayed = [*CHAT["messages"], {"role": "assistant", "content": "ok"}]
@@ -823,8 +840,9 @@ def test_a_request_with_nothing_new_to_send_is_refused(api):
         {"role": "user", "content": [{"type": "input_txt", "text": "And then?"}]},
         {"role": "tool", "content": "And then?"},
         {"role": "user", "content": [{"image_url": "x", "detail": "max"}]},
+        {"role": "user", "content": [{"type": "input_file", "file_url": ""}]},
     ],
-    ids=["unknown-detail", "misspelled-part", "unknown-role", "untyped-part"],
+    ids=["unknown-detail", "misspelled-part", "unknown-role", "untyped-part", "empty-file"],
 )
 def test_responses_refuses_a_message_it_cannot_read_instead_of_dropping_it(api, message):
     first = {"role": "user", "content": "Hi"}
