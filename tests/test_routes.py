@@ -406,15 +406,15 @@ def test_gemini_native_normalises_tool_arguments_whether_streamed_or_not(api, st
     ]
 
 
-def _streamed(api, path: str) -> tuple[str, str]:
+def _streamed(api, path: str, **body) -> tuple[str, str]:
     """The text and the thoughts a stream sent, added up from its deltas as a client does."""
     if path == "native":
-        parts = _native(api, True, contents=USER_TURN)
+        parts = _native(api, True, contents=USER_TURN, **body)
         return _text(parts), "".join(part["text"] for part in parts if part.get("thought"))
     prompt = (
         {"messages": [{"role": "user", "content": "Hi"}]} if "chat" in path else {"input": "Hi"}
     )
-    events = _sse(api.post(path, json={"model": MODEL, "stream": True, **prompt}))
+    events = _sse(api.post(path, json={"model": MODEL, "stream": True, **prompt, **body}))
     if "chat" in path:
         deltas = [event["choices"][0]["delta"] for event in events if event.get("choices")]
         text, thoughts = (
@@ -426,6 +426,42 @@ def _streamed(api, path: str) -> tuple[str, str]:
         for kind in ("output_text", "reasoning_summary_text")
     )
     return text, thoughts
+
+
+SCHEMA = {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (
+            "/v1/chat/completions",
+            {
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "r", "schema": SCHEMA},
+                }
+            },
+        ),
+        (
+            "/v1/responses",
+            {"text": {"format": {"type": "json_schema", "name": "r", "schema": SCHEMA}}},
+        ),
+        (
+            "native",
+            {
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseJsonSchema": SCHEMA,
+                }
+            },
+        ),
+    ],
+)
+def test_a_structured_stream_sends_the_validated_document_and_not_the_raw_text(api, path, body):
+    api.upstream.replies.append(reply("```json\n", '{"a": "x"}', "\n```"))
+
+    assert _streamed(api, path, **body) == ('{"a":"x"}', "")
 
 
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "native"])
@@ -486,7 +522,9 @@ def test_a_second_copy_of_a_generated_image_is_linked_once(api, path, stream):
 
     response = api.post(path, json={"model": MODEL, "stream": stream, **prompt})
 
-    assert _reply_text(response, stream).count("/media/img_") == 1
+    text = _reply_text(response, stream)
+    assert text.count("/media/img_") == 1
+    assert "![A](" in text  # labelled with the image's title
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -849,6 +887,7 @@ def test_a_responses_stream_can_be_reassembled_into_its_final_response(api, answ
     ]
     # Text before a tool call keeps its trailing space in the deltas and loses it in the final.
     assert texts == ([streamed_text.rstrip()] if "message" in item_types else [])
+    assert [e["text"] for e in events if e["type"] == "response.output_text.done"] == texts
     assert sorted(item["type"] for item in unstreamed) == sorted(item_types)
 
 
