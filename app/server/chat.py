@@ -5,6 +5,7 @@ import io
 import reprlib
 import uuid
 from collections.abc import AsyncGenerator, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -687,53 +688,28 @@ def _resolve_model_name(pool: GeminiClientPool, name: str) -> str:
     authenticated client keeps a guest, whose registry marks everything but the default
     unavailable, from narrowing what the whole pool accepts.
     """
-    # A registry outlives an auto-close, so an idle client still resolves; one that never
-    # initialized has nothing to offer.
-    clients = sorted(pool.clients, key=lambda c: (c.is_guest(), not c.running()))
-    for client in clients:
-        if not client.list_models():
-            continue
-
-        try:
+    # A registry outlives an auto-close, so an idle client still resolves.
+    for client in sorted(pool.clients, key=lambda c: (c.is_guest(), not c.running())):
+        with suppress(ValueError):  # also what a client that never initialized raises
             return client.resolve_model(name).model_name
-        except ValueError:
-            continue
 
     raise ValueError(f"Model '{name}' is not available on any Gemini client.")
-
-
-def _build_available_models(pool: GeminiClientPool) -> list[ModelData]:
-    now = int(datetime.now(tz=UTC).timestamp())
-    models_data = []
-    seen_model_ids = set()
-
-    for client in pool.clients:
-        if client_models := client.list_models():
-            for model in client_models:
-                # A guest session registers the models it can see but may only use the
-                # default one; advertising the rest would promise what it cannot serve.
-                if not model.is_available:
-                    continue
-
-                model_id = model.model_name or model.model_id
-                if model_id and model_id not in seen_model_ids:
-                    models_data.append(
-                        ModelData(
-                            id=model_id,
-                            created=now,
-                            owned_by="google",
-                        )
-                    )
-                    seen_model_ids.add(model_id)
-
-    return models_data
 
 
 def available_models(pool: GeminiClientPool) -> list[ModelData]:
     """The models the clients discovered, listed once and kept: `created` is when that was."""
     global _AVAILABLE_MODELS_CACHE
     if _AVAILABLE_MODELS_CACHE is None:
-        _AVAILABLE_MODELS_CACHE = _build_available_models(pool)
+        now = int(datetime.now(tz=UTC).timestamp())
+        # A guest session registers the models it can see but may only use the default one;
+        # advertising the rest would promise what it cannot serve.
+        names = dict.fromkeys(
+            model.model_name
+            for client in pool.clients
+            for model in client.list_models() or []
+            if model.is_available
+        )
+        _AVAILABLE_MODELS_CACHE = [ModelData(id=name, created=now) for name in names]
         logger.info(f"Cached {len(_AVAILABLE_MODELS_CACHE)} available model(s).")
     return list(_AVAILABLE_MODELS_CACHE)
 
