@@ -222,7 +222,8 @@ def _create_responses_standard_payload(
     """The completed response object: the JSON body, or a stream's `response.completed` event.
 
     Its items are the reasoning, the message (None for no message), the images and the function
-    calls; a stream that opened its message before its reasoning puts them in that order.
+    calls, in the order a stream adds them. A stream adds thoughts that arrive after its message
+    began as a second reasoning item, right after the message.
     """
     message_id = message_id or f"msg_{uuid.uuid4().hex[:24]}"
     reason_id = reason_id or f"rs_{uuid.uuid4().hex[:24]}"
@@ -1624,6 +1625,7 @@ def _create_responses_real_streaming_response(
             next_output_index = 0
             thought_index = 0
             message_index = 0
+            late_thoughts = ""  # arrived after the message began
 
             def open_thought() -> list[str]:
                 """Events that start the reasoning item, unless one is open."""
@@ -1670,8 +1672,8 @@ def _create_responses_real_streaming_response(
                     },
                 )
 
-            def close_thought() -> list[str]:
-                """Events that finish the reasoning item, if one is open."""
+            def close_thought(text: str) -> list[str]:
+                """Events that finish the reasoning item, if one is open, with its whole text."""
                 nonlocal thought_open
                 if not thought_open:
                     return []
@@ -1683,7 +1685,7 @@ def _create_responses_real_streaming_response(
                             "item_id": thought_item_id,
                             "output_index": thought_index,
                             "summary_index": 0,
-                            "text": streamed.thoughts,
+                            "text": text,
                         },
                     ),
                     make_event(
@@ -1692,7 +1694,7 @@ def _create_responses_real_streaming_response(
                             "item_id": thought_item_id,
                             "output_index": thought_index,
                             "summary_index": 0,
-                            "part": dump_model(SummaryTextContent(text=streamed.thoughts)),
+                            "part": dump_model(SummaryTextContent(text=text)),
                         },
                     ),
                     make_event(
@@ -1704,7 +1706,7 @@ def _create_responses_real_streaming_response(
                                     id=thought_item_id,
                                     type="reasoning",
                                     status="completed",
-                                    summary=[SummaryTextContent(text=streamed.thoughts)],
+                                    summary=[SummaryTextContent(text=text)],
                                 )
                             ),
                         },
@@ -1762,13 +1764,20 @@ def _create_responses_real_streaming_response(
                 async for is_thought, delta in _visible_deltas(
                     generator, streamed, downloads, not structured_requirement
                 ):
+                    if is_thought and message_open:
+                        # The reasoning item is finished; these follow the message in one of
+                        # their own, so that each item ends before the next begins.
+                        late_thoughts += delta
+                        continue
                     # Whitespace before a tool call must not open a message; the final text is
                     # stripped anyway.
                     if not (is_thought or message_open) and not (delta := delta.lstrip()):
                         continue
-                    # The reasoning stays open beside the message: the final chunk can still
-                    # carry more of it.
-                    for event in open_thought() if is_thought else open_message():
+                    for event in (
+                        open_thought()
+                        if is_thought
+                        else [*close_thought(streamed.thoughts), *open_message()]
+                    ):
                         yield event
                     yield thought_delta(delta) if is_thought else text_delta(delta)
             except Exception as e:
@@ -1781,7 +1790,7 @@ def _create_responses_real_streaming_response(
                 )
                 return
 
-            for event in close_thought():
+            for event in close_thought(streamed.thoughts):
                 yield event
 
             try:
@@ -1863,16 +1872,11 @@ def _create_responses_real_streaming_response(
                 usage,
                 request,
                 structured_requirement,
-                streamed.thoughts,
+                streamed.thoughts.removesuffix(late_thoughts),
                 message_item_id,
                 thought_item_id,
             )
             if message_open:
-                # Thoughts that first arrive after the text open their item after the message.
-                payload.output[:next_output_index] = sorted(
-                    payload.output[:next_output_index],
-                    key=lambda item: thought_index if item.type == "reasoning" else message_index,
-                )
                 message = payload.output[message_index]
                 part = {
                     "item_id": message_item_id,
@@ -1892,6 +1896,21 @@ def _create_responses_real_streaming_response(
                 yield make_event(
                     "response.output_item.done",
                     {"output_index": message_index, "item": dump_model(message)},
+                )
+            if late_thoughts:
+                thought_item_id = f"rs_{uuid.uuid4().hex[:24]}"
+                for event in [
+                    *open_thought(),
+                    thought_delta(late_thoughts),
+                    *close_thought(late_thoughts),
+                ]:
+                    yield event
+                summary = [SummaryTextContent(type="summary_text", text=late_thoughts)]
+                payload.output.insert(
+                    thought_index,
+                    ResponseReasoningItem(
+                        id=thought_item_id, type="reasoning", status="completed", summary=summary
+                    ),
                 )
             # The images and function calls, which follow the message, each opened and finished.
             for index, item in enumerate(payload.output[next_output_index:], next_output_index):
