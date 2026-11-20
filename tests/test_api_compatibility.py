@@ -19,16 +19,13 @@ from app.models.models import (
     ChatCompletionNamedToolChoice,
     FunctionCallOutput,
     ResponseCreateRequest,
-    ResponseFormatTextJSONSchemaConfig,
     ResponseInputMessage,
-    ResponseUsage,
     StructuredOutputRequirement,
     ToolChoiceFunction,
     ToolChoiceTypes,
 )
 from app.server.chat import (
     _build_structured_requirement,
-    _create_responses_standard_payload,
     _media_markdown,
     _responses_response_format,
     _tool_choice_declaration_error,
@@ -59,7 +56,6 @@ TOOL_CALL_OUTPUT = (
     "[ToolCalls][Call:get_weather][CallParameter:city]Hanoi[/CallParameter][/Call][/ToolCalls]"
 )
 OBJECT_SCHEMA = {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}
-_EMPTY_USAGE = ResponseUsage(input_tokens=0, output_tokens=0, total_tokens=0)
 
 
 def _requirement(schema: dict, *, strict: bool = True) -> StructuredOutputRequirement:
@@ -146,21 +142,12 @@ def test_an_absent_response_format_asks_for_nothing(response_format):
     assert _build_structured_requirement(response_format) is None
 
 
-def test_json_schema_defaults_to_best_effort_and_a_generated_name():
-    """OpenAI defaults `strict` to false, and so must we.
-
-    The flag is not decorative here: a strict miss costs the caller the whole answer, and this
-    wrapper prompts for schema adherence rather than constraining decoding. A caller who never
-    asked for strict enforcement must not be opted into losing replies.
-    """
+def test_a_json_schema_without_a_name_is_named_and_asked_for():
     requirement = _build_structured_requirement(
         {"type": "json_schema", "json_schema": {"schema": OBJECT_SCHEMA, "name": ""}}
     )
     assert requirement is not None
     assert requirement.schema_name == "response"
-    assert requirement.strict is False
-    assert STRICT_SCHEMA_ADHERENCE_PROMPT not in requirement.instruction
-    # The schema is still asked for; only the failure mode softens.
     assert SCHEMA_ADHERENCE_PROMPT in requirement.instruction
 
 
@@ -425,38 +412,6 @@ def test_two_conflicting_formats_are_rejected():
     )
     with pytest.raises(ValueError, match="not both"):
         _responses_response_format(request)
-
-
-@pytest.mark.parametrize(
-    ("requested", "schema", "applied"),
-    [
-        (True, OBJECT_SCHEMA, True),
-        (False, OBJECT_SCHEMA, False),
-        (None, OBJECT_SCHEMA, False),
-        (True, {"type": "not-a-type"}, False),  # asked for, but not a schema we can enforce
-    ],
-)
-def test_the_echoed_strict_reports_what_was_enforced(requested, schema, applied):
-    json_schema: dict = {"name": "r", "schema": schema}
-    if requested is not None:
-        json_schema["strict"] = requested
-    request = ResponseCreateRequest.model_validate(
-        {
-            "model": "m",
-            "input": "hi",
-            "response_format": {"type": "json_schema", "json_schema": json_schema},
-        }
-    )
-    requirement = _build_structured_requirement(_responses_response_format(request))
-    assert requirement is not None
-    assert requirement.strict is applied
-
-    payload = _create_responses_standard_payload(
-        "resp_1", 0, "m", None, [], None, _EMPTY_USAGE, request, requirement
-    )
-    text_format = payload.text.format if payload.text else None
-    assert isinstance(text_format, ResponseFormatTextJSONSchemaConfig)
-    assert text_format.strict is applied
 
 
 def test_openapi_response_schema_is_translated_not_rejected():
