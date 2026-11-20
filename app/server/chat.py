@@ -112,9 +112,7 @@ type DownloadedData = ProcessedImageData | ProcessedMediaData
 type ShownFile = tuple[str, ProcessedImageData | None]
 
 
-async def _image_to_base64(
-    image: Image, temp_dir: Path
-) -> tuple[str, int | None, int | None, str, str]:
+async def _image_to_base64(image: Image, temp_dir: Path) -> ProcessedImageData:
     """Persist an image provided by gemini_webapi and return base64 plus dimensions, filename, and hash."""
     if isinstance(image, GeneratedImage):
         try:
@@ -127,9 +125,6 @@ async def _image_to_base64(
     else:
         saved_path = await image.save(path=str(temp_dir))
 
-    if not saved_path:
-        raise ValueError("Failed to save generated image")
-
     original_path = Path(saved_path)
     data = original_path.read_bytes()
     # The library names the file after its content type, so it always has an extension.
@@ -138,31 +133,15 @@ async def _image_to_base64(
     original_path.rename(new_path)
 
     width, height = extract_image_dimensions(data)
-    filename = random_name
     file_hash = hashlib.sha256(data).hexdigest()
-    return base64.b64encode(data).decode("ascii"), width, height, filename, file_hash
+    return base64.b64encode(data).decode("ascii"), width, height, random_name, file_hash
 
 
 async def _media_to_local_file(
     media: GeneratedVideo | GeneratedMedia, temp_dir: Path
-) -> dict[str, tuple[str, str]]:
+) -> ProcessedMediaData:
     """Persist media and return dict mapping type to (filename, hash)"""
-    try:
-        saved_paths = await media.save(path=str(temp_dir))
-        if not saved_paths:
-            logger.warning("No files saved from media object.")
-            return {}
-    except Exception as e:
-        logger.error(f"Failed to save media: {e}")
-        return {}
-
-    default_extensions = {
-        "video": ".mp4",
-        "audio": ".mp3",
-        "video_thumbnail": ".jpg",
-        "audio_thumbnail": ".jpg",
-    }
-
+    saved_paths = await media.save(path=str(temp_dir))
     results = {}
     path_map = {}
 
@@ -175,15 +154,9 @@ async def _media_to_local_file(
                 results[mtype] = path_map[spath]
                 continue
             original_path = Path(spath)
-            if not original_path.exists():
-                continue
-
             data = original_path.read_bytes()
-            suffix = original_path.suffix or (
-                default_extensions.get(mtype) or (".mp4" if "video" in mtype else ".mp3")
-            )
-
-            random_name = f"media_{uuid.uuid4().hex}{suffix}"
+            # The library names the file after its content type, so it always has an extension.
+            random_name = f"media_{uuid.uuid4().hex}{original_path.suffix}"
             new_path = temp_dir / random_name
             original_path.rename(new_path)
 
