@@ -23,9 +23,6 @@ class GeminiClientPool(metaclass=Singleton):
         ]
         self._id_map = {client.id: client for client in self.clients}
         self._round_robin = deque(self.clients)
-        # A restart clears what the client knows of its open chat window, so it must not run
-        # again for a second request that found the client stopped at the same moment.
-        self._restart_locks = {client.id: asyncio.Lock() for client in self.clients}
 
     @staticmethod
     async def _start(client: GeminiClientWrapper) -> bool:
@@ -101,14 +98,11 @@ class GeminiClientPool(metaclass=Singleton):
         """Make sure the client is running, attempting a restart if needed."""
         if client.running():
             return True
-
-        async with self._restart_locks[client.id]:
-            if client.running():
-                return True
-            if await self._start(client):
-                logger.info(f"Restarted Gemini client {client.id} after it stopped.")
-                return True
-            return False
+        # The library's `init` holds a lock and returns at once once another call started it.
+        if await self._start(client):
+            logger.info(f"Restarted Gemini client {client.id} after it stopped.")
+            return True
+        return False
 
     async def close(self) -> None:
         logger.info(f"Closing {len(self.clients)} Gemini clients...")
