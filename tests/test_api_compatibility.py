@@ -485,8 +485,17 @@ def test_gemini_json_mode_survives_absent_or_empty_schemas(generation_config):
     assert canonicalize_structured_output('{"valid": true}', requirement) == '{"valid":true}'
 
 
-def test_no_response_schema_yields_no_requirement():
-    assert _gemini_structured_requirement(_gemini_request().generationConfig) is None
+@pytest.mark.parametrize(
+    "generation_config",
+    [
+        None,
+        {"responseSchema": OBJECT_SCHEMA},
+        {"responseMimeType": "text/plain", "responseJsonSchema": OBJECT_SCHEMA},
+    ],
+)
+def test_a_native_schema_is_asked_for_only_with_the_json_mime_type(generation_config):
+    request = _gemini_request(generationConfig=generation_config)
+    assert _gemini_structured_requirement(request.generationConfig) is None
 
 
 def test_normalize_openapi_schema_leaves_json_schema_alone():
