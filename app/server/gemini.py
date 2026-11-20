@@ -27,7 +27,6 @@ import orjson
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from gemini_webapi import ModelOutput
-from gemini_webapi.client import ChatSession
 from loguru import logger
 from pydantic import BaseModel
 
@@ -58,17 +57,17 @@ from app.models.gemini_models import (
 from app.server.chat import (
     _build_structured_requirement,
     _Downloads,
-    _persist_conversation,
     _prepare_messages_for_model,
     _resolve_model_name,
     _send_request,
+    _Sent,
     _Streamed,
     _tool_choice_failure,
     _visible_deltas,
     available_models,
 )
 from app.server.middleware import get_temp_dir, google_error_body, verify_gemini_api_key
-from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
+from app.services import GeminiClientPool
 from app.utils.helper import (
     StructuredOutputValidationError,
     calculate_usage,
@@ -441,14 +440,9 @@ async def gemini_get_model(model: str):
 class _SentRequest(NamedTuple):
     """A generation request that has been sent upstream, with what finishing it needs."""
 
-    output: AsyncGenerator[ModelOutput] | ModelOutput
-    session: ChatSession
-    client: GeminiClientWrapper
-    db: LMDBConversationStore
+    sent: _Sent
     model_name: str
-    resolved_model: str
     messages: list[AppMessage]  # as the caller sent them; usage is counted on these
-    prepared: list[AppMessage]  # with tool and schema instructions added; this is what is stored
     tool_choice: Literal["none", "auto", "required"] | ToolChoiceFunction | None
     structured_requirement: StructuredOutputRequirement | None
 
@@ -461,9 +455,8 @@ async def _send_gemini_request(
     Raises `HTTPException`, which the app answers in Google's envelope.
     """
     model_name = model.removeprefix("models/")
-    pool, db = GeminiClientPool(), LMDBConversationStore()
     try:
-        resolved_model = _resolve_model_name(pool, model_name)
+        resolved_model = _resolve_model_name(GeminiClientPool(), model_name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if validation_error := _validate_gemini_request(request):
@@ -476,9 +469,7 @@ async def _send_gemini_request(
     instructions = [structured_requirement.instruction] if structured_requirement else None
     prepared = _prepare_messages_for_model(messages, tools, tool_choice, instructions)
 
-    output, session, client = await _send_request(
-        pool=pool,
-        db=db,
+    sent = await _send_request(
         resolved_model=resolved_model,
         history=[],  # gems are found from the history; this surface never uses them
         prepared=prepared,
@@ -488,18 +479,7 @@ async def _send_gemini_request(
         tmp_dir=tmp_dir,
         stream=stream,
     )
-    return _SentRequest(
-        output,
-        session,
-        client,
-        db,
-        model_name,
-        resolved_model,
-        messages,
-        prepared,
-        tool_choice,
-        structured_requirement,
-    )
+    return _SentRequest(sent, model_name, messages, tool_choice, structured_requirement)
 
 
 async def _generated_files(downloads: _Downloads) -> tuple[list[GeminiInlineData], str]:
@@ -538,7 +518,7 @@ async def gemini_generate_content(
 ):
     """Non-streaming content generation (Gemini API format)."""
     sent = await _send_gemini_request(model, request, tmp_dir, stream=False)
-    resp = sent.output
+    resp = sent.sent.output
     assert isinstance(resp, ModelOutput)
 
     try:
@@ -558,15 +538,7 @@ async def gemini_generate_content(
     visible_output += media_markdown
 
     usage = calculate_usage(sent.messages, visible_output, tool_calls, thoughts)
-    _persist_conversation(
-        sent.db,
-        sent.resolved_model,
-        sent.client,
-        sent.session.metadata,
-        sent.prepared,
-        _stored_reply(visible_output, images),
-        tool_calls,
-    )
+    sent.sent.persist(_stored_reply(visible_output, images), tool_calls)
 
     parts = [GeminiPart(text=thoughts, thought=True)] if thoughts else []
     if visible_output:
@@ -608,7 +580,8 @@ async def gemini_stream_generate_content(
 
 async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str]:
     """The SSE frames of a streamed reply; the conversation is stored once it is complete."""
-    assert not isinstance(sent.output, ModelOutput)
+    output = sent.sent.output
+    assert not isinstance(output, ModelOutput)
     streamed = _Streamed()
     downloads = _Downloads(base_url)
     # Structured output is withheld until it has been validated.
@@ -616,7 +589,7 @@ async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str
     try:
         try:
             async for is_thought, delta in _visible_deltas(
-                sent.output, streamed, downloads, forward_text
+                output, streamed, downloads, forward_text
             ):
                 yield _part_frame(GeminiPart(text=delta, thought=is_thought or None))
         except Exception as e:
@@ -670,15 +643,7 @@ async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str
                 modelVersion=sent.model_name,
             )
         )
-        _persist_conversation(
-            sent.db,
-            sent.resolved_model,
-            sent.client,
-            sent.session.metadata,
-            sent.prepared,
-            _stored_reply(visible_output, images),
-            tool_calls,
-        )
+        sent.sent.persist(_stored_reply(visible_output, images), tool_calls)
     finally:
         # Whatever ended the stream early - an error, or the client going away.
         await downloads.cancel()
