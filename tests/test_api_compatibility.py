@@ -173,9 +173,10 @@ def test_only_a_strict_schema_is_prompted_for_exact_conformance(strict):
 
 def test_tool_call_turn_is_not_failed_by_a_response_format():
     """The schema constrains the final answer, not a turn that asks for a tool."""
-    _, visible, tool_calls = process_llm_output(None, TOOL_CALL_OUTPUT, _requirement(OBJECT_SCHEMA))
+    raw = "Let me check. " + TOOL_CALL_OUTPUT
+    _, visible, tool_calls = process_llm_output(None, raw, _requirement(OBJECT_SCHEMA))
     assert [call.function.name for call in tool_calls] == ["get_weather"]
-    assert visible == ""
+    assert visible == "Let me check."
 
 
 def test_strict_violation_raises_and_best_effort_violation_degrades():

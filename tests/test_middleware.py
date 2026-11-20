@@ -26,9 +26,11 @@ LIMIT = 100
 
 def _build_app(max_body_bytes: int = LIMIT) -> FastAPI:
     app = FastAPI()
+    app.state.entered = 0
 
     @app.post("/v1/echo")
     async def echo(request: Request):
+        app.state.entered += 1
         return {"received": len(await request.body())}
 
     @app.post("/v1beta/models/x:generateContent")
@@ -48,24 +50,20 @@ def _chunks(total: int, size: int = 40):
         sent += step
 
 
-def test_a_body_within_the_ceiling_reaches_the_route():
-    with TestClient(_build_app()) as client:
-        response = client.post("/v1/echo", content=b"x" * (LIMIT - 1))
-    assert response.status_code == 200
-    assert response.json() == {"received": LIMIT - 1}
-
-
-def test_a_body_exactly_at_the_ceiling_is_allowed():
+def test_a_body_exactly_at_the_ceiling_reaches_the_route():
     with TestClient(_build_app()) as client:
         response = client.post("/v1/echo", content=b"x" * LIMIT)
     assert response.status_code == 200
+    assert response.json() == {"received": LIMIT}
 
 
-def test_a_declared_oversize_body_is_refused():
-    with TestClient(_build_app()) as client:
+def test_a_declared_oversize_body_is_refused_before_the_route_runs():
+    app = _build_app()
+    with TestClient(app) as client:
         response = client.post("/v1/echo", content=b"x" * (LIMIT + 1))
     assert response.status_code == 413
     assert "safety ceiling" in response.json()["error"]["message"]
+    assert app.state.entered == 0
 
 
 def test_a_chunked_oversize_body_is_refused():

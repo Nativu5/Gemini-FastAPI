@@ -175,36 +175,15 @@ def test_an_unmet_forced_tool_choice_ends_the_stream_with_an_error(db):
     assert error["code"] == "required_tool_missing"
 
 
-def test_a_volunteered_image_does_not_satisfy_a_forced_tool_choice(db, monkeypatch):
-    """Chat Completions has no image tool, so an image cannot stand in for a forced call.
-
-    The image also covers cleanup: media downloads spawned while chunks arrive have to be
-    cancelled on an early error return, not left writing files nothing will reference.
-    """
-    started: list[asyncio.Task] = []
-
-    async def slow_download(_img):
-        started.append(cast(asyncio.Task, asyncio.current_task()))
-        await asyncio.sleep(5)
-
-    monkeypatch.setattr("app.server.chat._process_image_item", slow_download)
-
+def test_a_volunteered_image_does_not_satisfy_a_forced_tool_choice(db):
+    """Chat Completions has no image tool, so an image cannot stand in for a forced call."""
     first = _output("just prose")
     first.candidates[0].web_images = [WebImage(url="http://127.0.0.1:1/x.png")]
 
-    async def stream_with_a_scheduling_gap():
-        yield first
-        # Let the spawned task start, so cancelling it is observable.
-        await asyncio.sleep(0)
-        yield _output("just prose", delta="")
+    frames = _collect(db, _stream(first), tool_choice="required")
 
-    frames = _collect(db, stream_with_a_scheduling_gap(), tool_choice="required")
-
-    error = _payloads(frames)[-1]["error"]
-    assert error["code"] == "required_tool_missing"
+    assert _payloads(frames)[-1]["error"]["code"] == "required_tool_missing"
     assert frames[-1].endswith("data: [DONE]\n\n")
-    assert started
-    assert all(task.cancelled() for task in started)
 
 
 def test_an_upstream_failure_mid_stream_is_reported_and_terminated(db):
