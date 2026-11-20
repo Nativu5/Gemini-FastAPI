@@ -412,7 +412,7 @@ def _content_item(
     drop_empty: bool,
 ) -> AppContentItem | None:
     """One part of an input item as a message part; None for a refusal, and with `drop_empty`
-    for empty text or a file whose source is empty. A tool result keeps its empty pieces.
+    for empty text. A tool result keeps its empty pieces.
 
     Raises `ValueError` for a reference this wrapper cannot resolve, or a media part whose source
     is missing or ambiguous: dropping either silently would change what the model sees.
@@ -426,8 +426,6 @@ def _content_item(
     if isinstance(part, ResponseInputFile):
         if (part.file_url is None) == (part.file_data is None):
             raise ValueError("input_file must contain exactly one of file_url or file_data")
-        if drop_empty and not (part.file_url or part.file_data):
-            return None
         return AppContentItem(
             type="file", url=part.file_url, file_data=part.file_data, filename=part.filename
         )
