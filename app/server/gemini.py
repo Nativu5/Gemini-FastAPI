@@ -58,7 +58,6 @@ from app.models.gemini_models import (
 )
 from app.server.chat import (
     _build_structured_requirement,
-    _Downloads,
     _prepare_messages_for_model,
     _resolve_model_name,
     _send_request,
@@ -68,6 +67,7 @@ from app.server.chat import (
     _visible_deltas,
     available_models,
 )
+from app.server.media import _Downloads
 from app.server.middleware import get_temp_dir, google_error_body, verify_gemini_api_key
 from app.services import GeminiClientPool
 from app.utils.helper import (

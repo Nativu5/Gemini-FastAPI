@@ -1,7 +1,5 @@
-import hashlib
 import hmac
 import tempfile
-import time
 from pathlib import Path
 from typing import Any
 
@@ -9,15 +7,11 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from loguru import logger
 from starlette.datastructures import Headers, QueryParams
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.utils import g_config
-
-MEDIA_STORE_DIR = Path(g_config.storage.media_path)
-MEDIA_STORE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class GoogleClientsOnV1Middleware:
@@ -94,49 +88,6 @@ class RequestBodyLimitMiddleware:
             return message
 
         await self.app(scope, limited_receive, send)
-
-
-def get_media_store_dir() -> Path:
-    return MEDIA_STORE_DIR
-
-
-def get_media_token(filename: str) -> str:
-    """Generate a HMAC-SHA256 token for a filename using the API key."""
-    secret = g_config.server.api_key
-    if not secret:
-        return ""
-
-    return hmac.new(secret.encode(), filename.encode(), hashlib.sha256).hexdigest()
-
-
-def verify_media_token(filename: str, token: str | None) -> bool:
-    """True if the token is the one signed for this file, or if no API key is configured:
-    media is then open, like the rest of the API."""
-    if expected := get_media_token(filename):
-        return hmac.compare_digest(token, expected) if token else False
-    return True
-
-
-def cleanup_expired_media(ttl_seconds: int) -> int:
-    """Delete media files last written more than `ttl_seconds` ago; 0 keeps them for good."""
-    if ttl_seconds <= 0:
-        return 0
-
-    cutoff = time.time() - ttl_seconds
-    count = 0
-    for file_path in MEDIA_STORE_DIR.iterdir():
-        if not file_path.is_file():
-            continue
-        try:
-            if file_path.stat().st_mtime < cutoff:
-                file_path.unlink()
-                count += 1
-        except Exception as e:
-            logger.warning(f"Failed to delete expired media {file_path}: {e}")
-
-    if count > 0:
-        logger.info(f"Cleaned up {count} expired media files.")
-    return count
 
 
 _OPENAI_ERROR_TYPES = {

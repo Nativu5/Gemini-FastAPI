@@ -310,9 +310,9 @@ def test_cleanup_expired_media_with_ttl_seconds(tmp_path, monkeypatch):
     import os
     import time
 
-    from app.server import middleware
+    from app.server import media
 
-    monkeypatch.setattr(middleware, "MEDIA_STORE_DIR", tmp_path)
+    monkeypatch.setattr(media, "MEDIA_STORE_DIR", tmp_path)
     old_file = tmp_path / "old.png"
     old_file.write_text("old")
     new_file = tmp_path / "new.png"
@@ -321,7 +321,7 @@ def test_cleanup_expired_media_with_ttl_seconds(tmp_path, monkeypatch):
     past = time.time() - 7200
     os.utime(old_file, (past, past))
 
-    removed = middleware.cleanup_expired_media(3600)
+    removed = media.cleanup_expired_media(3600)
     assert removed == 1
     assert not old_file.exists()
     assert new_file.exists()

@@ -11,7 +11,7 @@ from gemini_webapi.exceptions import ModelInvalidError
 from gemini_webapi.types import GeneratedVideo, WebImage
 
 from app.models.models import ModelData
-from app.server import chat, gemini, middleware
+from app.server import chat, gemini, media
 from app.utils import g_config
 from app.utils.config import GeminiGemPolicyMode
 
@@ -1076,7 +1076,7 @@ def test_a_second_copy_of_a_generated_video_is_linked_once_and_deleted(api, path
     text = _reply_text(api.post(path, json={"model": MODEL, **prompt}), False)
 
     assert text.count("[Clip](") == 1
-    assert len(list(middleware.MEDIA_STORE_DIR.iterdir())) == 1
+    assert len(list(media.MEDIA_STORE_DIR.iterdir())) == 1
 
 
 @pytest.mark.parametrize(

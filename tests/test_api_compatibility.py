@@ -27,7 +27,6 @@ from app.models.models import (
 from app.server.chat import (
     _build_structured_requirement,
     _convert_responses_to_app_messages,
-    _media_markdown,
     _responses_response_format,
     _tool_choice_declaration_error,
     _tool_choice_failure,
@@ -37,6 +36,7 @@ from app.server.gemini import (
     _gemini_tools_to_internal,
     _validate_gemini_request,
 )
+from app.server.media import _media_markdown
 from app.services.client import process_conversation
 from app.utils.helper import (
     SCHEMA_ADHERENCE_PROMPT,
@@ -912,8 +912,8 @@ def test_tool_call_with_language_tagged_parameter_fences():
 
 
 def test_generated_media_is_linked_once_and_a_second_copy_is_deleted(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.server.chat.get_media_store_dir", lambda: tmp_path)
-    monkeypatch.setattr("app.server.chat.get_media_token", lambda name: f"t-{name}")
+    monkeypatch.setattr("app.server.media.MEDIA_STORE_DIR", tmp_path)
+    monkeypatch.setattr("app.server.media.get_media_token", lambda name: f"t-{name}")
     for name in ("v1.mp4", "v1.jpg", "copy.mp4", "copy.jpg"):
         (tmp_path / name).write_bytes(b"x")
     seen: dict[str, str] = {}
