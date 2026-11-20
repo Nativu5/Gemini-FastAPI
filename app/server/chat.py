@@ -207,7 +207,6 @@ def _echoed_tools(request: ResponseCreateRequest) -> dict[str, Any]:
 def _create_responses_standard_payload(
     response_id: str,
     created_time: int,
-    model_name: str,
     detected_tool_calls: list[AppToolCall] | None,
     image_call_items: list[ImageGenerationCall],
     message_text: str | None,
@@ -284,7 +283,7 @@ def _create_responses_standard_payload(
         object="response",
         created_at=created_time,
         completed_at=now_ts,
-        model=model_name,
+        model=request.model,
         output=output_items,
         status="completed",
         usage=usage,
@@ -1490,7 +1489,6 @@ def _create_responses_real_streaming_response(
     sent: _Sent,
     response_id: str,
     created_time: int,
-    model_name: str,
     request: ResponseCreateRequest,
     base_url: str,
     structured_requirement: StructuredOutputRequirement | None = None,
@@ -1501,7 +1499,7 @@ def _create_responses_real_streaming_response(
         "id": response_id,
         "object": "response",
         "created_at": created_time,
-        "model": model_name,
+        "model": request.model,
     }
 
     async def generate_stream():
@@ -1791,7 +1789,6 @@ def _create_responses_real_streaming_response(
             payload = _create_responses_standard_payload(
                 response_id,
                 created_time,
-                model_name,
                 detected_tool_calls,
                 image_items,
                 assistant_text if message_open else None,
@@ -2062,7 +2059,6 @@ async def create_response(
             sent,
             response_id,
             created_time,
-            request.model,
             request,
             base_url,
             structured_requirement,
@@ -2100,7 +2096,6 @@ async def create_response(
     payload = _create_responses_standard_payload(
         response_id,
         created_time,
-        request.model,
         tool_calls,
         img_calls,
         assistant_text if assistant_text or not tool_calls else None,

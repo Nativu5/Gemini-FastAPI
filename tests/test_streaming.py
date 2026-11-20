@@ -59,7 +59,7 @@ def _chat_completions(output):
 def _responses(output):
     request = ResponseCreateRequest(model=MODEL, input="hi", stream=True)
     return _create_responses_real_streaming_response(
-        _Sent(output, UNREAD, MODEL, HI), "id", 0, MODEL, request, "http://testserver/"
+        _Sent(output, UNREAD, MODEL, HI), "id", 0, request, "http://testserver/"
     )
 
 
