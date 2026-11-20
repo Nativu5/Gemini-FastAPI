@@ -5,6 +5,7 @@ just because Gemini Web cannot honour one of them. Options that cannot be forwar
 and dropped; only malformed or unrepresentable *content* is refused.
 """
 
+import asyncio
 import base64
 import time
 
@@ -12,7 +13,7 @@ import orjson
 import pytest
 from pydantic import ValidationError
 
-from app.models.core import AppContentItem, AppToolCall, AppToolCallFunction
+from app.models.core import AppContentItem, AppMessage, AppToolCall, AppToolCallFunction
 from app.models.gemini_models import GeminiGenerateContentRequest, GeminiGenerationConfig
 from app.models.models import (
     ChatCompletionNamedToolChoice,
@@ -40,6 +41,7 @@ from app.server.gemini import (
     _gemini_tools_to_internal,
     _validate_gemini_request,
 )
+from app.services.client import process_conversation
 from app.utils.helper import (
     SCHEMA_ADHERENCE_PROMPT,
     STRICT_SCHEMA_ADHERENCE_PROMPT,
@@ -982,3 +984,40 @@ def test_generated_media_is_linked_once_and_a_second_copy_is_deleted(tmp_path, m
         "[Clip - Audio](http://h/media/a.mp3?token=t-a.mp3)"
     )
     assert _media_markdown("Clip", {}, seen, "http://h/") == ""
+
+
+def test_a_tool_round_trip_is_sent_in_the_protocol_the_model_is_taught():
+    def call(name: str, arguments: str) -> AppToolCall:
+        return AppToolCall(id=name, function=AppToolCallFunction(name=name, arguments=arguments))
+
+    def text(value: str) -> AppContentItem:
+        return AppContentItem(type="text", text=value)
+
+    messages = [
+        AppMessage(role="user", content=[text("Weather?"), text("")]),
+        AppMessage(
+            role="assistant",
+            content="Checking.",
+            tool_calls=[call("get_weather", '{"city": "Hanoi", "days": 2}'), call("ping", "[1]")],
+        ),
+        AppMessage(role="tool", name="get_weather", content="Sunny"),
+        AppMessage(role="tool", name="ping", content=[text("a"), text(""), text("b")]),
+        AppMessage(role="user", content="Thanks"),
+    ]
+
+    prompt, files = asyncio.run(process_conversation(messages))
+
+    assert files == []
+    assert prompt == (
+        "<|im_start|>user\nWeather?\n<|im_end|>\n"
+        "<|im_start|>assistant\nChecking.\n[ToolCalls]\n[Call:get_weather]\n"
+        "[CallParameter:city]\n```\nHanoi\n```\n[/CallParameter]\n"
+        "[CallParameter:days]\n```\n2\n```\n[/CallParameter]\n[/Call]\n"
+        "[Call:ping]\n```\n[1]\n```\n[/Call]\n[/ToolCalls]\n<|im_end|>\n"
+        "<|im_start|>tool\n[ToolResults]\n"
+        "[Result:get_weather]\n[ToolResult]\nSunny\n[/ToolResult]\n[/Result]\n"
+        "[Result:ping]\n[ToolResult]\na\n\nb\n[/ToolResult]\n[/Result]\n"
+        "[/ToolResults]\n<|im_end|>\n"
+        "<|im_start|>user\nThanks\n<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )

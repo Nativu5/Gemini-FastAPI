@@ -67,6 +67,7 @@ from app.server.middleware import (
     verify_api_key,
 )
 from app.services import GeminiClientPool, GeminiClientWrapper, LMDBConversationStore
+from app.services.client import process_conversation
 from app.services.lmdb import cid_of
 from app.utils import g_config
 from app.utils.config import ChatMode
@@ -1056,9 +1057,7 @@ async def _send_with_internal_fallback(
         logger.warning(
             "Metadata-backed chat reuse failed; retrying with internal history replay in a fresh chat."
         )
-        fallback_input, fallback_files = await GeminiClientWrapper.process_conversation(
-            full_prepared_messages, tmp_dir
-        )
+        fallback_input, fallback_files = await process_conversation(full_prepared_messages, tmp_dir)
         # Built before acquiring, so a replay that needs an upload is not handed to a guest.
         fallback_client = await pool.acquire(
             require_account=bool(fallback_files) or len(fallback_input) > _max_chars_per_request()
@@ -1112,7 +1111,7 @@ async def _send_request(
         if gem_id := await _resolve_system_prompt_gem(client, system_prompt):
             session.gem = gem_id
         to_send = _prepare_messages_for_model(remain, tools, tool_choice, instructions, False)
-        m_input, files = await GeminiClientWrapper.process_conversation(to_send, tmp_dir)
+        m_input, files = await process_conversation(to_send, tmp_dir)
         logger.debug(
             f"Reused session {reprlib.repr(session.metadata)} - sending {len(to_send)} prepared messages."
         )
@@ -1127,7 +1126,7 @@ async def _send_request(
                 else prepared
             )
             session = client.start_chat(model=client.usable_model(resolved_model), gem=gem_id)
-            m_input, files = await GeminiClientWrapper.process_conversation(to_send, tmp_dir)
+            m_input, files = await process_conversation(to_send, tmp_dir)
         except Exception as e:
             logger.error(f"Error in preparing conversation: {e}")
             raise HTTPException(

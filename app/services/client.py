@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import io
+import itertools
 import re
 import time
 from collections import deque
@@ -14,7 +15,7 @@ from gemini_webapi.constants import AccountStatus
 from gemini_webapi.types import AvailableModel, Gem
 from loguru import logger
 
-from app.models import AppMessage
+from app.models import AppMessage, AppToolCall
 from app.utils import g_config
 from app.utils.config import GeminiGemPolicyMode
 from app.utils.helper import (
@@ -240,138 +241,80 @@ class GeminiClientWrapper(GeminiClient):
             return f"guest:{self._sessionid}"
         return f"temporary:{self._sessionid}" if temporary else None
 
-    @staticmethod
-    async def _process_content_item(
-        item: Any, role: str, tempdir: Path | None
-    ) -> tuple[str | None, Path | str | None]:
-        """One content item as (text, file); at most one of the two is set."""
+
+async def _texts_and_files(
+    message: AppMessage, tempdir: Path | None
+) -> tuple[list[str], list[Path | str]]:
+    """The text pieces and the files of a message, each in the order they appear. Empty pieces
+    are kept only in a tool result."""
+    if not isinstance(message.content, list):
+        return [message.content or ""], []
+    texts: list[str] = []
+    files: list[Path | str] = []
+    for item in message.content:
         if item.type == "text":
-            item_text = getattr(item, "text", "") or ""
-            if item_text or role == "tool":
-                return item_text, None
-        elif item.type == "image_url":
-            if item_media_url := getattr(item, "url", None):
-                return None, await save_url_to_tempfile(item_media_url, tempdir)
-            raise ValueError(f"{item.type} cannot be empty")
-        elif item.type == "file":
-            if file_url := getattr(item, "url", None):
-                return None, await save_url_to_tempfile(file_url, tempdir)
-            if not (file_data := getattr(item, "file_data", None)):
-                raise ValueError("File must contain 'file_data' or 'url'")
-            filename = getattr(item, "filename", "") or ""
-            return None, await save_file_to_tempfile(file_data, filename, tempdir)
-        elif item.type == "input_audio":
-            if file_data := getattr(item, "file_data", None):
-                return None, await save_file_to_tempfile(file_data, "audio.wav", tempdir)
-            raise ValueError("input_audio must contain 'file_data' key")
-        return None, None
+            if item.text or message.role == "tool":
+                texts.append(item.text or "")
+        elif item.type in ("image_url", "file") and item.url:
+            files.append(await save_url_to_tempfile(item.url, tempdir))
+        elif item.type in ("file", "input_audio") and item.file_data:
+            filename = "audio.wav" if item.type == "input_audio" else item.filename or ""
+            files.append(await save_file_to_tempfile(item.file_data, filename, tempdir))
+        elif item.type in ("image_url", "file", "input_audio"):
+            raise ValueError(f"{item.type} has neither a url nor data")
+    return texts, files
 
-    @staticmethod
-    async def _extract_content_and_files(
-        message: AppMessage, tempdir: Path | None
-    ) -> tuple[list[str], list[Path | str]]:
-        """The text pieces and the files of a message, each in the order they appear."""
-        files: list[Path | str] = []
-        text_fragments: list[str] = []
 
-        if isinstance(message.content, str):
-            if message.content or message.role == "tool":
-                text_fragments.append(message.content or "")
-        elif isinstance(message.content, list):
-            for item in message.content:
-                text, file = await GeminiClientWrapper._process_content_item(
-                    item, message.role, tempdir
-                )
-                if text is not None:
-                    text_fragments.append(text)
-                if file is not None:
-                    files.append(file)
-        elif message.content is None and message.role == "tool":
-            text_fragments.append("")
-        elif message.content is not None:
-            raise ValueError(f"Unsupported message content type: {type(message.content)}")
+def _tool_calls_block(calls: list[AppToolCall]) -> str:
+    """Tool calls as the `[ToolCalls]` protocol block the model is taught."""
+    blocks = []
+    for call in calls:
+        params = call.function.arguments.strip()
+        try:
+            parsed = orjson.loads(params) if params else {}
+        except orjson.JSONDecodeError:
+            parsed = params
+        if isinstance(parsed, dict):
+            body = "".join(
+                f"[CallParameter:{key}]\n```\n"
+                f"{value if isinstance(value, str) else orjson.dumps(value).decode()}"
+                "\n```\n[/CallParameter]\n"
+                for key, value in parsed.items()
+            )
+        else:
+            body = f"```\n{params}\n```\n"
+        blocks.append(f"[Call:{call.function.name}]\n{body}[/Call]")
+    return "[ToolCalls]\n" + "\n".join(blocks) + "\n[/ToolCalls]"
 
-        return text_fragments, files
 
-    @staticmethod
-    def _format_tool_calls(message: AppMessage) -> str | None:
-        """A message's tool calls as a `[ToolCalls]` protocol block, or None if it has none."""
-        if not message.tool_calls:
-            return None
+async def process_conversation(
+    messages: list[AppMessage], tempdir: Path | None = None
+) -> tuple[str, list[str | Path | bytes | io.BytesIO]]:
+    """Messages as one prompt, each in its role's ChatML tags and ending with an open assistant
+    turn, plus the files they attach.
 
-        tool_blocks: list[str] = []
-        for call in message.tool_calls:
-            params_text = call.function.arguments.strip()
-            formatted_params = ""
-            if params_text:
-                try:
-                    parsed_params = orjson.loads(params_text)
-                    if isinstance(parsed_params, dict):
-                        for k, v in parsed_params.items():
-                            val_str = v if isinstance(v, str) else orjson.dumps(v).decode("utf-8")
-                            formatted_params += (
-                                f"[CallParameter:{k}]\n```\n{val_str}\n```\n[/CallParameter]\n"
-                            )
-                    else:
-                        formatted_params += f"```\n{params_text}\n```\n"
-                except orjson.JSONDecodeError:
-                    formatted_params += f"```\n{params_text}\n```\n"
-
-            tool_blocks.append(f"[Call:{call.function.name}]\n{formatted_params}[/Call]")
-
-        return "[ToolCalls]\n" + "\n".join(tool_blocks) + "\n[/ToolCalls]" if tool_blocks else None
-
-    @staticmethod
-    async def process_message(
-        message: AppMessage, tempdir: Path | None = None
-    ) -> tuple[str, list[Path | str]]:
-        """One message as prompt text plus the files it attaches.
-
-        A tool message becomes a `[Result:name]` block, which `process_conversation` groups with
-        its neighbours; any other message is wrapped in its role's ChatML tags, with its tool
-        calls appended as a `[ToolCalls]` block.
-        """
-        text_fragments, files = await GeminiClientWrapper._extract_content_and_files(
-            message, tempdir
-        )
-        if message.role == "tool":
-            result = "\n".join(text_fragments).strip()
-            name = message.name or "unknown"
-            return f"[Result:{name}]\n[ToolResult]\n{result}\n[/ToolResult]\n[/Result]", files
-
-        if tool_section := GeminiClientWrapper._format_tool_calls(message):
-            text_fragments.append(tool_section)
-        model_input = "\n".join(text_fragments)
-        return add_tag(message.role, model_input) if model_input else "", files
-
-    @staticmethod
-    async def process_conversation(
-        messages: list[AppMessage], tempdir: Path | None = None
-    ) -> tuple[str, list[str | Path | bytes | io.BytesIO]]:
-        conversation: list[str] = []
-        files: list[str | Path | bytes | io.BytesIO] = []
-
-        i = 0
-        while i < len(messages):
-            msg = messages[i]
-            if msg.role == "tool":
-                tool_blocks: list[str] = []
-                while i < len(messages) and messages[i].role == "tool":
-                    part, part_files = await GeminiClientWrapper.process_message(
-                        messages[i], tempdir
-                    )
-                    tool_blocks.append(part)
-                    files.extend(part_files)
-                    i += 1
-
-                combined_tool_content = "\n".join(tool_blocks)
-                wrapped_content = f"[ToolResults]\n{combined_tool_content}\n[/ToolResults]"
-                conversation.append(add_tag("tool", wrapped_content))
-            else:
-                input_part, files_part = await GeminiClientWrapper.process_message(msg, tempdir)
-                conversation.append(input_part)
-                files.extend(files_part)
-                i += 1
-
-        conversation.append(add_tag("assistant", "", unclose=True))
-        return "\n".join(conversation), files
+    A run of tool messages shares one `tool` turn, a `[Result:name]` block for each; another
+    message's tool calls follow its text as a `[ToolCalls]` block.
+    """
+    turns: list[str] = []
+    files: list[str | Path | bytes | io.BytesIO] = []
+    for is_tool, group in itertools.groupby(messages, key=lambda message: message.role == "tool"):
+        prompts: list[str] = []
+        for message in group:
+            texts, message_files = await _texts_and_files(message, tempdir)
+            files += message_files
+            if is_tool:
+                result = "\n".join(texts).strip()
+                name = message.name or "unknown"
+                prompts.append(f"[Result:{name}]\n[ToolResult]\n{result}\n[/ToolResult]\n[/Result]")
+                continue
+            calls = _tool_calls_block(message.tool_calls) if message.tool_calls else ""
+            text = "\n".join(part for part in ("\n".join(texts), calls) if part)
+            prompts.append(add_tag(message.role, text) if text else "")
+        if is_tool:
+            joined = "\n".join(prompts)
+            turns.append(add_tag("tool", f"[ToolResults]\n{joined}\n[/ToolResults]"))
+        else:
+            turns += prompts
+    turns.append(add_tag("assistant", "", unclose=True))
+    return "\n".join(turns), files
