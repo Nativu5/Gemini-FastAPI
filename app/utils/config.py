@@ -356,15 +356,10 @@ def extract_gemini_clients_env() -> dict[int, dict[str, Any]]:
 
 
 def _merge_clients_with_env(
-    base_clients: list[GeminiClientSettings] | None,
-    env_overrides: dict[int, dict[str, Any]],
+    base_clients: list[GeminiClientSettings], env_overrides: dict[int, dict[str, Any]]
 ) -> list[GeminiClientSettings]:
     """Return Gemini clients with environment overrides applied to the base list."""
-    if not env_overrides:
-        return base_clients or []
-    result_clients: list[GeminiClientSettings] = []
-    if base_clients:
-        result_clients = [client.model_copy() for client in base_clients]
+    result_clients = list(base_clients)
     for idx in sorted(env_overrides):
         overrides = env_overrides[idx]
         if idx < len(result_clients):
@@ -379,7 +374,7 @@ def _merge_clients_with_env(
                 f"Client index {idx} in env is out of range (current count: {len(result_clients)}). "
                 "Client indices must be contiguous starting from 0."
             )
-    return result_clients or base_clients or []
+    return result_clients
 
 
 def initialize_config() -> Config:

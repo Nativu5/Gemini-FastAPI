@@ -146,8 +146,6 @@ class GeminiClientPool(metaclass=Singleton):
                 )
                 return False
             await client.delete_chat(cid)
-            if client.latest_chat_cid == cid:
-                client.latest_chat_cid = None
             logger.info(f"Deleted remote chat {cid} on Google for client {client_id}")
             return True
         except Exception as e:

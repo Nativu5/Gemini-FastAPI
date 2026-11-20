@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import mimetypes
 import time
 from contextlib import asynccontextmanager
@@ -33,8 +32,7 @@ for _ext, _mime in (
     (".flac", "audio/flac"),
     (".m4a", "audio/mp4"),
 ):
-    with contextlib.suppress(ValueError):
-        mimetypes.add_type(_mime, _ext)
+    mimetypes.add_type(_mime, _ext)
 
 RETENTION_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
 
@@ -116,11 +114,7 @@ async def lifespan(app: FastAPI):
         cleanup_task.cancel()
         # Also collects a failure that ended the task early, which would skip the rest.
         await asyncio.gather(cleanup_task, return_exceptions=True)
-
-        try:
-            await pool.close()
-        except Exception:
-            logger.exception("Failed to close Gemini client pool gracefully.")
+        await pool.close()
 
 
 def create_app() -> FastAPI:
