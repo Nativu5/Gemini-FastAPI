@@ -914,16 +914,14 @@ def process_llm_output(
     thoughts: str | None,
     raw_text: str,
     structured_requirement: StructuredOutputRequirement | None,
-) -> tuple[str | None, str, list[AppToolCall]]:
-    """A finished reply as (thoughts, text, tool calls).
+) -> tuple[str, str, list[AppToolCall]]:
+    """A finished reply as (thoughts, text, tool calls), both texts normalized.
 
     The text has the protocol blocks removed and, under a response format, is the canonical JSON
     the reply held. Raises `StructuredOutputValidationError` when a strict format is not met.
     """
-    if thoughts:
-        thoughts = thoughts.strip()
-
-    visible_output, tool_calls = extract_tool_calls(raw_text)
+    thoughts = normalize_llm_text(thoughts or "").strip()
+    visible_output, tool_calls = extract_tool_calls(normalize_llm_text(raw_text))
     if tool_calls:
         logger.debug(f"Detected {len(tool_calls)} tool call(s) in model output.")
 

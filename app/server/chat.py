@@ -88,7 +88,6 @@ from app.utils.helper import (
     extract_image_dimensions,
     extract_named_tool_choice,
     normalize_app_message_role,
-    normalize_llm_text,
     process_llm_output,
     strip_system_hints,
     text_from_message,
@@ -1434,9 +1433,7 @@ def _create_real_streaming_response(
 
             try:
                 _, visible_output, detected_tool_calls = process_llm_output(
-                    normalize_llm_text(streamed.thoughts),
-                    normalize_llm_text(streamed.text),
-                    structured_requirement,
+                    streamed.thoughts, streamed.text, structured_requirement
                 )
             except StructuredOutputValidationError as exc:
                 yield _sse_error(
@@ -1726,9 +1723,7 @@ def _create_responses_real_streaming_response(
 
             try:
                 _, assistant_text, detected_tool_calls = process_llm_output(
-                    normalize_llm_text(streamed.thoughts),
-                    normalize_llm_text(streamed.text),
-                    structured_requirement,
+                    streamed.thoughts, streamed.text, structured_requirement
                 )
             except StructuredOutputValidationError as exc:
                 yield make_event(
@@ -1931,9 +1926,7 @@ async def create_chat_completion(
 
     try:
         thoughts, visible_output, tool_calls = process_llm_output(
-            normalize_llm_text(resp_or_stream.thoughts or ""),
-            normalize_llm_text(resp_or_stream.text or ""),
-            structured_requirement,
+            resp_or_stream.thoughts, resp_or_stream.text, structured_requirement
         )
     except StructuredOutputValidationError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
@@ -2078,9 +2071,7 @@ async def create_response(
 
     try:
         thoughts, assistant_text, tool_calls = process_llm_output(
-            normalize_llm_text(resp_or_stream.thoughts or ""),
-            normalize_llm_text(resp_or_stream.text or ""),
-            structured_requirement,
+            resp_or_stream.thoughts, resp_or_stream.text, structured_requirement
         )
     except StructuredOutputValidationError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
