@@ -48,8 +48,8 @@ class GeminiClientWrapper(GeminiClient):
         self._initialized = False
         # Chat id of the last conversation this client opened, its kind unverified. Google closes
         # an ephemeral window as soon as another conversation is created, so for those chats this
-        # is the only cid still continuable. In memory and cleared on every (re)initialization:
-        # once the session that opened a window is gone, nothing can vouch for it.
+        # is the only cid still continuable. A cid from before a restart cannot pass for one: the
+        # restart changes `chat_scope`, which is compared first.
         self.latest_chat_cid: str | None = None
         self._gem_lock = asyncio.Lock()
         self._system_prompt_gems: dict[str, Gem] = {}  # sha256 of a system prompt -> its gem
@@ -74,7 +74,6 @@ class GeminiClientWrapper(GeminiClient):
         try:
             await super().init(**init_kwargs)
             self._initialized = True
-            self.latest_chat_cid = None
         except Exception:
             self._initialized = False
             logger.exception(f"Failed to initialize GeminiClient {self.id}")

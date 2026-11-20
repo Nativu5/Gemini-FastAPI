@@ -889,7 +889,7 @@ async def _find_reusable_session(
                         )
                         break
                     # Checked after acquiring: acquire may restart a closed client, which rerolls
-                    # the scope and clears the tracked cid, invalidating any ephemeral window.
+                    # the scope, invalidating any ephemeral window.
                     if not _is_reusable_chat(conv, client):
                         # Every prefix of one conversation carries the same cid and scope, so if
                         # the longest match is not the live window, no shorter one will be either.
