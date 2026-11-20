@@ -1452,13 +1452,14 @@ def _create_real_streaming_response(
 
         downloads = _Downloads()
 
-        def make_chunk(delta_content: dict) -> str:
+        def make_chunk(delta_content: dict, **fields: Any) -> str:
             data = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": created_time,
                 "model": model_name,
                 "choices": [{"index": 0, **delta_content}],
+                **fields,
             }
             return f"data: {orjson.dumps(data).decode('utf-8')}\n\n"
 
@@ -1574,11 +1575,8 @@ def _create_real_streaming_response(
                 detected_tool_calls,
             )
             yield make_chunk(
-                {
-                    "delta": {},
-                    "finish_reason": "tool_calls" if detected_tool_calls else "stop",
-                    "usage": dump_model(usage),
-                }
+                {"delta": {}, "finish_reason": "tool_calls" if detected_tool_calls else "stop"},
+                usage=dump_model(usage),
             )
             yield "data: [DONE]\n\n"
         finally:

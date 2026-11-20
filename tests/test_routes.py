@@ -805,6 +805,20 @@ def test_gemini_native_ends_a_reply_with_a_finish_reason_and_its_usage(api, stre
     assert chunks[-1]["modelVersion"] == MODEL
 
 
+def test_a_chat_completions_stream_ends_with_its_usage_beside_the_choices(api):
+    """Where OpenAI's SDKs read it: `ChatCompletionChunk.usage`, not inside a choice."""
+    api.upstream.replies.append(reply("Hello there, how can I help?"))
+    chunks = _sse(
+        api.post(
+            "/v1/chat/completions",
+            json={"model": MODEL, "stream": True, "messages": [{"role": "user", "content": "Hi"}]},
+        )
+    )
+
+    assert chunks[-1]["choices"] == [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    assert chunks[-1]["usage"]["completion_tokens"] > 0
+
+
 @pytest.mark.parametrize(
     "path",
     ["/v1/chat/completions", "/v1/responses", f"/v1beta/models/{MODEL}:streamGenerateContent"],
