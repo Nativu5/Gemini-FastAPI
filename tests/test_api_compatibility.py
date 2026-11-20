@@ -19,6 +19,9 @@ from app.models.models import (
     ChatCompletionNamedToolChoice,
     FunctionCallOutput,
     ResponseCreateRequest,
+    ResponseFunctionToolCall,
+    ResponseInputFile,
+    ResponseInputImage,
     ResponseInputMessage,
     StructuredOutputRequirement,
     ToolChoiceFunction,
@@ -775,6 +778,24 @@ def test_tool_result_parts_are_validated_too(output, expected):
     else:
         with pytest.raises(ValueError, match=expected):
             _convert_responses_to_app_messages(items)
+
+
+def test_responses_input_sent_without_types_is_read_by_its_fields():
+    """Only an item with a `role` has to be a message; the rest are read as they always were."""
+    untyped_parts = [{"image_url": "data:image/png;base64,AA=="}, {"file_url": "https://x/a"}]
+    items = [
+        {"call_id": "c", "name": "f", "arguments": "{}"},
+        {"call_id": "c", "output": "Sunny."},
+        {"role": "user", "content": untyped_parts},
+    ]
+    request = ResponseCreateRequest.model_validate({"model": "m", "input": items})
+
+    assert isinstance(request.input, list)
+    call, output, message = request.input
+    assert isinstance(call, ResponseFunctionToolCall)
+    assert isinstance(output, FunctionCallOutput)
+    assert isinstance(message, ResponseInputMessage)
+    assert [type(part) for part in message.content] == [ResponseInputImage, ResponseInputFile]
 
 
 def test_non_ascii_data_url_does_not_abort_model_construction():

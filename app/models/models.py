@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
+    Discriminator,
     Field,
     SerializerFunctionWrapHandler,
     StrictBool,
+    Tag,
     model_serializer,
     model_validator,
 )
@@ -219,12 +221,33 @@ class ResponseInputFile(BaseModel):
     filename: str | None = Field(default=None)
 
 
+def _input_part_kind(part: Any) -> str:
+    """A part's `type`. One sent without it is read as the kind its fields name, so that a field
+    the API refuses is refused, instead of the part being taken for text with none in it."""
+    get = part.get if isinstance(part, dict) else lambda key: getattr(part, key, None)
+    if kind := get("type"):
+        return kind
+    if any(get(key) is not None for key in ("file_url", "file_data", "filename")):
+        return "input_file"
+    if any(get(key) is not None for key in ("image_url", "detail", "file_id")):
+        return "input_image"
+    return "input_text"
+
+
+type ResponseInputPart = Annotated[
+    Annotated[ResponseInputText, Tag("input_text")]
+    | Annotated[ResponseInputImage, Tag("input_image")]
+    | Annotated[ResponseInputFile, Tag("input_file")],
+    Discriminator(_input_part_kind),
+]
+
+
 class ResponseInputMessage(BaseModel):
     """A single conversation turn in a Responses API input list."""
 
     type: Literal["message"] | None = Field(default="message")
     role: Literal["user", "system", "developer", "assistant"]
-    content: str | list[ResponseInputText | ResponseInputImage | ResponseInputFile]
+    content: str | list[ResponseInputPart]
     status: Literal["in_progress", "completed", "incomplete"] = Field(default="completed")
 
 
@@ -245,9 +268,7 @@ class FunctionCallOutput(BaseModel):
     type: Literal["function_call_output"] | None = Field(default="function_call_output")
     id: str | None = Field(default=None)
     call_id: str | None = Field(default=None)
-    output: str | list[ResponseInputText | ResponseInputImage | ResponseInputFile] | None = Field(
-        default=None
-    )
+    output: str | list[ResponseInputPart] | None = Field(default=None)
     status: Literal["in_progress", "completed", "incomplete"] | None = Field(default="completed")
 
 
@@ -404,21 +425,29 @@ class ResponseTextConfig(BaseModel):
     )
 
 
+def _input_item_kind(item: Any) -> str:
+    """OpenAI lets a message leave out its `type`. An item with a `role` is read only as a
+    message, so that one with a part the message models refuse is refused, instead of being
+    taken for an item whose fields are all optional."""
+    get = item.get if isinstance(item, dict) else lambda key: getattr(item, key, None)
+    return "message" if get("type") in (None, "message") and get("role") is not None else "other"
+
+
+type ResponseInputItem = Annotated[
+    Annotated[ResponseInputMessage | ResponseOutputMessage, Tag("message")]
+    | Annotated[
+        ResponseReasoningItem | ResponseFunctionToolCall | FunctionCallOutput | ImageGenerationCall,
+        Tag("other"),
+    ],
+    Discriminator(_input_item_kind),
+]
+
+
 class ResponseCreateRequest(BaseModel):
     """Request body for POST /v1/responses."""
 
     model: str
-    input: (
-        str
-        | list[
-            ResponseInputMessage
-            | ResponseOutputMessage
-            | ResponseReasoningItem
-            | ResponseFunctionToolCall
-            | FunctionCallOutput
-            | ImageGenerationCall
-        ]
-    )
+    input: str | list[ResponseInputItem]
     instructions: str | None = Field(default=None)
     temperature: float | None = Field(default=1, ge=0, le=2)
     top_p: float | None = Field(default=1, ge=0, le=1)

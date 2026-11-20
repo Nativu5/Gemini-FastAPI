@@ -817,6 +817,25 @@ def test_a_request_with_nothing_new_to_send_is_refused(api):
 
 
 @pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "user", "content": [{"type": "input_image", "image_url": "x", "detail": "max"}]},
+        {"role": "user", "content": [{"type": "input_txt", "text": "And then?"}]},
+        {"role": "tool", "content": "And then?"},
+        {"role": "user", "content": [{"image_url": "x", "detail": "max"}]},
+    ],
+    ids=["unknown-detail", "misspelled-part", "unknown-role", "untyped-part"],
+)
+def test_responses_refuses_a_message_it_cannot_read_instead_of_dropping_it(api, message):
+    first = {"role": "user", "content": "Hi"}
+
+    refused = api.post("/v1/responses", json={"model": MODEL, "input": [first, message]})
+
+    assert refused.status_code == 400, refused.text
+    assert api.upstream.sent == []
+
+
+@pytest.mark.parametrize(
     ("field", "value"), [("previous_response_id", "resp_1"), ("conversation", {"id": "conv_1"})]
 )
 def test_responses_refuses_a_request_that_leaves_its_history_to_the_server(api, field, value):
