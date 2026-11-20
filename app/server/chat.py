@@ -207,9 +207,8 @@ def _create_responses_standard_payload(
         output_items.append(
             ResponseReasoningItem(
                 id=reason_id,
-                type="reasoning",
                 status="completed",
-                summary=[SummaryTextContent(type="summary_text", text=full_thoughts)],
+                summary=[SummaryTextContent(text=full_thoughts)],
             )
         )
 
@@ -217,10 +216,8 @@ def _create_responses_standard_payload(
         output_items.append(
             ResponseOutputMessage(
                 id=message_id,
-                type="message",
-                status="completed",
                 role="assistant",
-                content=[ResponseOutputText(type="output_text", text=message_text)],
+                content=[ResponseOutputText(text=message_text)],
             )
         )
     output_items.extend(image_call_items)
@@ -233,7 +230,6 @@ def _create_responses_standard_payload(
                     call_id=call.id,
                     name=call.function.name,
                     arguments=call.function.arguments,
-                    status="completed",
                 )
                 for call in detected_tool_calls
             ]
@@ -255,12 +251,10 @@ def _create_responses_standard_payload(
 
     return ResponseCreateResponse(
         id=response_id,
-        object="response",
         created_at=created_time,
         completed_at=now_ts,
         model=request.model,
         output=output_items,
-        status="completed",
         usage=usage,
         metadata=request.metadata or {},
         **_echoed_tools(request),
@@ -640,7 +634,6 @@ def _convert_responses_to_app_messages(
                     tool_calls=[
                         AppToolCall(
                             id=call_id,
-                            type="function",
                             function=AppToolCallFunction(name=item.name, arguments=item.arguments),
                         )
                     ],
@@ -1474,7 +1467,6 @@ def _create_responses_real_streaming_response(
                             "item": dump_model(
                                 ResponseReasoningItem(
                                     id=thought_item_id,
-                                    type="reasoning",
                                     status="in_progress",
                                     summary=[],
                                 )
@@ -1535,7 +1527,6 @@ def _create_responses_real_streaming_response(
                             "item": dump_model(
                                 ResponseReasoningItem(
                                     id=thought_item_id,
-                                    type="reasoning",
                                     status="completed",
                                     summary=[SummaryTextContent(text=text)],
                                 )
@@ -1560,7 +1551,6 @@ def _create_responses_real_streaming_response(
                             "item": dump_model(
                                 ResponseOutputMessage(
                                     id=message_item_id,
-                                    type="message",
                                     status="in_progress",
                                     role="assistant",
                                     content=[],
@@ -1574,7 +1564,7 @@ def _create_responses_real_streaming_response(
                             "item_id": message_item_id,
                             "output_index": message_index,
                             "content_index": 0,
-                            "part": dump_model(ResponseOutputText(type="output_text", text="")),
+                            "part": dump_model(ResponseOutputText(text="")),
                         },
                     ),
                 ]
@@ -1719,9 +1709,7 @@ def _create_responses_real_streaming_response(
                     "response.content_part.done",
                     {
                         **part,
-                        "part": dump_model(
-                            ResponseOutputText(type="output_text", text=assistant_text)
-                        ),
+                        "part": dump_model(ResponseOutputText(text=assistant_text)),
                     },
                 )
                 yield make_event(
@@ -1736,12 +1724,10 @@ def _create_responses_real_streaming_response(
                     *close_thought(late_thoughts),
                 ]:
                     yield event
-                summary = [SummaryTextContent(type="summary_text", text=late_thoughts)]
+                summary = [SummaryTextContent(text=late_thoughts)]
                 payload.output.insert(
                     thought_index,
-                    ResponseReasoningItem(
-                        id=thought_item_id, type="reasoning", status="completed", summary=summary
-                    ),
+                    ResponseReasoningItem(id=thought_item_id, status="completed", summary=summary),
                 )
             # The images and function calls, which follow the message, each opened and finished.
             for index, item in enumerate(payload.output[next_output_index:], next_output_index):
