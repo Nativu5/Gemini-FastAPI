@@ -73,7 +73,6 @@ from app.utils.helper import (
     calculate_usage,
     dump_model,
     guess_extension_for_mime,
-    normalize_llm_text,
     normalize_openapi_schema,
     process_llm_output,
     validate_json_schema,
@@ -523,9 +522,7 @@ async def gemini_generate_content(
 
     try:
         thoughts, visible_output, tool_calls = process_llm_output(
-            normalize_llm_text(resp.thoughts or ""),
-            normalize_llm_text(resp.text or ""),
-            sent.structured_requirement,
+            resp.thoughts, resp.text, sent.structured_requirement
         )
     except StructuredOutputValidationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -599,9 +596,7 @@ async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str
 
         try:
             thoughts, visible_output, tool_calls = process_llm_output(
-                normalize_llm_text(streamed.thoughts),
-                normalize_llm_text(streamed.text),
-                sent.structured_requirement,
+                streamed.thoughts, streamed.text, sent.structured_requirement
             )
         except StructuredOutputValidationError as exc:
             logger.warning(f"[Gemini API] Structured output rejected mid-stream: {exc}")
