@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from gemini_webapi.types import Candidate, GeneratedVideo, Image, ModelOutput
 
 from app.main import create_app
-from app.server import chat, gemini, middleware
+from app.server import chat, gemini, media
 from app.services.lmdb import LMDBConversationStore
 from app.utils import g_config
 from app.utils.config import GeminiClientSettings, GeminiGemPolicyMode
@@ -151,7 +151,7 @@ def api(tmp_path, monkeypatch) -> Iterator[SimpleNamespace]:
 
     monkeypatch.setattr(Image, "save", save_image)
     monkeypatch.setattr(GeneratedVideo, "save", save_video)
-    monkeypatch.setattr(middleware, "MEDIA_STORE_DIR", tmp_path / "media")
+    monkeypatch.setattr(media, "MEDIA_STORE_DIR", tmp_path / "media")
     monkeypatch.setattr(g_config.server, "api_key", None)
     # No `with`: the lifespan would log in to Google.
     http = TestClient(create_app(), raise_server_exceptions=False)

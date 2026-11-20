@@ -12,7 +12,7 @@ from gemini_webapi.types import WebImage
 
 from app.models.core import AppMessage
 from app.models.models import ResponseCreateRequest
-from app.server import chat
+from app.server import media
 from app.server.chat import (
     StreamingOutputFilter,
     _create_real_streaming_response,
@@ -39,7 +39,7 @@ def downloads(monkeypatch) -> list[asyncio.Task]:
         started.append(cast(asyncio.Task, asyncio.current_task()))
         await asyncio.sleep(5)
 
-    monkeypatch.setattr(chat, "_download", slow_download)
+    monkeypatch.setattr(media, "_download", slow_download)
     return started
 
 

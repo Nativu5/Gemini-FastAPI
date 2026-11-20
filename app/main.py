@@ -11,12 +11,12 @@ from .server.chat import available_models
 from .server.chat import router as chat_router
 from .server.gemini import router as gemini_router
 from .server.health import router as health_router
+from .server.media import cleanup_expired_media
 from .server.media import router as media_router
 from .server.middleware import (
     GoogleClientsOnV1Middleware,
     RequestBodyLimitMiddleware,
     add_exception_handlers,
-    cleanup_expired_media,
 )
 from .services import GeminiClientPool, LMDBConversationStore
 from .utils import g_config
