@@ -5,7 +5,7 @@ from typing import Any, Literal, cast
 
 from curl_cffi import BrowserTypeLiteral
 from loguru import logger
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic_settings import (
     BaseSettings,
     SettingsConfigDict,
@@ -51,14 +51,33 @@ class ServerConfig(BaseModel):
 class GeminiClientSettings(BaseModel):
     """Credential set for one Gemini client."""
 
+    # A key it does not know is most likely one of the removed `secure_1psid` and
+    # `secure_1psidts`. Ignored, it would leave the client without cookies: a guest.
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(..., description="Unique identifier for the client")
-    secure_1psid: str | None = Field(default=None, description="Gemini Secure 1PSID")
-    secure_1psidts: str | None = Field(default=None, description="Gemini Secure 1PSIDTS")
+    cookies: str | None = Field(
+        default=None,
+        description=(
+            "Cookie header of a request to gemini.google.com from a signed-in browser. "
+            "Without it the client runs as a guest"
+        ),
+    )
     proxy: str | None = Field(default=None, description="Proxy URL for this Gemini client")
     impersonate: BrowserTypeLiteral | None = Field(
         default=None,
         description="Browser impersonation target for curl_cffi. None uses library default",
     )
+
+    @field_validator("cookies")
+    @classmethod
+    def _signed_in_cookies(cls, value: str | None) -> str | None:
+        # Without it no one is signed in, and startup would fail with Google's refusal instead of
+        # this. A header copied with its name, "Cookie: ...", lands here too.
+        names = {pair.partition("=")[0].strip() for pair in (value or "").split(";")}
+        if value is not None and "__Secure-1PSID" not in names:
+            raise ValueError("must be the value of a Cookie header that includes __Secure-1PSID")
+        return value
 
     @field_validator("proxy", "impersonate", mode="before")
     @classmethod
@@ -76,7 +95,7 @@ class ChatMode(StrEnum):
 
 
 class GuestMode(StrEnum):
-    """Health-check policy for Gemini clients running as guests."""
+    """Health-check policy for unhealthy Gemini clients."""
 
     STRICT = "strict"
     ADAPTIVE = "adaptive"
@@ -84,11 +103,10 @@ class GuestMode(StrEnum):
 
 
 class GeminiGemPolicyMode(StrEnum):
-    """Whether a leading system prompt is sent as a server-managed gem, and who may create it."""
+    """Whether a leading system prompt is sent as a gem the server made earlier, when one exists."""
 
     OFF = "off"
     FETCH_ONLY = "fetch_only"
-    CREATE_ON_DEMAND = "create_on_demand"
 
 
 class GeminiGemPoliciesConfig(BaseModel):
@@ -96,7 +114,7 @@ class GeminiGemPoliciesConfig(BaseModel):
 
     prefix: str = Field(
         default="fastapi_policy_",
-        description="Name prefix used to identify gems created by this server",
+        description="Name prefix used to identify gems made by this server",
     )
 
 
@@ -126,26 +144,13 @@ class GeminiGemCleanupConfig(BaseModel):
     )
 
 
-_FALSE = {"false", "0", "no", "off", "f", "n"}
-
-
 class GeminiGemsConfig(BaseModel):
     policy: GeminiGemPolicyMode = Field(
         default=GeminiGemPolicyMode.OFF,
         description=(
             "'off' sends system prompts inline; 'fetch_only' uses a gem that already exists "
-            "for a system prompt; 'create_on_demand' also creates one within the limits below"
+            "for a system prompt. Google no longer lets personal accounts create gems"
         ),
-    )
-    create_rate_limit_per_minute: int = Field(
-        default=4,
-        ge=1,
-        description="Maximum server-managed gem creations per minute per client",
-    )
-    managed_gems_max_total: int = Field(
-        default=200,
-        ge=1,
-        description="Maximum number of managed gems (by prefix) allowed per client",
     )
     policies: GeminiGemPoliciesConfig = Field(
         default=GeminiGemPoliciesConfig(),
@@ -155,16 +160,6 @@ class GeminiGemsConfig(BaseModel):
         default=GeminiGemCleanupConfig(),
         description="Cleanup policy for managed gems",
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _enabled_false_keeps_gems_off(cls, data: Any) -> Any:
-        """`enabled` is gone and `policy` alone decides, but a config written when `enabled: false`
-        turned gems off whatever the policy said must not start using them."""
-        # Every spelling of false that pydantic read for the old bool field.
-        if isinstance(data, dict) and str(data.get("enabled")).lower() in _FALSE:
-            return {**data, "policy": GeminiGemPolicyMode.OFF}
-        return data
 
 
 class GeminiConfig(BaseModel):
@@ -220,7 +215,7 @@ class GeminiConfig(BaseModel):
     guest_mode: GuestMode = Field(
         default=GuestMode.ADAPTIVE,
         description=(
-            "Guest client health policy: 'strict' fails health checks when any client is "
+            "Health policy for unhealthy clients: 'strict' fails health checks when any client is "
             "unhealthy; 'adaptive' fails only when all clients are unhealthy; 'permissive' "
             "only logs a warning"
         ),
@@ -390,5 +385,9 @@ def initialize_config() -> Config:
 
         return config
     except ValidationError as e:
-        logger.error(f"Configuration validation failed: {e!s}")
+        # Not `str(e)`: it quotes each rejected value, and here those are cookies.
+        problems = "; ".join(
+            f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors()
+        )
+        logger.error(f"Configuration validation failed: {problems}")
         sys.exit(1)

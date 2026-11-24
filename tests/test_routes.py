@@ -178,7 +178,8 @@ def test_responses_replays_a_generated_image_as_its_link_not_its_bytes(api, stre
 def test_a_system_prompt_travels_as_a_gem_and_a_chat_is_only_continued_under_its_own(
     api, monkeypatch, path
 ):
-    monkeypatch.setattr(g_config.gemini.gems, "policy", GeminiGemPolicyMode.CREATE_ON_DEMAND)
+    monkeypatch.setattr(g_config.gemini.gems, "policy", GeminiGemPolicyMode.FETCH_ONLY)
+    api.upstream.gems.update({"Be a pirate": "gem_1", "Be a lawyer": "gem_2"})
 
     def ask(system: str | None, *history: str) -> None:
         turns = [
@@ -211,7 +212,8 @@ def test_a_system_prompt_travels_as_a_gem_and_a_chat_is_only_continued_under_its
 
 
 def test_the_native_route_sends_its_system_instruction_inline_even_with_gems_on(api, monkeypatch):
-    monkeypatch.setattr(g_config.gemini.gems, "policy", GeminiGemPolicyMode.CREATE_ON_DEMAND)
+    monkeypatch.setattr(g_config.gemini.gems, "policy", GeminiGemPolicyMode.FETCH_ONLY)
+    api.upstream.gems["Be a pirate"] = "gem_1"
 
     _native(api, False, contents=USER_TURN, systemInstruction={"parts": [{"text": "Be a pirate"}]})
 

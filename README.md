@@ -36,8 +36,7 @@ Put your cookies ([how to get them](#getting-your-cookies)) in `config/config.ya
 gemini:
   clients:
     - id: "client-a"
-      secure_1psid: "YOUR_SECURE_1PSID_HERE"
-      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
+      cookies: "__Secure-1PSID=...; __Secure-1PSIDTS=...; ..."
 ```
 
 Start the server, which listens on `http://localhost:8000`:
@@ -60,11 +59,11 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### Getting your cookies
 
-1. Open [Gemini](https://gemini.google.com/) in a private window and sign in.
-2. Open Developer Tools (F12) and go to **Application** → **Storage** → **Cookies**.
-3. Copy the values of `__Secure-1PSID` and `__Secure-1PSIDTS`.
-
-The [Gemini-API authentication guide](https://github.com/HanaokaYuzu/Gemini-API?tab=readme-ov-file#authentication) has more detail.
+1. Open [Gemini](https://gemini.google.com/) in a private window and sign in to the one account the server should use. With several accounts signed in, the server uses the first.
+2. Open Developer Tools (F12), go to **Network**, and reload the page.
+3. Select a request to `gemini.google.com`, such as `app` or `batchexecute`.
+4. Under **Request Headers**, copy the whole value of `cookie`.
+5. Close the private window without signing out, so the browser stops renewing the cookies you copied.
 
 > [!WARNING]
 > These cookies give access to your Google account. Keep them out of version control.
@@ -80,8 +79,7 @@ docker run -p 8000:8000 \
   -v $(pwd)/cache:/app/cache \
   -e CONFIG_SERVER__API_KEY="your-api-key-here" \
   -e CONFIG_GEMINI__CLIENTS__0__ID="client-a" \
-  -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid" \
-  -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts" \
+  -e CONFIG_GEMINI__CLIENTS__0__COOKIES='your-cookie-header' \
   -e GEMINI_COOKIE_PATH="/app/cache" \
   ghcr.io/nativu5/gemini-fastapi
 ```
@@ -102,8 +100,7 @@ services:
     environment:
       - CONFIG_SERVER__API_KEY=${API_KEY}
       - CONFIG_GEMINI__CLIENTS__0__ID=client-a
-      - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID=${SECURE_1PSID}
-      - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS=${SECURE_1PSIDTS}
+      - CONFIG_GEMINI__CLIENTS__0__COOKIES=${GEMINI_COOKIES}
       - GEMINI_COOKIE_PATH=/app/cache # Must match the cache volume above
     restart: on-failure:3
 ```
@@ -149,7 +146,7 @@ Every option is described in [`config/config.yaml`](config/config.yaml). Any of 
 
 ```bash
 export CONFIG_SERVER__API_KEY="your-secure-api-key"
-export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid"
+export CONFIG_GEMINI__CLIENTS__0__COOKIES='your-cookie-header'
 export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
 export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 ```
@@ -161,6 +158,7 @@ Two more variables are read directly: `CONFIG_PATH` selects a different config f
 Each entry under `gemini.clients` is one Google account.
 
 - `id`: stored with every conversation the account opens. Keep it stable when you update cookies, or stored conversations can no longer be continued.
+- `cookies`: the Cookie header of a signed-in request to Gemini ([how to get it](#getting-your-cookies)). Leave it out to run the client as a guest.
 - `proxy`: an optional proxy URL for this account only.
 - `impersonate`: an optional browser fingerprint for [`curl_cffi`](https://github.com/lexiforest/curl_cffi), such as `chrome`. An unsupported value stops the server at startup.
 
@@ -185,13 +183,14 @@ Each entry under `gemini.clients` is one Google account.
 
 After `chat_mode` changes, stored chats from the other side of the `auto_delete` boundary are not continued. Their history is replayed into a new chat, and chats opened under `auto_delete` are still deleted on schedule.
 
-### Guest sessions
+### Guests and rejected cookies
 
-When an account's cookies are rejected, that client keeps running as a guest instead of failing. A guest can answer text prompts only: it cannot upload files, cannot choose a model, and keeps no history.
+A client configured without `cookies` is a guest. A guest can answer text prompts only: it cannot upload files, cannot choose a model, and keeps no history.
 
-- Authenticated clients are preferred. A guest receives requests only when no authenticated client is left.
-- A request that needs an upload fails with a clear message if only guests remain.
-- `/health` reports a guest as unhealthy. `gemini.guest_mode` sets when that turns into HTTP 503:
+- Clients with an account are preferred. A guest receives requests only when none of them is available, and a request that needs an upload fails with `503` if only guests remain.
+- A client configured with cookies never runs as a guest. When Google no longer accepts its cookies, at startup or later, because they expired or could not be refreshed, the error is logged and the client stops serving. A request it was handling gets `503`. Each later request that would use it first tries to restart it; while Google rejects its cookies, the request goes to another client, or gets `503` if none is left. New cookies take effect after a restart of the server.
+- At startup, the server stops if no client starts.
+- `/health` reports a client as unhealthy when it is not running, or when it was configured with cookies and Google no longer accepts them. A guest is healthy while it runs. `gemini.guest_mode` sets when unhealthy clients turn into HTTP 503:
 
 | `guest_mode` | `/health` returns 503 when |
 | --- | --- |
@@ -212,21 +211,10 @@ Models are discovered from each account at startup, so there is nothing to confi
 ### Gems
 
 > [!WARNING]
-> Google has announced the [retirement of Gems](https://support.google.com/gemini/answer/18560919): for personal accounts they become read-only from 2026-11-17 and are removed on 2026-12-17; Workspace accounts follow in March 2027 and education accounts in June 2027. This feature only works while the account still has Gems. Once it does not, set the policy back to `off`: a gem request that Google rejects is retried for up to about 15 seconds, restarting the client each time, before the prompt is sent inline. That happens on every request.
+> Google has announced the [retirement of Gems](https://support.google.com/gemini/answer/18560919): for personal accounts they became read-only on 2026-11-17 and are removed on 2026-12-17; Workspace accounts follow in March 2027 and education accounts in June 2027. The server no longer creates gems, and this feature only uses the ones an earlier version created while the account still has them. Once it does not, set the policy back to `off`: a gem request that Google rejects is retried for up to about 15 seconds, restarting the client each time, before the prompt is sent inline. That happens on every request.
 
-Off by default; set `gemini.gems.policy` to turn it on. The system prompt at the start of a `/v1/chat/completions` or `/v1/responses` request is then stored once as a gem (Gemini's saved custom instructions) in the Google account and referenced from then on, instead of being sent inside the message. Conversations with the same system prompt share one gem.
+Off by default. With `gemini.gems.policy: fetch_only`, the system prompt at the start of a `/v1/chat/completions` or `/v1/responses` request is referenced from the gem (Gemini's saved custom instructions) that an earlier version of the server stored for it in the Google account, named `fastapi_policy_...`, instead of being sent inside the message. A prompt without such a gem, or whose gem cannot be used, is sent inline.
 
-| `policy` | System prompt |
-| --- | --- |
-| `off` (default) | Sent inline |
-| `fetch_only` | Uses a gem that already exists for it; never creates one |
-| `create_on_demand` | Creates a gem the first time it is seen |
-
-> [!WARNING]
-> `create_on_demand` creates gems named `fastapi_policy_...` in the Google account.
-
-- There is one gem per distinct prompt, so use this for stable prompts. A prompt that changes with every request, for example one that contains the time, creates a new gem each time.
-- Creation is limited by `create_rate_limit_per_minute` (default `4`) and `managed_gems_max_total` (default `200`). Past a limit, or whenever a gem cannot be used, the prompt is sent inline.
 - Gems stay in the account until you delete them. With `cleanup.enabled: true`, under either policy, gems unused for `cleanup.unused_days` (default `7`) are deleted by a cleanup that runs at startup and every 6 hours after that, and each gem's description is updated to record when it was last used.
 - Guest sessions and Gemini-native requests always send the prompt inline.
 
@@ -236,7 +224,9 @@ Input longer than 90% of `gemini.max_chars_per_request` (81% in `temporary` mode
 
 ### Removed settings
 
-`gemini.models`, `gemini.model_strategy`, `gemini.oversized_context_strategy`, `storage.images_path` and, under `gemini.gems`, `enabled`, `fetch_on_init`, `include_hidden_on_fetch`, `policies.default_policy` and `cleanup.require_managed_marker` no longer exist and are ignored if present. `gemini.gems.policy` alone now turns gems on, but a config that still says `gemini.gems.enabled: false` keeps them off. Generated media is stored under `storage.media_path`.
+`gemini.clients[].secure_1psid` and `secure_1psidts` are replaced by `cookies`: a config that still has them stops the server at startup. `gemini.gems.policy: create_on_demand` no longer exists and also stops the server.
+
+`gemini.models`, `gemini.model_strategy`, `gemini.oversized_context_strategy`, `storage.images_path` and, under `gemini.gems`, `enabled`, `create_rate_limit_per_minute`, `managed_gems_max_total`, `fetch_on_init`, `include_hidden_on_fetch`, `policies.default_policy` and `cleanup.require_managed_marker` no longer exist and are ignored if present. `gemini.gems.policy` alone turns gems on. Generated media is stored under `storage.media_path`.
 
 ## Maintenance
 

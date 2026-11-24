@@ -52,9 +52,9 @@ class GeminiClientPool(metaclass=Singleton):
     ) -> GeminiClientWrapper:
         """Return a running client: the one with `client_id`, or the next in turn.
 
-        `require_account` keeps guest sessions out of the rotation, for requests they cannot
-        serve at all - file uploads. Otherwise a guest is used only once no authenticated client
-        is left. A client asked for by id is returned whatever it is; the caller checks.
+        `require_account` keeps guests out of the rotation, for requests they cannot serve at
+        all - file uploads. Otherwise a guest is used only once no client with an account is
+        left. A client asked for by id is returned whatever it is; the caller checks.
         """
         if client_id:
             client = self._id_map.get(client_id)
@@ -66,36 +66,38 @@ class GeminiClientPool(metaclass=Singleton):
                 f"Gemini client {client_id} is not running and could not be restarted"
             )
 
-        # Authenticated clients first. A client whose cookies expired keeps answering text
-        # prompts as a guest, so it stays usable and must not take the pool down, but it has no
-        # history, no uploads and no model choice - traffic belongs elsewhere while it can.
+        # Clients with an account first: a guest has no history, no uploads and no model choice.
         for account_only in (True,) if require_account else (True, False):
             for _ in range(len(self._round_robin)):
                 client = self._round_robin[0]
                 self._round_robin.rotate(-1)
-                # Rechecked after readiness: a restart can itself land in a guest session.
-                if account_only and client.is_guest():
-                    continue
-                if await self._ensure_client_ready(client) and not (
-                    account_only and client.is_guest()
-                ):
+                if client.has_account == account_only and await self._ensure_client_ready(client):
                     return client
 
-            if account_only and not require_account and any(c.is_guest() for c in self.clients):
-                logger.warning(
-                    "No authenticated Gemini client is available; falling back to a guest "
-                    "session until cookies are refreshed."
-                )
+            accounts = [c.has_account for c in self.clients]
+            if account_only and not require_account and any(accounts) and not all(accounts):
+                logger.warning("No Gemini client with an account is available; using a guest.")
 
         if require_account:
             raise RuntimeError(
-                "No authenticated Gemini client is available. This request needs a file upload, "
-                "which a guest session cannot do - refresh the client cookies."
+                "No Gemini client with an account is available. This request needs a file upload, "
+                "which a guest cannot do."
             )
         raise RuntimeError("No Gemini clients are currently available")
 
     async def _ensure_client_ready(self, client: GeminiClientWrapper) -> bool:
         """Make sure the client is running, attempting a restart if needed."""
+        if client.signed_out():
+            # Under the lock `init` holds, so a restart another request has started is waited for,
+            # not closed under it. The restart signs in again with the client's latest cookies,
+            # and fails while Google rejects them: the client is not used as a guest meanwhile.
+            async with client._lock:
+                if client.signed_out():
+                    logger.error(
+                        f"Google no longer accepts the cookies of Gemini client {client.id}; "
+                        "restarting it."
+                    )
+                    await client.close()
         if client.running():
             return True
         # The library's `init` holds a lock, and returns early when the client is already running.
@@ -136,7 +138,7 @@ class GeminiClientPool(metaclass=Singleton):
             return True
         if client.is_guest():
             logger.warning(
-                f"Cannot delete remote chat {cid}: client {client_id} is currently unauthenticated (guest session)"
+                f"Cannot delete remote chat {cid}: client {client_id} is signed out or a guest"
             )
             return False
         try:

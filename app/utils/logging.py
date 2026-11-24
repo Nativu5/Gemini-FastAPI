@@ -15,7 +15,7 @@ def setup_logging(level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
         level=level,
         colorize=True,
         backtrace=True,
-        diagnose=True,
+        diagnose=False,  # would print local values, cookies among them
         enqueue=True,
     )
 

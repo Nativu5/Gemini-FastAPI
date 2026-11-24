@@ -1,4 +1,4 @@
-"""Bookkeeping for the gems this server creates in a Google account.
+"""Bookkeeping for the gems this server made in a Google account.
 
 A managed gem carries a short JSON suffix in its description, saying who owns it and when it was
 last used. That is what lets unused ones be found and deleted without touching gems the account
