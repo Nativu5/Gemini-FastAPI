@@ -24,8 +24,7 @@ cors:
 gemini:
   clients:
     - id: "client-id-1" # Arbitrary client ID
-      secure_1psid: "YOUR_SECURE_1PSID_HERE" # Gemini Secure 1PSID
-      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE" # Gemini Secure 1PSIDTS
+      cookies: "__Secure-1PSID=...; __Secure-1PSIDTS=...; ..." # Cookie header of a request to gemini.google.com (see README). Leave out for a guest
       proxy: null # Optional proxy URL (null/empty means direct connection)
       impersonate: null # Optional browser impersonation target (null uses library default)
   timeout: 450 # Request timeout in seconds (Not less than 30s)
@@ -47,20 +46,18 @@ gemini:
   #                   for auto_delete_ttl. Only chats opened in this mode are ever deleted.
   chat_mode: "normal"
   auto_delete_ttl: 86400 # Idle seconds before an "auto_delete" chat is deleted (Not less than 60s)
-  # Guest client health policy: "strict" fails if any client is unhealthy; "adaptive" fails only if all are unhealthy; "permissive" only logs a warning.
+  # /health policy for unhealthy clients (stopped, or cookies Google rejects): "strict" fails if any client is unhealthy; "adaptive" fails only if all are unhealthy; "permissive" only logs a warning.
   guest_mode: "adaptive"
   # Send the system prompt at the start of a /v1/chat/completions or /v1/responses request as a
   # gem (saved custom instructions) in the Google account instead of inline. Guest sessions and
   # /v1beta requests always send it inline.
   # Google is retiring Gems (personal accounts: read-only from 2026-11-17, removed 2026-12-17;
-  # Workspace: March 2027; education: June 2027), so this only works while the account has them.
+  # Workspace: March 2027; education: June 2027). The server no longer creates them, so this only
+  # uses the gems an earlier version created, while the account still has them.
   gems:
     #   "off"              - send system prompts inline.
-    #   "fetch_only"       - use a gem that already exists for the prompt; never create one.
-    #   "create_on_demand" - create a gem the first time a prompt is seen. This adds gems to the account.
+    #   "fetch_only"       - use the gem that already exists for the prompt.
     policy: "off"
-    create_rate_limit_per_minute: 4  # Gems one client may create per minute
-    managed_gems_max_total: 200      # Managed gems one client may hold
     policies:
       prefix: "fastapi_policy_"      # Name prefix that marks a gem as managed by this server
     # Deletes managed gems from the account at startup and every 6 hours, under either policy above.

@@ -1,18 +1,22 @@
 import asyncio
 import hashlib
+import importlib
 import io
 import itertools
+import os
 import re
 import time
-from collections import deque
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import gemini_webapi.client as webapi_client
 import orjson
+from curl_cffi.requests import Cookies, Response
 from gemini_webapi import GeminiClient
-from gemini_webapi.constants import AccountStatus
-from gemini_webapi.types import AvailableModel, Gem
+from gemini_webapi.constants import GRPC, AccountStatus
+from gemini_webapi.exceptions import AuthError
+from gemini_webapi.types import AvailableModel, Gem, RPCData
 from loguru import logger
 
 from app.models import AppMessage, AppToolCall
@@ -31,15 +35,58 @@ from .policy_gems import extract_managed_last_used_at, touch_managed_description
 # takes the whole link; it can go once the library's own does.
 webapi_client.ARTIFACTS_RE = re.compile(r"https?://googleusercontent\.com/(?:\w+/)+\d+(?:_\d+)*\n*")
 
+# Since about 2026-11-19 Google sends cookies it no longer accepts to its sign-in page, which
+# carries the same init values as Gemini, so gemini-webapi 2.1.1 takes it for a signed-in session.
+# Read as a failed attempt, it lets the library try the next cookie source: the configured
+# cookies after a stale cache. HanaokaYuzu/Gemini-API#382 does the same; this goes with it.
+_token_module = vars(importlib.import_module("gemini_webapi.utils.get_access_token"))
+_extract_init_values = _token_module["_extract_payload"]
+
+
+def _gemini_init_values(response: Response):
+    if urlparse(str(response.url)).hostname != "gemini.google.com":
+        return None
+    return _extract_init_values(response)
+
+
+_token_module["_extract_payload"] = _gemini_init_values
+
+# Without a __Secure-1PSID, gemini-webapi 2.1.1 signs in with the most recently cached cookies,
+# which belong to whichever account was cached last. A client configured without cookies is a
+# guest, so that lookup finds nothing.
+_token_module["_get_cookie_cache_dir"] = lambda: Path(os.devnull)
+
+# A Cookie header names no domains. These are the cookies of gemini.google.com alone: sent to
+# lh3.google.com as well, they turn the download of a generated image into a 403
+# (HanaokaYuzu/Gemini-API#381). Every other cookie belongs to all of google.com.
+_GEMINI_HOST_COOKIES = {"OSID", "__Secure-OSID"}
+
+
+def _cookie_jar(header: str) -> Cookies:
+    """The cookies of a Cookie request header sent to gemini.google.com, on their domains."""
+    jar = Cookies()
+    for pair in header.split(";"):
+        name, sep, value = pair.strip().partition("=")
+        if sep:
+            domain = "gemini.google.com" if name in _GEMINI_HOST_COOKIES else ".google.com"
+            jar.set(name, value, domain=domain, secure=True)
+    return jar
+
+
 # How a model is addressed: by name, or as one of the models a client discovered. `None` leaves
 # the choice to Google.
 type ModelSpec = str | AvailableModel | None
 
 
 class GeminiClientWrapper(GeminiClient):
-    def __init__(self, client_id: str, **kwargs):
+    def __init__(self, client_id: str, cookies: str | None = None, **kwargs):
         self._cfg_impersonate: str | None = kwargs.pop("impersonate", None)
         super().__init__(**kwargs)
+        # Configured with cookies, a client must stay signed in: run as a guest, it would serve
+        # every request with less, unnoticed. One configured without them is a guest on purpose.
+        self.has_account = cookies is not None
+        if cookies is not None:
+            self.cookies = _cookie_jar(cookies)
         self.id = client_id
         self._initialized = False
         # Chat id of the last conversation this client opened, its kind unverified. Google closes
@@ -49,7 +96,6 @@ class GeminiClientWrapper(GeminiClient):
         self.latest_chat_cid: str | None = None
         self._gem_lock = asyncio.Lock()
         self._system_prompt_gems: dict[str, Gem] = {}  # sha256 of a system prompt -> its gem
-        self._gems_created_at: deque[float] = deque()  # creations within the last minute
         self._gem_use_recorded_at: dict[str, float] = {}  # gem id -> time of the last update
 
     async def init(self, *args: Any, **kwargs: Any) -> None:
@@ -74,6 +120,40 @@ class GeminiClientWrapper(GeminiClient):
             self._initialized = False
             logger.exception(f"Failed to initialize GeminiClient {self.id}")
             raise
+
+    async def _init_rpc(self) -> None:
+        # Signed in with a browser's full cookies, Gemini answers in the account's language, and
+        # the library names models after what Gemini calls them: "gemini-自动", not "gemini-auto".
+        # Every request of the session is then sent in English.
+        self.language = "en"
+        await super()._init_rpc()
+
+    async def _sync_activity(self) -> None:
+        """The library's heartbeat, which it also sends at startup and before every message.
+
+        Once Google no longer accepts the cookies it refuses the heartbeat, and the library would
+        go on as a guest. Raising here stops the startup, or the message before it is sent.
+        """
+        await super()._sync_activity()
+        if self.signed_out():
+            raise AuthError(
+                f"Google no longer accepts the cookies of client {self.id}: copy a new Cookie "
+                "header from a signed-in browser."
+            )
+
+    async def _batch_execute(self, payloads: list[RPCData], *args: Any, **kwargs: Any) -> Response:
+        # The web app asks for the account status with "[1]". gemini-webapi 2.1.1 sends "[]", which
+        # Google has been seen to answer with 400 since about 2026-11-19 (HanaokaYuzu/Gemini-API#381).
+        payloads = [
+            p.model_copy(update={"payload": "[1]"}) if p.rpcid == GRPC.GET_USER_STATUS else p
+            for p in payloads
+        ]
+        response = await super()._batch_execute(payloads, *args, **kwargs)
+        if any(p.rpcid == GRPC.READ_USER_PREFERENCES for p in payloads):
+            # gemini-webapi 2.1.1 ignores the answer to its heartbeat. Read, a refusal marks the
+            # session unauthenticated, as a refused answer to any other request does.
+            list(self._parse_rpc_results(response.text, GRPC.READ_USER_PREFERENCES))
+        return response
 
     def running(self) -> bool:
         return self._running
@@ -120,11 +200,10 @@ class GeminiClientWrapper(GeminiClient):
             key: gem for key, gem in self._system_prompt_gems.items() if gem.id not in deleted
         }
 
-    async def system_prompt_gem_id_or_create(self, system_prompt: str) -> str | None:
+    async def system_prompt_gem_id(self, system_prompt: str) -> str | None:
         """Id of the managed gem that holds this system prompt, or None to send it inline.
 
-        None when gems are off, the session is a guest, no gem exists and the policy forbids
-        creating one, or a creation limit is reached.
+        None when gems are off, the session is a guest, or the account has no such gem.
         """
         if self.is_guest() or g_config.gemini.gems.policy == GeminiGemPolicyMode.OFF:
             return None
@@ -133,45 +212,19 @@ class GeminiClientWrapper(GeminiClient):
         gem = self._system_prompt_gems.get(prompt_hash)
         if gem is None:
             async with self._gem_lock:
-                # Looked up again: another request may have created it while this one waited.
-                gem = self._system_prompt_gems.get(prompt_hash) or await self._find_or_create_gem(
-                    system_prompt, prompt_hash
-                )
+                # Looked up again: another request may have found it while this one waited.
+                gem = self._system_prompt_gems.get(prompt_hash) or await self._find_gem(prompt_hash)
                 if gem is None:
                     return None
                 self._system_prompt_gems[prompt_hash] = gem
         await self._record_gem_use(gem, system_prompt)
         return gem.id
 
-    async def _find_or_create_gem(self, prompt: str, prompt_hash: str) -> Gem | None:
-        """The account's gem for this prompt, created if the policy and the limits allow."""
-        gem_cfg = g_config.gemini.gems
-        name = f"{gem_cfg.policies.prefix}sys_{prompt_hash[:24]}"
-        gems = [gem for gem in await self.fetch_gems(include_hidden=True) if not gem.predefined]
-        if existing := next((gem for gem in gems if gem.name == name), None):
-            return existing
-        if gem_cfg.policy != GeminiGemPolicyMode.CREATE_ON_DEMAND:
-            return None
-
-        while self._gems_created_at and self._gems_created_at[0] < time.monotonic() - 60:
-            self._gems_created_at.popleft()
-        managed = sum(gem.name.startswith(gem_cfg.policies.prefix) for gem in gems)
-        if (
-            len(self._gems_created_at) >= gem_cfg.create_rate_limit_per_minute
-            or managed >= gem_cfg.managed_gems_max_total
-        ):
-            return None
-
-        created = await self.create_gem(
-            name=name,
-            prompt=prompt,
-            description=touch_managed_description(
-                "Managed system prompt gem created on-demand from API system message.",
-                now_ts=time.time(),
-            ),
-        )
-        self._gems_created_at.append(time.monotonic())
-        return created
+    async def _find_gem(self, prompt_hash: str) -> Gem | None:
+        """The account's managed gem for this prompt, if an earlier version of the server made it."""
+        name = f"{g_config.gemini.gems.policies.prefix}sys_{prompt_hash[:24]}"
+        gems = await self.fetch_gems(include_hidden=True)
+        return next((gem for gem in gems if not gem.predefined and gem.name == name), None)
 
     async def _record_gem_use(self, gem: Gem, prompt: str) -> None:
         """Write the time of this use into the gem's description, where cleanup reads it.
@@ -201,19 +254,20 @@ class GeminiClientWrapper(GeminiClient):
             logger.warning(f"Failed to record the last use of gem {gem.name!r}: {exc}")
 
     def is_healthy(self) -> bool:
-        """Running, or closed for inactivity after a good start, on an account in good standing."""
+        """Running, or closed for inactivity after a good start, as what it was configured to be:
+        signed in to an account in good standing, or a guest."""
         is_active = self._running or (self.auto_close and self._initialized)
-        return is_active and self.account_status == AccountStatus.AVAILABLE
+        expected = AccountStatus.AVAILABLE if self.has_account else AccountStatus.UNAUTHENTICATED
+        return is_active and self.account_status == expected
 
     def is_guest(self) -> bool:
-        """Whether this client talks to Google without an account.
-
-        Set when initialization falls back to a guest session, or when an authenticated one is
-        rejected mid-flight because its cookies expired. Text generation keeps working, so this
-        has to be asked rather than assumed away: the session just has no history, no uploads
-        and no model choice.
-        """
+        """Whether this client talks to Google without an account: it has no history, no uploads
+        and no model choice."""
         return self.account_status == AccountStatus.UNAUTHENTICATED
+
+    def signed_out(self) -> bool:
+        """Configured with cookies that Google no longer accepts."""
+        return self.has_account and self.is_guest()
 
     def usable_model(self, model: ModelSpec) -> ModelSpec:
         """The requested model, or the only one a guest session may use.
@@ -243,9 +297,8 @@ class GeminiClientWrapper(GeminiClient):
         across restarts. Any other value names a window only that exact session can continue, so
         a stored scope that no longer matches this client's proves the window behind it is gone.
 
-        Keyed on the parent's per-session id, rerolled on every successful initialization, plus
-        guest state. That covers both ways a window dies silently: a reinitialization, and a
-        mid-session downgrade to guest, which keeps the session id but loses the account's chats.
+        Keyed on the parent's per-session id, rerolled on every successful initialization, which is
+        how a window dies silently. A guest's chats are ephemeral in every mode.
         """
         if self.is_guest():
             return f"guest:{self._sessionid}"

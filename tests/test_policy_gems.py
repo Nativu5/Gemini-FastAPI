@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import hashlib
 import time
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
@@ -37,7 +38,7 @@ def test_wrapper_guest_session_skips_gem_operations(monkeypatch):
     monkeypatch.setattr(wrapper, "is_guest", lambda: True)
 
     gems_cfg = GeminiGemsConfig(
-        policy=GeminiGemPolicyMode.CREATE_ON_DEMAND,
+        policy=GeminiGemPolicyMode.FETCH_ONLY,
         cleanup=GeminiGemCleanupConfig(enabled=True),
     )
     monkeypatch.setattr(client_module.g_config.gemini, "gems", gems_cfg)
@@ -46,10 +47,9 @@ def test_wrapper_guest_session_skips_gem_operations(monkeypatch):
         raise AssertionError("Guest session must not call gem RPCs")
 
     monkeypatch.setattr(wrapper, "fetch_gems", _fail)
-    monkeypatch.setattr(wrapper, "create_gem", _fail)
 
     asyncio.run(wrapper.delete_unused_gems())
-    assert asyncio.run(wrapper.system_prompt_gem_id_or_create("You are helpful.")) is None
+    assert asyncio.run(wrapper.system_prompt_gem_id("You are helpful.")) is None
 
 
 @pytest.fixture
@@ -69,18 +69,6 @@ def account(monkeypatch):
         state.requests.append("fetch")
         return GemJar(state.gems)
 
-    async def create_gem(name: str, prompt: str, description: str = "") -> Gem:
-        state.requests.append("create")
-        gem = Gem(
-            id=f"g{state.requests.count('create')}",
-            name=name,
-            prompt=prompt,
-            description=description,
-            predefined=False,
-        )
-        state.gems[gem.id] = gem
-        return gem
-
     async def update_gem(gem: Gem, name: str, prompt: str, description: str = "") -> Gem:
         state.requests.append("update")
         if state.reject_updates:
@@ -96,48 +84,53 @@ def account(monkeypatch):
 
     for name, fake in (
         ("fetch_gems", fetch_gems),
-        ("create_gem", create_gem),
         ("update_gem", update_gem),
         ("delete_gem", delete_gem),
     ):
         monkeypatch.setattr(wrapper, name, fake)
-    clock = SimpleNamespace(time=lambda: state.now, monotonic=lambda: state.now)
+    clock = SimpleNamespace(time=lambda: state.now)
     monkeypatch.setattr(client_module, "time", clock)
     return state
 
 
 def _use_gems(monkeypatch, **settings: Any) -> None:
-    gems_cfg = GeminiGemsConfig(policy=GeminiGemPolicyMode.CREATE_ON_DEMAND, **settings)
+    gems_cfg = GeminiGemsConfig(policy=GeminiGemPolicyMode.FETCH_ONLY, **settings)
     monkeypatch.setattr(client_module.g_config.gemini, "gems", gems_cfg)
 
 
-def test_one_gem_serves_every_request_with_a_prompt_and_creation_is_rate_limited(
-    account, monkeypatch
-):
-    _use_gems(monkeypatch, create_rate_limit_per_minute=1)
-    lookup = account.client.system_prompt_gem_id_or_create
+def _made_earlier(account: SimpleNamespace, gem_id: str, prompt: str) -> None:
+    """A gem an earlier version of the server made for this prompt, last used just now."""
+    name = f"fastapi_policy_sys_{hashlib.sha256(prompt.encode()).hexdigest()[:24]}"
+    description = touch_managed_description("Managed", now_ts=account.now)
+    account.gems[gem_id] = Gem(
+        id=gem_id, name=name, description=description, prompt=prompt, predefined=False
+    )
+
+
+def test_a_prompt_uses_the_gem_made_for_it_or_goes_inline(account, monkeypatch):
+    _use_gems(monkeypatch)
+    _made_earlier(account, "g1", "System prompt A")
+    lookup = account.client.system_prompt_gem_id
 
     async def _run() -> None:
         assert await lookup("System prompt A") == "g1"
         assert await lookup("System prompt A") == "g1"
-        assert account.requests == ["fetch", "create"]  # the second lookup asked Google nothing
-        assert extract_managed_last_used_at(account.gems["g1"].description) == int(account.now)
+        assert account.requests == ["fetch"]  # the second lookup asked Google nothing
 
-        assert await lookup("System prompt B") is None  # one creation a minute, already used
-        account.now += 61
-        assert await lookup("System prompt B") == "g2"
+        assert await lookup("System prompt B") is None
 
     asyncio.run(_run())
 
 
 def test_a_gem_in_use_has_its_last_use_recorded_once_per_interval(account, monkeypatch):
     _use_gems(monkeypatch, cleanup=GeminiGemCleanupConfig(enabled=True, touch_interval_minutes=60))
-    lookup = account.client.system_prompt_gem_id_or_create
+    _made_earlier(account, "g1", "System prompt A")
+    lookup = account.client.system_prompt_gem_id
 
     async def _run() -> None:
         await lookup("System prompt A")
         await lookup("System prompt A")
-        assert "update" not in account.requests  # created a moment ago: nothing to record yet
+        assert "update" not in account.requests  # used a moment ago: nothing to record yet
 
         account.now += 61 * 60
         await lookup("System prompt A")
@@ -152,7 +145,8 @@ def test_a_rejected_last_use_update_neither_fails_the_request_nor_repeats_at_onc
     account, monkeypatch
 ):
     _use_gems(monkeypatch, cleanup=GeminiGemCleanupConfig(enabled=True, touch_interval_minutes=60))
-    lookup = account.client.system_prompt_gem_id_or_create
+    _made_earlier(account, "g1", "System prompt A")
+    lookup = account.client.system_prompt_gem_id
 
     async def _run() -> None:
         await lookup("System prompt A")
@@ -209,7 +203,8 @@ def test_cleanup_deletes_only_gems_this_server_recorded_as_unused(account, monke
 
 def test_a_gem_that_cleanup_deleted_is_not_handed_out_again(account, monkeypatch):
     _use_gems(monkeypatch, cleanup=GeminiGemCleanupConfig(enabled=True, unused_days=7))
-    lookup = account.client.system_prompt_gem_id_or_create
+    _made_earlier(account, "g1", "System prompt A")
+    lookup = account.client.system_prompt_gem_id
 
     async def _run() -> None:
         assert await lookup("System prompt A") == "g1"
@@ -217,7 +212,7 @@ def test_a_gem_that_cleanup_deleted_is_not_handed_out_again(account, monkeypatch
         await account.client.delete_unused_gems()
         assert account.gems == {}
 
-        assert await lookup("System prompt A") == "g2"
+        assert await lookup("System prompt A") is None
 
     asyncio.run(_run())
 
@@ -228,7 +223,7 @@ def test_a_gem_request_that_google_rejects_fails_instead_of_hanging(monkeypatch)
     wrapper = GeminiClientWrapper(client_id="auth-1")
     wrapper.account_status = AccountStatus.AVAILABLE
     gems_cfg = GeminiGemsConfig(
-        policy=GeminiGemPolicyMode.CREATE_ON_DEMAND,
+        policy=GeminiGemPolicyMode.FETCH_ONLY,
         cleanup=GeminiGemCleanupConfig(enabled=True),
     )
     monkeypatch.setattr(client_module.g_config.gemini, "gems", gems_cfg)
@@ -253,7 +248,7 @@ def test_a_gem_request_that_google_rejects_fails_instead_of_hanging(monkeypatch)
     async def _run() -> None:
         await asyncio.wait_for(wrapper.init(), timeout=2)
         for call in (
-            wrapper.system_prompt_gem_id_or_create("You are helpful."),
+            wrapper.system_prompt_gem_id("You are helpful."),
             wrapper.delete_unused_gems(),
         ):
             with pytest.raises(APIError):
@@ -277,6 +272,7 @@ def test_gem_cleanup_reaches_every_account_even_after_one_fails(monkeypatch):
             SimpleNamespace(
                 id=client_id,
                 running=lambda: True,
+                signed_out=lambda: False,
                 delete_unused_gems=lambda client_id=client_id: _cleanup(client_id),
             ),
         )
@@ -385,19 +381,3 @@ def test_the_pool_is_closed_at_shutdown_even_after_the_cleanup_task_failed(monke
     asyncio.run(serve_and_stop())
 
     assert closed
-
-
-# `enabled` was removed; on main, `enabled: false` turned gems off whatever the policy said.
-@pytest.mark.parametrize(
-    ("enabled", "policy"),
-    [
-        (False, GeminiGemPolicyMode.OFF),
-        ("false", GeminiGemPolicyMode.OFF),  # as an environment variable sets it
-        ("0", GeminiGemPolicyMode.OFF),
-        (True, GeminiGemPolicyMode.CREATE_ON_DEMAND),
-    ],
-)
-def test_a_config_that_turned_gems_off_with_enabled_keeps_them_off(enabled, policy):
-    config = GeminiGemsConfig.model_validate({"enabled": enabled, "policy": "create_on_demand"})
-
-    assert config.policy == policy

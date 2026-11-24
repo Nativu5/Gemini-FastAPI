@@ -94,6 +94,9 @@ class _Client:
     def is_guest(self) -> bool:
         return False
 
+    def signed_out(self) -> bool:
+        return self._upstream.signed_out
+
     def usable_model(self, model: Any) -> Any:
         return model
 
@@ -103,11 +106,10 @@ class _Client:
     def start_chat(self, **kwargs: Any) -> _Session:
         return _Session(self._upstream, self, **kwargs)
 
-    async def system_prompt_gem_id_or_create(self, prompt: str) -> str | None:
+    async def system_prompt_gem_id(self, prompt: str) -> str | None:
         if g_config.gemini.gems.policy == GeminiGemPolicyMode.OFF:
             return None
-        gems = self._upstream.gems
-        return gems.setdefault(prompt, f"gem_{len(gems) + 1}")
+        return self._upstream.gems.get(prompt)
 
 
 @pytest.fixture
@@ -116,11 +118,17 @@ def api(tmp_path, monkeypatch) -> Iterator[SimpleNamespace]:
 
     `api.upstream.replies` queues what Gemini answers (a `reply(...)` or an exception to raise;
     "ok" once the queue is empty; an exception after the chunks of a reply fails its stream there), `api.upstream.sent` records what it was asked,
-    `api.upstream.downloaded` the urls of the generated files that were fetched, and
+    `api.upstream.downloaded` the urls of the generated files that were fetched,
+    `api.upstream.signed_out` whether Google has stopped accepting the client's cookies, and
     `api.post(path, json=...)` sends a request. Conversations go to a store under `tmp_path`.
     """
     upstream = SimpleNamespace(
-        replies=[], sent=[], gems={}, downloaded=[], turn_numbers=itertools.count(1)
+        replies=[],
+        sent=[],
+        gems={},
+        downloaded=[],
+        turn_numbers=itertools.count(1),
+        signed_out=False,
     )
     client = _Client(upstream)
 

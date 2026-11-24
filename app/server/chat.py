@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from gemini_webapi import ModelOutput
 from gemini_webapi.client import ChatSession
-from gemini_webapi.exceptions import ModelInvalidError
+from gemini_webapi.exceptions import AuthError, ModelInvalidError
 from loguru import logger
 
 from app.models import (
@@ -207,7 +207,7 @@ class _Sent:
         client = cast(GeminiClientWrapper, self.session.geminiclient)
         # This turn is now the last chat this client opened; any window it replaced is closed. Set
         # before the store, so a persistence failure cannot leave a closed window looking reusable,
-        # and in every mode, since an expired cookie can turn a client ephemeral without warning.
+        # and in every mode, since a guest's chats are ephemeral whatever the mode.
         client.latest_chat_cid = cid_of(self.session.metadata)
         chat_scope = client.chat_scope(_use_temporary_chat_mode())
 
@@ -508,7 +508,7 @@ async def _resolve_system_prompt_gem(
     if not system_prompt:
         return None
     try:
-        return await client.system_prompt_gem_id_or_create(system_prompt)
+        return await client.system_prompt_gem_id(system_prompt)
     except Exception as exc:
         logger.warning(
             f"Failed to resolve managed system-prompt gem on client {client.id}; "
@@ -638,9 +638,8 @@ def _is_reusable_chat(conv: ConversationInStore, client: GeminiClientWrapper) ->
     Those survive only as the one open window of the session that created them, and replaying a
     closed one makes Google answer from a fresh chat without the earlier context - no error, just
     silent loss. So an ephemeral record must still carry the client's current scope, which no
-    longer matches once that session is gone (reinitialized, or downgraded to guest by expired
-    cookies, or authenticated again afterwards), and its cid must be the last one this client
-    opened, since a newer conversation has closed anything older.
+    longer matches once that session is gone (the client was reinitialized), and its cid must be
+    the last one this client opened, since a newer conversation has closed anything older.
 
     A `latest_chat_cid` match is necessary but not proof: the cid's kind is never verified.
 
@@ -787,8 +786,7 @@ async def _send(
             # still landed on a guest: none other was available, or the chat belongs to one.
             raise RuntimeError(
                 f"Message length ({len(text)}) exceeds limit ({limit}) and would have to be "
-                "sent as an attachment, which a guest session cannot upload. Refresh the client "
-                "cookies or shorten the request."
+                "sent as an attachment, which a guest cannot upload. Shorten the request."
             )
         logger.info(
             f"Message length ({len(text)}) exceeds limit ({limit}). Converting text to file attachment."
@@ -850,7 +848,8 @@ async def _send_request(
     cost is that response headers wait for Google's first chunk.
 
     Raises `HTTPException`: 400 when there is nothing new to send or an attachment is refused, 503
-    when no client could take the request, 502 when Gemini fails.
+    when no client could take the request or Google no longer accepts its cookies, 502 when Gemini
+    fails.
     """
     pool = GeminiClientPool()
     system_prompt, without_system = _extract_leading_system_prompt(history)
@@ -920,9 +919,17 @@ async def _send_request(
             )
             session = client.start_chat(model=client.usable_model(resolved_model))
             output = await _send(session, m_input, list(files), stream)
+        # Google can stop accepting the cookies while the library retries without a heartbeat. A
+        # finished answer is refused then; a stream has already gone out.
+        if isinstance(output, ModelOutput) and client.signed_out():
+            raise AuthError(f"Google no longer accepts the cookies of client {client.id}.")
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+        # Cookies rejected, possibly found so by another request's heartbeat: the service is
+        # unavailable, not Gemini at fault.
+        unavailable = isinstance(e, AuthError) or client.signed_out()
+        code = status.HTTP_503_SERVICE_UNAVAILABLE if unavailable else status.HTTP_502_BAD_GATEWAY
+        raise HTTPException(status_code=code, detail=str(e)) from e
     return _Sent(output, session, resolved_model, prepared)
 
 

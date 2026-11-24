@@ -97,8 +97,8 @@ async def lifespan(app: FastAPI):
     if (gem_policy := g_config.gemini.gems.policy) != GeminiGemPolicyMode.OFF:
         logger.warning(
             f"Gems are enabled (gemini.gems.policy={gem_policy.value}), but Google is retiring "
-            "them: personal accounts from 2026-11-17 (removed 2026-12-17), Workspace accounts in "
-            "March 2027, education accounts in June 2027. "
+            "them: personal accounts are read-only since 2026-11-17 and lose them on 2026-12-17, "
+            "Workspace accounts in March 2027, education accounts in June 2027. "
             'See https://support.google.com/gemini/answer/18560919. Set the policy to "off" '
             "once the account has lost them: a gem request that Google rejects is retried for up "
             "to about 15 seconds, restarting the client each time, before the system prompt is "

@@ -36,8 +36,7 @@ uv sync
 gemini:
   clients:
     - id: "client-a"
-      secure_1psid: "YOUR_SECURE_1PSID_HERE"
-      secure_1psidts: "YOUR_SECURE_1PSIDTS_HERE"
+      cookies: "__Secure-1PSID=...; __Secure-1PSIDTS=...; ..."
 ```
 
 启动服务，默认监听 `http://localhost:8000`：
@@ -60,11 +59,11 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### 获取 Cookie
 
-1. 在无痕窗口中打开 [Gemini](https://gemini.google.com/) 并登录。
-2. 打开开发者工具（F12），进入 **Application** → **Storage** → **Cookies**。
-3. 复制 `__Secure-1PSID` 和 `__Secure-1PSIDTS` 的值。
-
-更多细节见 [Gemini-API 认证指南](https://github.com/HanaokaYuzu/Gemini-API?tab=readme-ov-file#authentication)。
+1. 在无痕窗口中打开 [Gemini](https://gemini.google.com/)，只登录要给服务使用的那一个账号。同时登录多个账号时，服务使用第一个。
+2. 打开开发者工具（F12），进入 **Network**（网络）面板，刷新页面。
+3. 选中一个发往 `gemini.google.com` 的请求，例如 `app` 或 `batchexecute`。
+4. 在 **Request Headers**（请求标头）中复制 `cookie` 的完整值。
+5. 关闭无痕窗口，但不要退出登录，这样浏览器就不会再更新你复制的 Cookie。
 
 > [!WARNING]
 > 这些 Cookie 可以访问你的 Google 账号，请勿提交到版本控制。
@@ -80,8 +79,7 @@ docker run -p 8000:8000 \
   -v $(pwd)/cache:/app/cache \
   -e CONFIG_SERVER__API_KEY="your-api-key-here" \
   -e CONFIG_GEMINI__CLIENTS__0__ID="client-a" \
-  -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid" \
-  -e CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS="your-secure-1psidts" \
+  -e CONFIG_GEMINI__CLIENTS__0__COOKIES='your-cookie-header' \
   -e GEMINI_COOKIE_PATH="/app/cache" \
   ghcr.io/nativu5/gemini-fastapi
 ```
@@ -102,8 +100,7 @@ services:
     environment:
       - CONFIG_SERVER__API_KEY=${API_KEY}
       - CONFIG_GEMINI__CLIENTS__0__ID=client-a
-      - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID=${SECURE_1PSID}
-      - CONFIG_GEMINI__CLIENTS__0__SECURE_1PSIDTS=${SECURE_1PSIDTS}
+      - CONFIG_GEMINI__CLIENTS__0__COOKIES=${GEMINI_COOKIES}
       - GEMINI_COOKIE_PATH=/app/cache # 必须与上面的 cache 卷一致
     restart: on-failure:3
 ```
@@ -149,7 +146,7 @@ Gemini 网页端提供的控制项比本服务所模拟的 API 少。合法的�
 
 ```bash
 export CONFIG_SERVER__API_KEY="your-secure-api-key"
-export CONFIG_GEMINI__CLIENTS__0__SECURE_1PSID="your-secure-1psid"
+export CONFIG_GEMINI__CLIENTS__0__COOKIES='your-cookie-header'
 export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
 export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 ```
@@ -161,6 +158,7 @@ export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 `gemini.clients` 下的每一项对应一个 Google 账号。
 
 - `id`：该账号开启的每个会话都会记录这个值。更新 Cookie 时请保持不变，否则已保存的会话将无法继续。
+- `cookies`：已登录的浏览器发往 Gemini 的请求中的 Cookie 请求头（[获取方法](#获取-cookie)）。不填则该客户端以访客身份运行。
 - `proxy`：仅用于该账号的代理 URL，可选。
 - `impersonate`：供 [`curl_cffi`](https://github.com/lexiforest/curl_cffi) 使用的浏览器指纹，例如 `chrome`，可选。填入不支持的值会导致服务无法启动。
 
@@ -185,13 +183,14 @@ export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 
 修改 `chat_mode` 之后，位于 `auto_delete` 边界另一侧的已保存会话不会被继续使用，其历史会重放到一个新会话中；在 `auto_delete` 下开启的会话仍会按期删除。
 
-### 访客会话
+### 访客与失效的 Cookie
 
-当某个账号的 Cookie 被拒绝时，该客户端会以访客身份继续运行，而不是直接失败。访客只能回答文本请求：不能上传文件，不能选择模型，也不保留历史。
+没有配置 `cookies` 的客户端是访客。访客只能回答文本请求：不能上传文件，不能选择模型，也不保留历史。
 
-- 优先使用已登录的客户端。只有在没有已登录的客户端时，访客才会收到请求。
-- 如果只剩访客，需要上传的请求会失败并给出明确的提示。
-- `/health` 会把访客报告为不健康。`gemini.guest_mode` 决定何时因此返回 HTTP 503：
+- 优先使用有账号的客户端。只有在它们都不可用时，访客才会收到请求；如果只剩访客，需要上传的请求会返回 `503`。
+- 配置了 Cookie 的客户端永远不会以访客身份运行。当 Google 不再接受它的 Cookie 时（无论是启动时，还是之后因过期或续期失败），错误会记入日志，该客户端停止服务，它正在处理的请求返回 `503`。之后每个本会用到它的请求都会先尝试重启它；只要 Google 仍拒绝它的 Cookie，请求就会交给其他客户端，没有可用客户端时返回 `503`。新的 Cookie 需要重启服务才会生效。
+- 启动时如果没有任何客户端能启动，服务会退出。
+- 客户端未运行，或配置了 Cookie 但 Google 不再接受时，`/health` 会把它报告为不健康。访客在运行时是健康的。`gemini.guest_mode` 决定何时因不健康的客户端返回 HTTP 503：
 
 | `guest_mode` | `/health` 返回 503 的条件 |
 | --- | --- |
@@ -212,21 +211,10 @@ export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 ### Gem
 
 > [!WARNING]
-> Google 已宣布[下线 Gem](https://support.google.com/gemini/answer/18560919)：个人账号自 2026-11-17 起只读，2026-12-17 移除；Workspace 账号为 2027 年 3 月，教育账号为 2027 年 6 月。此功能仅在账号仍可使用 Gem 时有效。账号失去 Gem 后请把策略改回 `off`：被 Google 拒绝的 Gem 请求最多会重试约 15 秒，每次重试都会重启客户端，之后提示词才放在消息正文中发送，每个请求都是如此。
+> Google 已宣布[下线 Gem](https://support.google.com/gemini/answer/18560919)：个人账号自 2026-11-17 起只读，2026-12-17 移除；Workspace 账号为 2027 年 3 月，教育账号为 2027 年 6 月。服务不再创建 Gem，此功能只会在账号还保留 Gem 时，使用旧版本服务创建的 Gem。账号失去 Gem 后请把策略改回 `off`：被 Google 拒绝的 Gem 请求最多会重试约 15 秒，每次重试都会重启客户端，之后提示词才放在消息正文中发送，每个请求都是如此。
 
-默认关闭，通过 `gemini.gems.policy` 启用。启用后，`/v1/chat/completions` 或 `/v1/responses` 请求开头的系统提示词会作为一个 Gem（Gemini 中保存的自定义指令）在 Google 账号里保存一次，之后的请求只引用它，而不再把提示词放进消息正文。系统提示词相同的会话共用一个 Gem。
+默认关闭。设置 `gemini.gems.policy: fetch_only` 后，`/v1/chat/completions` 或 `/v1/responses` 请求开头的系统提示词，会改为引用旧版本服务为它保存在 Google 账号里的 Gem（Gemini 中保存的自定义指令，名为 `fastapi_policy_...`），而不再放进消息正文。没有对应 Gem 或 Gem 无法使用时，提示词放在消息正文中发送。
 
-| `policy` | 系统提示词 |
-| --- | --- |
-| `off`（默认） | 放在消息正文中发送 |
-| `fetch_only` | 使用账号里已有的对应 Gem；不会创建 |
-| `create_on_demand` | 首次出现时创建一个 Gem |
-
-> [!WARNING]
-> `create_on_demand` 会在 Google 账号中创建名为 `fastapi_policy_...` 的 Gem。
-
-- 每个不同的提示词对应一个 Gem，因此只适用于稳定的提示词。如果提示词每次请求都变化（例如包含当前时间），每次都会创建一个新的 Gem。
-- 创建受 `create_rate_limit_per_minute`（默认 `4`）和 `managed_gems_max_total`（默认 `200`）限制。超出限制或 Gem 无法使用时，提示词会放在消息正文中发送。
 - Gem 会一直保留在账号中，直到你删除。设置 `cleanup.enabled: true` 后，无论使用哪种策略，超过 `cleanup.unused_days`（默认 `7`）未使用的 Gem 会被清理任务删除（启动时运行一次，之后每 6 小时一次），并且每个 Gem 的描述会被更新以记录最近使用时间。
 - 访客会话和 Gemini 原生接口的请求始终把提示词放在消息正文中发送。
 
@@ -236,7 +224,9 @@ export CONFIG_GEMINI__CHAT_MODE="auto_delete"
 
 ### 已移除的配置项
 
-`gemini.models`、`gemini.model_strategy`、`gemini.oversized_context_strategy`、`storage.images_path`，以及 `gemini.gems` 下的 `enabled`、`fetch_on_init`、`include_hidden_on_fetch`、`policies.default_policy` 和 `cleanup.require_managed_marker` 已不存在，即使出现在配置中也会被忽略。现在只由 `gemini.gems.policy` 决定是否使用 Gem，但仍写着 `gemini.gems.enabled: false` 的配置会保持关闭。生成的媒体文件保存在 `storage.media_path` 下。
+`gemini.clients[].secure_1psid` 和 `secure_1psidts` 已由 `cookies` 取代：配置中仍有这两项时，服务启动即报错退出。`gemini.gems.policy: create_on_demand` 已不存在，同样会让服务启动失败。
+
+`gemini.models`、`gemini.model_strategy`、`gemini.oversized_context_strategy`、`storage.images_path`，以及 `gemini.gems` 下的 `enabled`、`create_rate_limit_per_minute`、`managed_gems_max_total`、`fetch_on_init`、`include_hidden_on_fetch`、`policies.default_policy` 和 `cleanup.require_managed_marker` 已不存在，即使出现在配置中也会被忽略。现在只由 `gemini.gems.policy` 决定是否使用 Gem。生成的媒体文件保存在 `storage.media_path` 下。
 
 ## 维护
 
