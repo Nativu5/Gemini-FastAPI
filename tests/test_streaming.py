@@ -82,7 +82,9 @@ def test_a_native_stream_that_ends_in_an_error_stops_the_downloads(downloads):
 
     # Only what is read before the unmet tool choice ends the stream.
     output = SimpleNamespace(output=one_chunk())
-    sent = SimpleNamespace(sent=output, structured_requirement=None, tool_choice="required")
+    sent = SimpleNamespace(
+        sent=output, structured_requirement=None, tools=[], tool_choice="required"
+    )
 
     async def read_to_the_end() -> tuple[str, list[bool]]:
         frames = [frame async for frame in _stream_reply(cast(Any, sent), "http://testserver/")]

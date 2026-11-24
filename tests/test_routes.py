@@ -44,7 +44,7 @@ def test_responses_offers_a_function_tool_declared_without_strict(api):
     assert [item["name"] for item in body["output"] if item["type"] == "function_call"] == [
         "get_weather"
     ]
-    assert body["tools"] == [WEATHER_TOOL]
+    assert body["tools"] == [{**WEATHER_TOOL, "strict": False}]
 
 
 def _continued(api) -> bool:
@@ -1101,6 +1101,90 @@ def test_a_chat_completion_without_the_forced_tool_call_is_an_error(api, extra, 
     assert response.text.endswith("data: [DONE]\n\n")
     error = _sse(response)[-1]["error"]
     assert (error["param"], error["code"]) == ("tool_choice", "required_tool_missing")
+
+
+GET_WEATHER = {k: v for k, v in WEATHER_TOOL.items() if k != "type"}
+
+
+def _post_with_tool(api, path: str, stream: bool, function: dict, *, none=False, strict=False):
+    """A request on `path` offering `function`, with tool choice `none`, and `strict` (OpenAI
+    only) set or left out."""
+    if path == "native":
+        method = "streamGenerateContent" if stream else "generateContent"
+        body = {
+            "contents": USER_TURN,
+            "tools": [{"functionDeclarations": [function]}],
+            "toolConfig": {"functionCallingConfig": {"mode": "NONE" if none else "AUTO"}},
+        }
+        return api.post(f"/v1beta/models/{MODEL}:{method}", json=body)
+    function = {**function, **({"strict": True} if strict else {})}
+    if "chat" in path:
+        body = {**CHAT, "tools": [{"type": "function", "function": function}]}
+    else:
+        body = {"model": MODEL, "input": "Hi", "tools": [{"type": "function", **function}]}
+    return api.post(
+        path, json={**body, "stream": stream, "tool_choice": "none" if none else "auto"}
+    )
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "native"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_any_call_under_tool_choice_none_is_an_error(api, path, stream):
+    """The prompt cannot keep Gemini Web from calling a tool; the reply is checked instead."""
+    api.upstream.replies.append(reply(TOOL_CALL))
+
+    response = _post_with_tool(api, path, stream, GET_WEATHER, none=True)
+
+    if not stream:
+        assert response.status_code == 502, response.text
+        return
+    error = _sse(response)[-1]["error"]
+    if path != "native":
+        assert (error["param"], error["code"]) == ("tools", "invalid_tool_call")
+
+
+def test_a_call_to_an_undeclared_tool_is_an_error_even_when_cut_short(api):
+    """A call cut short is otherwise dropped, which would hide this one."""
+    api.upstream.replies.append(
+        reply("[ToolCalls][Call:delete_all_files]path=/[/Call][/ToolCalls]")
+    )
+
+    response = _post_with_tool(api, "/v1/chat/completions", False, GET_WEATHER)
+
+    assert response.status_code == 502, response.text
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses"])
+@pytest.mark.parametrize("strict", [True, False], ids=["strict", "strict-left-out"])
+def test_only_a_strict_tool_has_its_arguments_enforced(api, path, strict):
+    api.upstream.replies.append(reply(TOOL_CALL.replace("city", "town")))
+    function = {
+        **GET_WEATHER,
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+            "additionalProperties": False,
+        },
+    }
+
+    response = _post_with_tool(api, path, False, function, strict=strict)
+
+    assert response.status_code == (502 if strict else 200), response.text
+
+
+def test_a_native_parameter_declared_as_text_in_openapi_form_stays_text(api):
+    api.upstream.replies.append(reply(TOOL_CALL.replace("Hanoi", "10001")))
+    function = {
+        "name": "get_weather",
+        "parameters": {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}},
+    }
+
+    parts = _native(api, False, contents=USER_TURN, tools=[{"functionDeclarations": [function]}])
+
+    assert [part["functionCall"]["args"] for part in parts if "functionCall" in part] == [
+        {"city": "10001"}
+    ]
 
 
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "native"])

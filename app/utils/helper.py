@@ -259,18 +259,25 @@ def strip_markdown_fence(s: str) -> str:
     return s[len(match.group(0)) : -len(fence)].strip()
 
 
-def _parse_tool_argument_value(raw_value: str) -> JsonValue:
-    """
-    Convert a tagged tool argument into the most specific JSON-compatible value.
+def _parse_tool_argument_value(raw_value: str, validator: Any) -> JsonValue:
+    """A tagged tool argument as JSON when it parses, else as text.
 
-    JSON literals, arrays, and objects are preserved so downstream clients receive
-    strict argument types, while plain text values remain strings for compatibility.
+    The text is kept when only it fits the parameter's schema, which `validator` checks: a ZIP
+    code `10001` declared as a string stays a string.
     """
     value = strip_markdown_fence(raw_value)
     try:
-        return orjson.loads(value)
+        parsed = orjson.loads(value)
     except orjson.JSONDecodeError:
         return value
+    if (
+        validator is not None
+        and not isinstance(parsed, str)
+        and _accepts(validator, value)
+        and _accepts(validator, parsed) is False
+    ):
+        return value
+    return parsed
 
 
 def estimate_tokens(text: str | None) -> int:
@@ -279,6 +286,11 @@ def estimate_tokens(text: str | None) -> int:
 
 class StructuredOutputValidationError(ValueError):
     """Raised when model output cannot satisfy a requested JSON Schema."""
+
+
+class ToolCallValidationError(ValueError):
+    """Raised when the model calls a tool the request does not offer, or breaks a strict one's
+    parameter schema."""
 
 
 class SchemaEvaluationTimeoutError(ValueError):
@@ -367,6 +379,42 @@ def _bounded_validator_for(schema: dict[str, Any]):
     return _bounded(validator_for(schema))(schema, registry=_SCHEMA_REGISTRY)
 
 
+# Not being able to evaluate a schema is this wrapper failing to check, not the model failing to
+# comply, so the two functions below log it and never report a violation: under `strict` that
+# would 502 a conforming reply.
+def _schema_validator(schema: dict[str, Any], subject: str) -> Any:
+    """A validator for a client's schema; None, logged, when it is not valid JSON Schema."""
+    try:
+        validator = _bounded_validator_for(schema)
+        validator.check_schema(schema)
+    except Exception as exc:
+        logger.warning(f"{subject} left unverified, schema is not usable: {exc}")
+        return None
+    return validator
+
+
+def _schema_violation(validator: Any, instance: Any, subject: str) -> str | None:
+    """How `instance` fails the validator's schema; None when it conforms or cannot be checked."""
+    try:
+        validator.validate(instance)
+    except ValidationError as exc:
+        return exc.message
+    except SchemaEvaluationTimeoutError as exc:
+        logger.warning(f"{subject} left unverified, schema evaluation timed out: {exc}")
+    except Exception as exc:
+        # `check_schema` does not resolve `$ref`s, so unresolvable references surface only here.
+        logger.warning(f"{subject} left unverified, schema is not usable: {exc}")
+    return None
+
+
+def _accepts(validator: Any, value: Any) -> bool | None:
+    """Whether the validator's schema accepts `value`; None when that cannot be evaluated."""
+    try:
+        return validator.is_valid(value)
+    except Exception:
+        return None
+
+
 def validate_json_schema(schema: dict[str, Any]) -> None:
     """Raise ValueError when a client-provided JSON Schema is not valid."""
     try:
@@ -391,10 +439,11 @@ _OPENAPI_ONLY_KEYS = frozenset({"propertyOrdering", "example"})
 def normalize_openapi_schema(schema: Any) -> Any:
     """Translate Gemini's OpenAPI 3.0 Schema subset into equivalent JSON Schema.
 
-    `generationConfig.responseSchema` spells its types in uppercase (`STRING`, `OBJECT`) and
-    marks optional values with OpenAPI's `nullable` flag. Neither is valid JSON Schema, so the
-    schema has to be translated before it can be checked or used to validate a response.
-    `responseJsonSchema` is already JSON Schema and does not go through here.
+    `generationConfig.responseSchema` and a function declaration's `parameters` spell their types
+    in uppercase (`STRING`, `OBJECT`) and mark optional values with OpenAPI's `nullable` flag.
+    Neither is valid JSON Schema, so the schema has to be translated before it can be checked or
+    used to validate a reply. `responseJsonSchema` and `parametersJsonSchema` are already JSON
+    Schema and do not go through here.
     """
     if isinstance(schema, list):
         return [normalize_openapi_schema(item) for item in schema]
@@ -627,17 +676,25 @@ def strip_system_hints(text: str) -> str:
     return TAGGED_RESULT_RE.sub("", cleaned)
 
 
-def extract_tool_calls(text: str) -> tuple[str, list[AppToolCall]]:
+def extract_tool_calls(text: str, tools: Sequence[Any]) -> tuple[str, list[AppToolCall]]:
     """The tool calls in a reply, and the reply with every protocol block and hint removed.
 
-    Tagged arguments keep their JSON types. A call's id is derived from its content, so the same
-    reply always yields the same ids.
+    `tools` are the tools the model may call, in either API's layout. A call to another one, or
+    whose arguments fail a `strict` tool's schema, raises `ToolCallValidationError`; a non-strict
+    tool's violation is only logged. Tagged arguments keep their JSON types unless only their text
+    fits the parameter's schema. A call's id is derived from its content, so the same reply always
+    yields the same ids.
     """
+    offered = {fn.name: fn for fn in (getattr(tool, "function", tool) for tool in tools)}
     tool_calls: list[AppToolCall] = []
     for match in TOOL_CALL_RE.finditer(text):
         name = unescape_text(match.group(1).strip())
         raw_args = unescape_text(match.group(2))
 
+        if (fn := offered.get(name)) is None:
+            raise ToolCallValidationError(
+                f"The model called {name!r}, which the request does not offer"
+            )
         # Leftovers mean the call was cut short: drop it rather than emit partial arguments.
         if residue := TAGGED_ARG_RE.sub("", raw_args).strip():
             logger.warning(
@@ -645,10 +702,28 @@ def extract_tool_calls(text: str) -> tuple[str, list[AppToolCall]]:
             )
             continue
 
-        args_dict = {
-            arg_name.strip(): _parse_tool_argument_value(arg_value)
-            for arg_name, arg_value in TAGGED_ARG_RE.findall(raw_args)
-        }
+        subject = f"Arguments of tool call {name!r}"
+        validator = _schema_validator(fn.parameters, subject) if fn.parameters else None
+        properties = (fn.parameters or {}).get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+        args_dict = {}
+        for arg_name, arg_value in TAGGED_ARG_RE.findall(raw_args):
+            arg_name = arg_name.strip()
+            param = properties.get(arg_name)
+            # Evolved from the root, so a `$ref` in the parameter still resolves.
+            param_validator = (
+                validator.evolve(schema=param) if validator and param is not None else None
+            )
+            args_dict[arg_name] = _parse_tool_argument_value(arg_value, param_validator)
+        if validator and (violation := _schema_violation(validator, args_dict, subject)):
+            if fn.strict:
+                raise ToolCallValidationError(
+                    f"The arguments of the model's call to {name!r} fail its strict schema: "
+                    f"{violation}"
+                )
+            logger.warning(f"The arguments of tool call {name!r} fail its schema: {violation}")
+
         arguments = orjson.dumps(args_dict).decode("utf-8")
         seed = f"{name}:{arguments}:{len(tool_calls)}".encode()
         tool_calls.append(
@@ -840,38 +915,18 @@ def canonicalize_structured_output(
         return None
 
     # An empty schema is JSON mode: parsing was the whole requirement.
-    if structured_requirement.schema:
-        try:
-            deadline_token = _schema_regex_deadline.set(
-                time.monotonic() + SCHEMA_REGEX_BUDGET_SECONDS
-            )
-            try:
-                _bounded_validator_for(structured_requirement.schema).validate(structured_payload)
-            finally:
-                _schema_regex_deadline.reset(deadline_token)
-        except ValidationError as exc:
-            logger.warning(
-                f"Structured response failed schema validation "
-                f"(schema={structured_requirement.schema_name}): {exc.message}"
-            )
-            return None
-        # Both branches below are this wrapper failing to check, not the model failing to comply,
-        # so neither reports a violation: under `strict` that would 502 a conforming reply.
-        except SchemaEvaluationTimeoutError as exc:
-            logger.warning(
-                f"Structured response left unverified, schema evaluation timed out "
-                f"(schema={structured_requirement.schema_name}): {exc}"
-            )
-        except Exception as exc:
-            # `check_schema` does not resolve `$ref`s, so unresolvable references and foreign
-            # dialects surface only here.
-            logger.warning(
-                f"Structured response left unverified, schema is not usable "
-                f"({structured_requirement.schema_name!r}): {exc}"
-            )
+    name = structured_requirement.schema_name
+    subject = f"Structured response ({name!r})"
+    if (
+        structured_requirement.schema
+        and (validator := _schema_validator(structured_requirement.schema, subject))
+        and (violation := _schema_violation(validator, structured_payload, subject))
+    ):
+        logger.warning(f"Structured response failed schema validation (schema={name}): {violation}")
+        return None
 
     canonical_output = orjson.dumps(structured_payload).decode("utf-8")
-    logger.debug(f"Structured response fulfilled (schema={structured_requirement.schema_name}).")
+    logger.debug(f"Structured response fulfilled (schema={name}).")
     return canonical_output
 
 
@@ -879,37 +934,49 @@ def process_llm_output(
     thoughts: str | None,
     raw_text: str,
     structured_requirement: StructuredOutputRequirement | None,
+    tools: Sequence[Any] = (),
+    tool_choice: object = None,
 ) -> tuple[str, str, list[AppToolCall]]:
     """A finished reply as (thoughts, text, tool calls), both texts normalized.
 
     The text has the protocol blocks removed and, under a response format, is the canonical JSON
-    the reply held. Raises `StructuredOutputValidationError` when a strict format is not met.
+    the reply held. Raises `StructuredOutputValidationError` when a strict format is not met, and
+    `ToolCallValidationError` for a call `tools` and `tool_choice` do not allow.
     """
-    thoughts = normalize_llm_text(thoughts or "").strip()
-    visible_output, tool_calls = extract_tool_calls(normalize_llm_text(raw_text))
-    if tool_calls:
-        logger.debug(f"Detected {len(tool_calls)} tool call(s) in model output.")
+    # One regex budget for the whole reply, shared by every tool call and the response format.
+    deadline_token = _schema_regex_deadline.set(time.monotonic() + SCHEMA_REGEX_BUDGET_SECONDS)
+    try:
+        thoughts = normalize_llm_text(thoughts or "").strip()
+        visible_output, tool_calls = extract_tool_calls(
+            normalize_llm_text(raw_text), () if tool_choice == "none" else tools
+        )
+        if tool_calls:
+            logger.debug(f"Detected {len(tool_calls)} tool call(s) in model output.")
 
-    visible_output = visible_output.strip()
+        visible_output = visible_output.strip()
 
-    if structured_requirement and visible_output:
-        canonical_output = canonicalize_structured_output(visible_output, structured_requirement)
-        if canonical_output is not None:
-            visible_output = canonical_output
-        elif tool_calls:
-            # The format constrains the final answer, not a turn that asks for a tool.
-            logger.debug(
-                "Skipping structured-output enforcement for a turn that returned tool call(s)."
+        if structured_requirement and visible_output:
+            canonical_output = canonicalize_structured_output(
+                visible_output, structured_requirement
             )
-        elif structured_requirement.strict:
-            raise StructuredOutputValidationError(
-                f"Model output did not satisfy JSON Schema {structured_requirement.schema_name!r}"
-            )
-        else:
-            logger.warning(
-                f"Returning unstructured text for best-effort response format "
-                f"{structured_requirement.schema_name!r}."
-            )
+            if canonical_output is not None:
+                visible_output = canonical_output
+            elif tool_calls:
+                # The format constrains the final answer, not a turn that asks for a tool.
+                logger.debug(
+                    "Skipping structured-output enforcement for a turn that returned tool call(s)."
+                )
+            elif structured_requirement.strict:
+                raise StructuredOutputValidationError(
+                    f"Model output did not satisfy JSON Schema {structured_requirement.schema_name!r}"
+                )
+            else:
+                logger.warning(
+                    f"Returning unstructured text for best-effort response format "
+                    f"{structured_requirement.schema_name!r}."
+                )
+    finally:
+        _schema_regex_deadline.reset(deadline_token)
 
     return thoughts, visible_output, tool_calls
 

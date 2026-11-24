@@ -18,6 +18,7 @@ from app.models.gemini_models import GeminiGenerateContentRequest
 from app.models.models import (
     ChatCompletionNamedToolChoice,
     FunctionCallOutput,
+    FunctionTool,
     ResponseCreateRequest,
     ResponseFunctionToolCall,
     ResponseInputFile,
@@ -57,6 +58,7 @@ from app.utils.helper import (
 TOOL_CALL_OUTPUT = (
     "[ToolCalls][Call:get_weather][CallParameter:city]Hanoi[/CallParameter][/Call][/ToolCalls]"
 )
+WEATHER_TOOLS = [FunctionTool(type="function", name="get_weather")]
 OBJECT_SCHEMA = {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}
 
 
@@ -158,7 +160,9 @@ def test_only_a_strict_schema_is_prompted_for_exact_conformance(strict):
 def test_tool_call_turn_is_not_failed_by_a_response_format():
     """The schema constrains the final answer, not a turn that asks for a tool."""
     raw = "Let me check. " + TOOL_CALL_OUTPUT
-    _, visible, tool_calls = process_llm_output(None, raw, _requirement(OBJECT_SCHEMA))
+    _, visible, tool_calls = process_llm_output(
+        None, raw, _requirement(OBJECT_SCHEMA), WEATHER_TOOLS
+    )
     assert [call.function.name for call in tool_calls] == ["get_weather"]
     assert visible == "Let me check."
 
@@ -180,7 +184,9 @@ def test_a_reply_with_no_text_is_not_a_schema_violation(raw_text):
 
 def test_text_alongside_a_tool_call_is_still_canonicalized():
     raw = f'```json\n{{"a": "x"}}\n```\n{TOOL_CALL_OUTPUT}'
-    _, visible, tool_calls = process_llm_output(None, raw, _requirement(OBJECT_SCHEMA))
+    _, visible, tool_calls = process_llm_output(
+        None, raw, _requirement(OBJECT_SCHEMA), WEATHER_TOOLS
+    )
     assert [call.function.name for call in tool_calls] == ["get_weather"]
     assert visible == '{"a":"x"}'
 
@@ -670,6 +676,15 @@ def test_a_function_keeps_its_parameters_whichever_field_declares_them(field):
     assert [tool.parameters for tool in tools or []] == [schema]
 
 
+@pytest.mark.parametrize(
+    ("mode", "strict"), [("AUTO", False), ("NONE", False), ("ANY", True), ("VALIDATED", True)]
+)
+def test_the_modes_that_promise_schema_adherence_make_every_function_strict(mode, strict):
+    request = _gemini_request(tools=_TOOLS, toolConfig={"functionCallingConfig": {"mode": mode}})
+    tools, _ = _gemini_tools_to_internal(request.tools, request.toolConfig)
+    assert [tool.strict for tool in tools or []] == [strict, strict]
+
+
 def test_no_tools_yields_no_tool_choice():
     assert _gemini_tools_to_internal(None, None) == (None, None)
 
@@ -915,6 +930,39 @@ def test_strip_markdown_fence_with_arbitrary_language_tags(payload, expected):
     assert strip_markdown_fence(payload) == expected
 
 
+_OPTIONAL_STRING = {"anyOf": [{"type": "string"}, {"type": "null"}]}  # pydantic's `str | None`
+
+
+@pytest.mark.parametrize(
+    ("param", "value", "expected"),
+    [
+        (_OPTIONAL_STRING, "10001", "10001"),
+        (_OPTIONAL_STRING, "null", None),
+        ({"$ref": "#/$defs/zip"}, "10001", "10001"),
+    ],
+    ids=["optional-string", "optional-string-null", "ref-to-string"],
+)
+def test_an_argument_is_kept_as_text_only_when_only_the_text_fits(param, value, expected):
+    schema = {"type": "object", "properties": {"p": param}, "$defs": {"zip": {"type": "string"}}}
+    text = f"[ToolCalls][Call:f][CallParameter:p]{value}[/CallParameter][/Call][/ToolCalls]"
+
+    _, calls = extract_tool_calls(
+        text, [FunctionTool(type="function", name="f", parameters=schema)]
+    )
+
+    assert orjson.loads(calls[0].function.arguments) == {"p": expected}
+
+
+def test_a_strict_tool_whose_schema_is_not_valid_is_not_enforced():
+    """Not being able to check is this server's failure, not the model's."""
+    schema = {"type": "object", "required": "city"}  # `required` must be a list
+    tool = FunctionTool(type="function", name="get_weather", parameters=schema, strict=True)
+
+    _, calls = extract_tool_calls(TOOL_CALL_OUTPUT, [tool])
+
+    assert [call.function.name for call in calls] == ["get_weather"]
+
+
 def test_tool_call_with_language_tagged_parameter_fences():
     raw_llm_text = (
         "[ToolCalls]\n"
@@ -932,7 +980,9 @@ def test_tool_call_with_language_tagged_parameter_fences():
         "[/Call]\n"
         "[/ToolCalls]"
     )
-    visible, tool_calls = extract_tool_calls(raw_llm_text)
+    visible, tool_calls = extract_tool_calls(
+        raw_llm_text, [FunctionTool(type="function", name="execute_code")]
+    )
     assert visible == ""
     assert len(tool_calls) == 1
     assert tool_calls[0].function.name == "execute_code"

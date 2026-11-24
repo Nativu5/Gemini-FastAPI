@@ -135,98 +135,18 @@ Gemini 网页端提供的控制项比本服务所模拟的 API 少。合法的�
   - `strict: true` 时，回复不符合 Schema 即为错误：返回 `502`，流式响应中则是一个错误事件。
   - `strict: false`（两套 OpenAI 接口的默认值）或 JSON 模式下，回复按原样返回。
   - Gemini 原生的 `responseSchema` 和 `responseJsonSchema` 始终是尽力而为。
-  - 返回工具调用的那一轮不做校验。
+  - 返回工具调用的那一轮不按响应 Schema 校验。
+- **工具调用同样是在提示词中提出要求**，在回复完整后校验。
+  - 调用了请求没有提供的工具即为错误：返回 `502`，流式响应中则是一个错误事件。`tool_choice: "none"` 或 Gemini 原生 `NONE` 模式下的任何调用都属于这种情况。
+  - 函数声明了 `strict: true`，或在 Gemini 原生 `ANY`、`VALIDATED` 模式下，参数不符合 Schema 的调用也是错误。其他调用即使参数不符合 Schema 也照样返回，并在日志中记录警告。省略 `strict` 时不做强制校验，`/v1/responses` 会把它回报为 `false`。
+  - 参数保留其 JSON 类型，但只有原文符合参数 Schema 时保留原文：字符串参数的 `10001` 仍是 `"10001"`。
 - **服务无法求值的 Schema 仍会发给模型，但不会被强制执行**，也不会导致请求失败。包括非法的 JSON Schema、无法翻译成 JSON Schema 的 `responseSchema`、无法解析的 `$ref`（远程引用一律不会去抓取），以及正则关键字超出 `server.schema_validation_budget_seconds` 的情况。唯一的例外是不合法的 `responseJsonSchema`，会返回 `400`。
 - **带 Schema 的流式响应**会在校验后作为单个分块返回，因为 JSON 只有完整后才能校验。
 - **Google 的 SDK 使用默认设置即可**，文字和图片的对话（流式和非流式）以及 `responseSchema` 和函数工具都可以正常使用。字段名接受驼峰和下划线两种形式，与 Google 一致。
 
 ## 配置说明
 
-每个配置项的说明都在 [`config/config.yaml`](config/config.yaml) 中。任何配置项都可以用环境变量覆盖：变量名为 `CONFIG_` 加上配置项的路径，层级之间用 `__` 分隔：
-
-```bash
-export CONFIG_SERVER__API_KEY="your-secure-api-key"
-export CONFIG_GEMINI__CLIENTS__0__COOKIES='your-cookie-header'
-export CONFIG_GEMINI__CLIENTS__0__PROXY="socks5://127.0.0.1:1080"
-export CONFIG_GEMINI__CHAT_MODE="auto_delete"
-```
-
-另有两个变量是直接读取的：`CONFIG_PATH` 指定另一个配置文件，`GEMINI_COOKIE_PATH` 指定刷新后的 Cookie 的缓存目录。
-
-### 账号
-
-`gemini.clients` 下的每一项对应一个 Google 账号。
-
-- `id`：该账号开启的每个会话都会记录这个值。更新 Cookie 时请保持不变，否则已保存的会话将无法继续。
-- `cookies`：已登录的浏览器发往 Gemini 的请求中的 Cookie 请求头（[获取方法](#获取-cookie)）。不填则该客户端以访客身份运行。
-- `proxy`：仅用于该账号的代理 URL，可选。
-- `impersonate`：供 [`curl_cffi`](https://github.com/lexiforest/curl_cffi) 使用的浏览器指纹，例如 `chrome`，可选。填入不支持的值会导致服务无法启动。
-
-### 会话模式
-
-`gemini.chat_mode` 决定服务在你的 Google 账号中开启的会话如何处置。
-
-| 模式 | 是否保留在 Google 账号中 | 多轮上下文 |
-| --- | --- | --- |
-| `normal`（默认） | 保留，直到你手动删除 | 可靠 |
-| `temporary` | 从不保存 | 尽力而为 |
-| `auto_delete` | 保留，闲置后删除 | 可靠 |
-
-**`temporary`** 使用 Google 的临时会话。Google 为每个账号只保留一个打开的临时会话，并且可能随时将其关闭而不报错，此时回复可能不带之前的上下文。服务只会继续最近的那个临时会话，其他情况下会把完整历史重放到一个新会话中。输入长度上限也更低。长对话请选用其他模式。
-
-**`auto_delete`** 使用普通会话，并在连续 `gemini.auto_delete_ttl` 秒没有请求后（默认 `86400`，最小 `60`），把它从 Google 账号和本地存储中一并删除。
-
-- 只会删除服务在该模式下开启的会话。其他模式下的会话，以及账号里的其他任何内容，都不会被触碰。
-- 删除由周期性的清理任务执行，间隔为 TTL 的一半（最短一分钟，最长六小时），因此会话的实际存活时间可能比 TTL 多出一个间隔。
-- 删除失败时（例如账号处于未登录状态），会在之后的清理中重试，连续五次失败后放弃并在日志中记录错误。
-- 生成的媒体文件按相同的 TTL 过期。
-
-修改 `chat_mode` 之后，位于 `auto_delete` 边界另一侧的已保存会话不会被继续使用，其历史会重放到一个新会话中；在 `auto_delete` 下开启的会话仍会按期删除。
-
-### 访客与失效的 Cookie
-
-没有配置 `cookies` 的客户端是访客。访客只能回答文本请求：不能上传文件，不能选择模型，也不保留历史。
-
-- 优先使用有账号的客户端。只有在它们都不可用时，访客才会收到请求；如果只剩访客，需要上传的请求会返回 `503`。
-- 配置了 Cookie 的客户端永远不会以访客身份运行。当 Google 不再接受它的 Cookie 时（无论是启动时，还是之后因过期或续期失败），错误会记入日志，该客户端停止服务，它正在处理的请求返回 `503`。之后每个本会用到它的请求都会先尝试重启它；只要 Google 仍拒绝它的 Cookie，请求就会交给其他客户端，没有可用客户端时返回 `503`。新的 Cookie 需要重启服务才会生效。
-- 启动时如果没有任何客户端能启动，服务会退出。
-- 客户端未运行，或配置了 Cookie 但 Google 不再接受时，`/health` 会把它报告为不健康。访客在运行时是健康的。`gemini.guest_mode` 决定何时因不健康的客户端返回 HTTP 503：
-
-| `guest_mode` | `/health` 返回 503 的条件 |
-| --- | --- |
-| `strict` | 任一客户端不健康 |
-| `adaptive`（默认） | 所有客户端都不健康 |
-| `permissive` | 不会因客户端状态而返回 503 |
-
-存储故障始终返回 503。
-
-### 模型
-
-模型在启动时从各个账号自动发现，无需配置。能用哪些模型、它们叫什么名字，取决于账号的订阅档位。
-
-- 请求可以使用列表中的名称，也可以使用显示名称。
-- 匹配是宽松的。版本号会被忽略，并且只要匹配到列表名称中的一个词即可，因此 `gemini-2.5-pro` 和 `pro` 都会解析为 `gemini-pro`。
-- 匹配不到任何模型的名称会以 `400` 拒绝。服务不会改用其他模型。
-
-### Gem
-
-> [!WARNING]
-> Google 已宣布[下线 Gem](https://support.google.com/gemini/answer/18560919)：个人账号自 2026-11-17 起只读，2026-12-17 移除；Workspace 账号为 2027 年 3 月，教育账号为 2027 年 6 月。服务不再创建 Gem，此功能只会在账号还保留 Gem 时，使用旧版本服务创建的 Gem。账号失去 Gem 后请把策略改回 `off`：被 Google 拒绝的 Gem 请求最多会重试约 15 秒，每次重试都会重启客户端，之后提示词才放在消息正文中发送，每个请求都是如此。
-
-默认关闭。设置 `gemini.gems.policy: fetch_only` 后，`/v1/chat/completions` 或 `/v1/responses` 请求开头的系统提示词，会改为引用旧版本服务为它保存在 Google 账号里的 Gem（Gemini 中保存的自定义指令，名为 `fastapi_policy_...`），而不再放进消息正文。没有对应 Gem 或 Gem 无法使用时，提示词放在消息正文中发送。
-
-- Gem 会一直保留在账号中，直到你删除。设置 `cleanup.enabled: true` 后，无论使用哪种策略，超过 `cleanup.unused_days`（默认 `7`）未使用的 Gem 会被清理任务删除（启动时运行一次，之后每 6 小时一次），并且每个 Gem 的描述会被更新以记录最近使用时间。
-- 访客会话和 Gemini 原生接口的请求始终把提示词放在消息正文中发送。
-
-### 输入长度
-
-输入超过 `gemini.max_chars_per_request` 的 90%（`temporary` 模式下为 81%）时，会作为 `message.txt` 附件发送给 Gemini。`server.max_request_body_bytes` 是另一项针对 HTTP 请求体的本地保护，与 Gemini 实际接受的长度无关。
-
-### 已移除的配置项
-
-`gemini.clients[].secure_1psid` 和 `secure_1psidts` 已由 `cookies` 取代：配置中仍有这两项时，服务启动即报错退出。`gemini.gems.policy: create_on_demand` 已不存在，同样会让服务启动失败。
-
-`gemini.models`、`gemini.model_strategy`、`gemini.oversized_context_strategy`、`storage.images_path`，以及 `gemini.gems` 下的 `enabled`、`create_rate_limit_per_minute`、`managed_gems_max_total`、`fetch_on_init`、`include_hidden_on_fetch`、`policies.default_policy` 和 `cleanup.require_managed_marker` 已不存在，即使出现在配置中也会被忽略。现在只由 `gemini.gems.policy` 决定是否使用 Gem。生成的媒体文件保存在 `storage.media_path` 下。
+配置项都在 [`config/config.yaml`](config/config.yaml) 中，任何一项都可以用环境变量覆盖。[CONFIG.zh.md](CONFIG.zh.md) 说明了这两种方式，以及账号、会话模式、访客与失效的 Cookie、模型、Gem 和输入长度。
 
 ## 维护
 

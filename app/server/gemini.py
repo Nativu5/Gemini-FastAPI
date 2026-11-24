@@ -72,6 +72,7 @@ from app.server.middleware import get_temp_dir, google_error_body, verify_gemini
 from app.services import GeminiClientPool
 from app.utils.helper import (
     StructuredOutputValidationError,
+    ToolCallValidationError,
     calculate_usage,
     dump_model,
     guess_extension_for_mime,
@@ -198,6 +199,12 @@ def _gemini_tools_to_internal(
     if not tools:
         return None, None
 
+    # The modes in which Google "ensures function schema adherence".
+    strict = bool(
+        tool_config
+        and tool_config.functionCallingConfig
+        and tool_config.functionCallingConfig.mode in {"ANY", "VALIDATED"}
+    )
     internal_tools: list[FunctionTool] = []
     for tool in tools:
         internal_tools.extend(
@@ -205,7 +212,8 @@ def _gemini_tools_to_internal(
                 type="function",
                 name=decl.name,
                 description=decl.description,
-                parameters=decl.parametersJsonSchema or decl.parameters,
+                parameters=decl.parametersJsonSchema or normalize_openapi_schema(decl.parameters),
+                strict=strict,
             )
             for decl in tool.functionDeclarations
         )
@@ -296,8 +304,6 @@ def _log_ignored_gemini_options(request: GeminiGenerateContentRequest) -> None:
 
     if request.toolConfig and (call_config := request.toolConfig.functionCallingConfig):
         mode = call_config.mode
-        if mode == "VALIDATED":
-            ignored.add("toolConfig.functionCallingConfig.mode")
         if call_config.allowedFunctionNames and mode not in {"ANY", "VALIDATED"}:
             ignored.add("toolConfig.functionCallingConfig.allowedFunctionNames")
 
@@ -415,6 +421,7 @@ class _SentRequest(NamedTuple):
 
     sent: _Sent
     model_name: str
+    tools: list[FunctionTool]
     tool_choice: Literal["none", "auto", "required"] | ToolChoiceFunction | None
     structured_requirement: StructuredOutputRequirement | None
 
@@ -451,7 +458,7 @@ async def _send_gemini_request(
         tmp_dir=tmp_dir,
         stream=stream,
     )
-    return _SentRequest(sent, model_name, tool_choice, structured_requirement)
+    return _SentRequest(sent, model_name, tools or [], tool_choice, structured_requirement)
 
 
 async def _generated_files(downloads: _Downloads) -> tuple[list[GeminiInlineData], str]:
@@ -495,9 +502,9 @@ async def gemini_generate_content(
 
     try:
         thoughts, visible_output, tool_calls = process_llm_output(
-            resp.thoughts, resp.text, sent.structured_requirement
+            resp.thoughts, resp.text, sent.structured_requirement, sent.tools, sent.tool_choice
         )
-    except StructuredOutputValidationError as exc:
+    except (StructuredOutputValidationError, ToolCallValidationError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):
         raise HTTPException(status_code=502, detail=choice_error)
@@ -569,10 +576,14 @@ async def _stream_reply(sent: _SentRequest, base_url: str) -> AsyncGenerator[str
 
         try:
             thoughts, visible_output, tool_calls = process_llm_output(
-                streamed.thoughts, streamed.text, sent.structured_requirement
+                streamed.thoughts,
+                streamed.text,
+                sent.structured_requirement,
+                sent.tools,
+                sent.tool_choice,
             )
-        except StructuredOutputValidationError as exc:
-            logger.warning(f"[Gemini API] Structured output rejected mid-stream: {exc}")
+        except (StructuredOutputValidationError, ToolCallValidationError) as exc:
+            logger.warning(f"[Gemini API] Model output rejected mid-stream: {exc}")
             yield _error_frame(502, str(exc))
             return
         if choice_error := _tool_choice_failure(sent.tool_choice, tool_calls):

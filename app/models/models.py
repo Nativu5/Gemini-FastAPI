@@ -43,6 +43,7 @@ class FunctionDefinition(BaseModel):
     name: str
     description: str | None = Field(default=None)
     parameters: dict[str, Any] | None = Field(default=None)
+    strict: bool | None = Field(default=None)
 
 
 class ChatCompletionRequestContentItem(BaseModel):
