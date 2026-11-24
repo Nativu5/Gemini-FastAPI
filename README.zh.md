@@ -135,7 +135,11 @@ Gemini 网页端提供的控制项比本服务所模拟的 API 少。合法的�
   - `strict: true` 时，回复不符合 Schema 即为错误：返回 `502`，流式响应中则是一个错误事件。
   - `strict: false`（两套 OpenAI 接口的默认值）或 JSON 模式下，回复按原样返回。
   - Gemini 原生的 `responseSchema` 和 `responseJsonSchema` 始终是尽力而为。
-  - 返回工具调用的那一轮不做校验。
+  - 返回工具调用的那一轮不按响应 Schema 校验。
+- **工具调用同样是在提示词中提出要求**，在回复完整后校验。
+  - 调用了请求没有提供的工具即为错误：返回 `502`，流式响应中则是一个错误事件。`tool_choice: "none"` 或 Gemini 原生 `NONE` 模式下的任何调用都属于这种情况。
+  - 函数声明了 `strict: true`，或在 Gemini 原生 `ANY`、`VALIDATED` 模式下，参数不符合 Schema 的调用也是错误。其他调用即使参数不符合 Schema 也照样返回，并在日志中记录警告。省略 `strict` 时不做强制校验，`/v1/responses` 会把它回报为 `false`。
+  - 参数保留其 JSON 类型，但只有原文符合参数 Schema 时保留原文：字符串参数的 `10001` 仍是 `"10001"`。
 - **服务无法求值的 Schema 仍会发给模型，但不会被强制执行**，也不会导致请求失败。包括非法的 JSON Schema、无法翻译成 JSON Schema 的 `responseSchema`、无法解析的 `$ref`（远程引用一律不会去抓取），以及正则关键字超出 `server.schema_validation_budget_seconds` 的情况。唯一的例外是不合法的 `responseJsonSchema`，会返回 `400`。
 - **带 Schema 的流式响应**会在校验后作为单个分块返回，因为 JSON 只有完整后才能校验。
 - **Google 的 SDK 使用默认设置即可**，文字和图片的对话（流式和非流式）以及 `responseSchema` 和函数工具都可以正常使用。字段名接受驼峰和下划线两种形式，与 Google 一致。

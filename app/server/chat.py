@@ -75,6 +75,7 @@ from app.utils.helper import (
     STRICT_SCHEMA_ADHERENCE_PROMPT,
     STRUCTURED_JSON_WRAP_HINT,
     StructuredOutputValidationError,
+    ToolCallValidationError,
     append_tool_hint_to_last_user_message,
     build_image_generation_instruction,
     build_tool_prompt,
@@ -99,10 +100,18 @@ _AVAILABLE_MODELS_CACHE: list[ModelData] | None = None
 
 
 def _echoed_tools(request: ResponseCreateRequest) -> dict[str, Any]:
-    """The tools and tool choice of a request, as its response reports them back."""
+    """The tools and tool choice of a request, as its response reports them back.
+
+    An omitted `strict` is reported as `false`: only `strict: true` is enforced here.
+    """
     choice = request.tool_choice
     return {
-        "tools": [dump_model(tool) for tool in request.tools or []],
+        "tools": [
+            {**dump_model(tool), "strict": bool(tool.strict)}
+            if isinstance(tool, FunctionTool)
+            else dump_model(tool)
+            for tool in request.tools or []
+        ],
         "tool_choice": choice or "auto" if isinstance(choice, str | None) else dump_model(choice),
     }
 
@@ -1118,6 +1127,7 @@ def _create_real_streaming_response(
     model_name: str,
     base_url: str,
     structured_requirement: StructuredOutputRequirement | None = None,
+    tools: Sequence[Any] = (),
     tool_choice: Any = None,
 ) -> StreamingResponse:
     """The SSE stream of a Chat Completions reply; the conversation is stored once it completes."""
@@ -1154,12 +1164,15 @@ def _create_real_streaming_response(
 
             try:
                 _, visible_output, detected_tool_calls = process_llm_output(
-                    streamed.thoughts, streamed.text, structured_requirement
+                    streamed.thoughts, streamed.text, structured_requirement, tools, tool_choice
                 )
             except StructuredOutputValidationError as exc:
                 yield _sse_error(
                     str(exc), "invalid_model_output", "response_format", "schema_validation_failed"
                 )
+                return
+            except ToolCallValidationError as exc:
+                yield _sse_error(str(exc), "invalid_model_output", "tools", "invalid_tool_call")
                 return
             if choice_error := _tool_choice_failure(tool_choice, detected_tool_calls):
                 yield _sse_error(
@@ -1215,6 +1228,7 @@ def _create_responses_real_streaming_response(
     base_url: str,
     structured_requirement: StructuredOutputRequirement | None = None,
     has_image_tool: bool = False,
+    tools: Sequence[FunctionTool] = (),
 ) -> StreamingResponse:
     """The event stream of a Responses reply; the conversation is stored once it completes."""
     base_event = {
@@ -1440,7 +1454,11 @@ def _create_responses_real_streaming_response(
 
             try:
                 _, assistant_text, detected_tool_calls = process_llm_output(
-                    streamed.thoughts, streamed.text, structured_requirement
+                    streamed.thoughts,
+                    streamed.text,
+                    structured_requirement,
+                    tools,
+                    request.tool_choice,
                 )
             except StructuredOutputValidationError as exc:
                 yield make_event(
@@ -1451,6 +1469,19 @@ def _create_responses_real_streaming_response(
                             "type": "invalid_model_output",
                             "param": "text.format",
                             "code": "schema_validation_failed",
+                        },
+                    },
+                )
+                return
+            except ToolCallValidationError as exc:
+                yield make_event(
+                    "error",
+                    {
+                        "error": {
+                            "message": str(exc),
+                            "type": "invalid_model_output",
+                            "param": "tools",
+                            "code": "invalid_tool_call",
                         },
                     },
                 )
@@ -1633,14 +1664,19 @@ async def create_chat_completion(
             request.model,
             base_url,
             structured_requirement,
+            request.tools or (),
             request.tool_choice,
         )
 
     try:
         thoughts, visible_output, tool_calls = process_llm_output(
-            resp_or_stream.thoughts, resp_or_stream.text, structured_requirement
+            resp_or_stream.thoughts,
+            resp_or_stream.text,
+            structured_requirement,
+            request.tools or (),
+            request.tool_choice,
         )
-    except StructuredOutputValidationError as exc:
+    except (StructuredOutputValidationError, ToolCallValidationError) as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     if choice_error := _tool_choice_failure(request.tool_choice, tool_calls):
@@ -1778,13 +1814,18 @@ async def create_response(
             base_url,
             structured_requirement,
             bool(image_tools),
+            standard_tools,
         )
 
     try:
         thoughts, assistant_text, tool_calls = process_llm_output(
-            resp_or_stream.thoughts, resp_or_stream.text, structured_requirement
+            resp_or_stream.thoughts,
+            resp_or_stream.text,
+            structured_requirement,
+            standard_tools,
+            request.tool_choice,
         )
-    except StructuredOutputValidationError as exc:
+    except (StructuredOutputValidationError, ToolCallValidationError) as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     downloads = _Downloads(base_url)
     downloads.add(resp_or_stream)

@@ -6,8 +6,8 @@ server:
   api_key: null # API key for authentication (null for no auth)
   # Local transport safety ceiling only; Gemini Web remains authoritative for its actual input limit.
   max_request_body_bytes: 268435456 # 256 MiB; set to 0 to disable the wrapper-side safeguard
-  # Regex budget for validating one response against a client-supplied JSON Schema.
-  # Exhausting it leaves the reply unverified rather than failing it.
+  # Regex budget for checking one reply against the client's JSON Schemas (response format and
+  # tool parameters). Exhausting it leaves the reply unverified rather than failing it.
   schema_validation_budget_seconds: 1.0
   https:
     enabled: false # Enable HTTPS

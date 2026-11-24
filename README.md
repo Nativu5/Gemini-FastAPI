@@ -135,7 +135,11 @@ Gemini Web offers fewer controls than the APIs this server imitates. A valid req
   - With `strict: true`, a reply that does not match the schema is an error: `502`, or an error event when streaming.
   - With `strict: false` (the default on both OpenAI surfaces) or JSON mode, the reply is returned as it is.
   - Gemini-native `responseSchema` and `responseJsonSchema` are always best effort.
-  - A turn that returns a tool call is not checked.
+  - A turn that returns a tool call is not checked against the response schema.
+- **Tool calls are requested in the prompt as well**, and checked once the reply is complete.
+  - A call to a tool the request does not offer is an error: `502`, or an error event when streaming. Any call under `tool_choice: "none"` or Gemini-native mode `NONE` counts as one.
+  - So is a call whose arguments fail the schema of a `strict: true` function, or of any function under Gemini-native modes `ANY` and `VALIDATED`. Other calls are returned even when their arguments miss the schema, with a warning in the log. An omitted `strict` is not enforced, and `/v1/responses` reports it back as `false`.
+  - Arguments keep their JSON types, except where only the text fits the parameter's schema: `10001` for a string parameter stays `"10001"`.
 - **Schemas the server cannot evaluate are still sent to the model, but not enforced**, and do not fail the request. That covers invalid JSON Schema, a `responseSchema` that does not translate to JSON Schema, a `$ref` that does not resolve (remote references are never fetched), and regex keywords that exceed `server.schema_validation_budget_seconds`. The one exception is a `responseJsonSchema` that is not valid JSON Schema, which is a `400`.
 - **Streaming with a schema** delivers the answer as one chunk, since JSON can only be validated once it is complete.
 - **Google's SDKs work with their default settings** for chats with text and images, streamed or not, and for `responseSchema` and function tools. Field names are accepted in camelCase or snake_case, as Google accepts them.
