@@ -1161,7 +1161,8 @@ def test_only_a_strict_tool_has_its_arguments_enforced(api, path, strict):
     function = {
         **GET_WEATHER,
         "parameters": {
-            **GET_WEATHER["parameters"],
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
             "required": ["city"],
             "additionalProperties": False,
         },

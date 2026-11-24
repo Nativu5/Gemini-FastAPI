@@ -705,16 +705,17 @@ def extract_tool_calls(text: str, tools: Sequence[Any]) -> tuple[str, list[AppTo
         subject = f"Arguments of tool call {name!r}"
         validator = _schema_validator(fn.parameters, subject) if fn.parameters else None
         properties = (fn.parameters or {}).get("properties")
-        if validator is None or not isinstance(properties, dict):
+        if not isinstance(properties, dict):
             properties = {}
         args_dict = {}
         for arg_name, arg_value in TAGGED_ARG_RE.findall(raw_args):
             arg_name = arg_name.strip()
-            # Evolved from the root, so a `$ref` in the parameter still resolves.
             param = properties.get(arg_name)
-            args_dict[arg_name] = _parse_tool_argument_value(
-                arg_value, None if param is None else validator.evolve(schema=param)
+            # Evolved from the root, so a `$ref` in the parameter still resolves.
+            param_validator = (
+                validator.evolve(schema=param) if validator and param is not None else None
             )
+            args_dict[arg_name] = _parse_tool_argument_value(arg_value, param_validator)
         if validator and (violation := _schema_violation(validator, args_dict, subject)):
             if fn.strict:
                 raise ToolCallValidationError(
